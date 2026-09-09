@@ -1,0 +1,1 @@
+{% extends "base.html" %}{% block content %}<h1>Shows</h1>{% for show in shows %}<p><a href="{% url 'show-detail' show.pk %}">{{ show.title }}</a> <span class="muted">({{ show.code }})</span></p>{% empty %}<p>No shows yet.</p>{% endfor %}{% endblock %}

@@ -1,0 +1,7 @@
+# Tested with Python 3.11.15
+Django==5.2.17
+asgiref==3.12.1
+sqlparse==0.6.0
+gunicorn==23.0.0
+whitenoise==6.9.0
+packaging==26.3
