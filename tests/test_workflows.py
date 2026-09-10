@@ -1,4 +1,5 @@
 from datetime import date, datetime, time, timezone as dt_timezone
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from django.core.exceptions import ValidationError
@@ -29,6 +30,23 @@ from pubtv.operations.services import (
 
 
 class SetupAndContentWorkflowTests(TestCase):
+    def test_setup_navigation_and_station_label_are_user_facing(self):
+        client = Client()
+
+        dashboard = client.get("/")
+        self.assertContains(dashboard, 'href="/setup/station/"')
+        self.assertContains(dashboard, "Create station")
+
+        station = Station.objects.create(name="PUB-TV")
+        shows = client.get("/shows/")
+        self.assertContains(shows, 'href="/shows/new/"')
+        self.assertContains(shows, "Create the first show")
+
+        create_show = client.get("/shows/new/")
+        self.assertContains(create_show, "PUB-TV")
+        self.assertNotContains(create_show, "Station object")
+        self.assertEqual(str(station), "PUB-TV")
+
     def test_station_device_show_and_episode_routes(self):
         client = Client()
         self.assertEqual(
@@ -96,6 +114,97 @@ class SetupAndContentWorkflowTests(TestCase):
         self.assertNotEqual(asset.smb_reference, delivery.reference)
         self.assertEqual(list(delivery.episodes.all()), [episode])
 
+    def test_episode_detail_exposes_contextual_schedule_actions(self):
+        station = Station.objects.create(name="PUB-TV")
+        show = Show.objects.create(station=station, title="Street Talk", code="street-talk")
+        episode = Episode.objects.create(show=show, title="Episode 1")
+        response = Client().get(f"/episodes/{episode.pk}/")
+        self.assertContains(response, f"/assignments/new/?show={show.pk}&amp;episode={episode.pk}")
+        self.assertContains(response, f"/occurrences/new/?show={show.pk}&amp;episode={episode.pk}")
+
+    def test_show_catalog_and_scheduled_occurrences_link_to_editing_and_episode(self):
+        station = Station.objects.create(name="PUB-TV")
+        show = Show.objects.create(station=station, title="Street Talk", code="street-talk")
+        episode = Episode.objects.create(show=show, title="Episode 42")
+        Occurrence.objects.create(
+            station=station, show=show, episode=episode, item_type="episode",
+            label=show.title, starts_at=datetime(2026, 1, 5, 12, tzinfo=dt_timezone.utc),
+            planned_duration_seconds=1800,
+        )
+
+        catalog = Client().get("/shows/")
+        detail = Client().get(f"/shows/{show.pk}/")
+
+        self.assertContains(catalog, f"/shows/{show.pk}/edit/")
+        self.assertContains(catalog, "Manage episodes")
+        self.assertContains(detail, "Episode 42")
+        self.assertContains(detail, f"/episodes/{episode.pk}/edit/")
+
+    def test_dashboard_planned_episode_shows_episode_title(self):
+        station = Station.objects.create(name="PUB-TV")
+        show = Show.objects.create(station=station, title="Street Talk", code="street-talk")
+        episode = Episode.objects.create(show=show, title="Episode 42")
+        Occurrence.objects.create(
+            station=station, show=show, episode=episode, item_type="episode",
+            label=show.title, starts_at=datetime(2026, 1, 5, 12, tzinfo=dt_timezone.utc),
+            planned_duration_seconds=1800,
+        )
+
+        response = Client().get("/")
+
+        self.assertContains(response, "Episode 42")
+        self.assertContains(response, "Street Talk")
+
+    def test_dashboard_item_columns_show_identity_runtime_and_gaps(self):
+        station = Station.objects.create(name="PUB-TV", timezone="America/Detroit")
+        show = Show.objects.create(station=station, title="Street Talk", code="street-talk")
+        episode = Episode.objects.create(show=show, title="Episode 42", runtime_seconds=1500)
+        first = Occurrence.objects.create(
+            station=station, show=show, episode=episode, item_type="episode",
+            label=show.title, starts_at=datetime(2026, 1, 5, 12, tzinfo=dt_timezone.utc),
+            planned_duration_seconds=1800,
+        )
+        asset = MediaAsset.objects.create(
+            episode=episode, label="station ID", kind="encoded", runtime_seconds=75,
+        )
+        second = Occurrence.objects.create(
+            station=station, asset=asset, item_type="media", label="Station ID",
+            starts_at=datetime(2026, 1, 5, 12, 35, tzinfo=dt_timezone.utc),
+            planned_duration_seconds=60,
+        )
+        Occurrence.objects.create(
+            station=station, item_type="filler", label="Filler",
+            starts_at=datetime(2026, 1, 5, 12, 36, tzinfo=dt_timezone.utc),
+            planned_duration_seconds=60,
+        )
+
+        response = Client().get("/")
+
+        self.assertContains(response, "Unique asset ID")
+        self.assertContains(response, "Gap to next programmed item")
+        self.assertContains(response, "Street Talk")
+        self.assertContains(response, "Episode 42")
+        self.assertContains(response, str(asset.asset_id))
+        self.assertContains(response, "25 min")
+        self.assertContains(response, "5 minutes gap")
+        self.assertContains(response, "Continuous")
+        self.assertContains(response, "Last item")
+        self.assertContains(response, "Not assigned")
+        self.assertNotContains(response, "30 min")
+        self.assertEqual(first.actual_runtime_seconds, 1500)
+        self.assertEqual(second.actual_runtime_seconds, 75)
+
+    def test_pubtv_user_facing_strings_use_en_dashes(self):
+        root = Path(__file__).resolve().parents[1] / "pubtv"
+        source_suffixes = {".py", ".html", ".css"}
+        offenders = [
+            path for path in root.rglob("*")
+            if path.is_file()
+            and path.suffix in source_suffixes
+            and "—" in path.read_text(encoding="utf-8")
+        ]
+        self.assertEqual(offenders, [])
+
 
 class SchedulingWorkflowTests(TestCase):
     def setUp(self):
@@ -110,7 +219,7 @@ class SchedulingWorkflowTests(TestCase):
         client = Client()
         payload = {"show": self.show.pk, "week_start": "2026-01-05", "episode": self.episode.pk, "selection_type": "premiere"}
         self.assertEqual(client.post("/assignments/new/", payload).status_code, 302)
-        self.assertEqual(client.post("/assignments/new/", payload).status_code, 200)
+        self.assertEqual(client.post("/assignments/new/", payload).status_code, 302)
         assignment = WeeklyEpisodeAssignment.objects.get()
         self.assertEqual(Occurrence.objects.filter(weekly_assignment=assignment).count(), 1)
         occurrence = Occurrence.objects.get()
@@ -140,17 +249,37 @@ class SchedulingWorkflowTests(TestCase):
         self.assertIn("Overlap", dashboard)
         self.assertNotEqual(first.pk, 0)
 
+    def test_week_clips_occurrence_crossing_into_monday(self):
+        eastern = ZoneInfo("America/Detroit")
+        Occurrence.objects.create(
+            station=self.station,
+            item_type="live",
+            label="Sunday night council meeting",
+            starts_at=datetime(2026, 1, 4, 23, 59, tzinfo=eastern),
+            planned_duration_seconds=120,
+        )
+        body = Client().get("/week/?date=2026-01-05").content.decode()
+        self.assertIn("Sunday night council meeting", body)
+        self.assertIn("12:00 AM–12:01 AM", body)
+
     def test_week_uses_monday_eastern_boundary_and_day_coverage_unions_overlaps(self):
         sunday = Occurrence.objects.create(station=self.station, item_type="filler", label="Sunday", starts_at=datetime(2026, 1, 5, 4, 0, tzinfo=dt_timezone.utc), planned_duration_seconds=120)
         monday = Occurrence.objects.create(station=self.station, item_type="filler", label="Monday", starts_at=datetime(2026, 1, 5, 5, 0, tzinfo=dt_timezone.utc), planned_duration_seconds=120)
         day = Client().get("/day/?date=2026-01-05").content.decode()
-        self.assertIn("Planned coverage: 120 seconds", day)
+        self.assertIn("Planned coverage: 2 minutes", day)
         self.assertNotIn("Sunday", day)
         self.assertIn("Monday", day)
         week = Client().get("/week/?date=2026-01-11")
         self.assertEqual(week.status_code, 200)
         self.assertIn("Monday", week.content.decode())
         self.assertNotEqual(sunday.pk, monday.pk)
+
+    def test_week_has_monday_based_navigation_and_empty_state(self):
+        response = Client().get("/week/?date=2026-01-11")
+        body = response.content.decode()
+        self.assertContains(response, "Previous week")
+        self.assertContains(response, "Next week")
+        self.assertIn("No planned items for this week", body)
 
     def test_dst_wall_clock_stays_local_and_day_filter_does_not_drift(self):
         self.slot.start_time = time(5)

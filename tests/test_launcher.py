@@ -6,20 +6,45 @@ from unittest.mock import patch
 
 
 class LauncherTests(unittest.TestCase):
-    def test_uses_gunicorn_next_to_current_interpreter(self):
+    def test_default_data_dir(self):
+        from pubtv.config import launcher
+        self.assertEqual(launcher.default_data_dir(), Path.home() / "Library" / "Application Support" / "PUB-TV")
+
+    def test_data_dir_override_creates_protected_secret(self):
         from pubtv.config import launcher
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            executable = Path(temp_dir) / "python"
-            gunicorn = executable.with_name("gunicorn")
-            executable.touch()
-            gunicorn.touch()
-            with patch.dict(os.environ, {"PUBTV_DATA_DIR": temp_dir}, clear=False), \
-                    patch.object(launcher.sys, "executable", str(executable)), \
-                    patch.object(launcher.os, "execv") as execv, \
-                    patch("django.core.management.call_command") as call_command, \
-                    patch("django.setup"):
-                launcher.main()
-            self.assertEqual(execv.call_args.args[0], str(gunicorn))
-            self.assertEqual(execv.call_args.args[1][1:3], ["--bind", "127.0.0.1:8000"])
-            self.assertEqual([call.args[0] for call in call_command.call_args_list], ["migrate", "collectstatic"])
+            with patch.dict(os.environ, {"PUBTV_DATA_DIR": temp_dir}, clear=False):
+                path = launcher.prepare_data_dir()
+            self.assertEqual(path, Path(temp_dir))
+            self.assertEqual(path.stat().st_mode & 0o777, 0o700)
+            self.assertEqual((path / "secret.key").stat().st_mode & 0o777, 0o600)
+
+    def test_wait_until_ready_accepts_test_port(self):
+        from pubtv.config import launcher
+        with patch("socket.create_connection") as connect:
+            self.assertTrue(launcher.wait_until_ready("127.0.0.1", 43123, timeout=0.2))
+            connect.assert_called_once_with(("127.0.0.1", 43123), timeout=0.25)
+
+    def test_main_uses_loopback_port_and_browser_helper(self):
+        from pubtv.config import launcher
+        app = object()
+        with tempfile.TemporaryDirectory() as temp_dir, \
+                patch.dict(os.environ, {"PUBTV_DATA_DIR": temp_dir, "PUBTV_PORT": "43210"}, clear=False), \
+                patch.object(launcher, "_load_application", return_value=app), \
+                patch.object(launcher, "_open_browser_when_ready") as browser, \
+                patch.object(launcher, "run_gunicorn") as gunicorn:
+            launcher.main()
+        browser.assert_called_once_with("127.0.0.1", 43210)
+        gunicorn.assert_called_once_with(app, "127.0.0.1", 43210)
+
+    def test_main_sets_private_umask(self):
+        from pubtv.config import launcher
+        with tempfile.TemporaryDirectory() as temp_dir, \
+                patch.dict(os.environ, {"PUBTV_DATA_DIR": temp_dir}, clear=False), \
+                patch.object(launcher.os, "umask") as umask, \
+                patch.object(launcher, "_load_application", return_value=object()), \
+                patch.object(launcher, "_open_browser_when_ready"), \
+                patch.object(launcher, "run_gunicorn"):
+            launcher.main()
+        umask.assert_called_once_with(0o077)

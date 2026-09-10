@@ -1,0 +1,8 @@
+{% extends "base.html" %}
+{% block page_title %}Upcoming shows · PUB-TV{% endblock %}
+{% block content %}
+<div class="page-heading"><p class="eyebrow">Schedule · Upcoming shows</p><h1>Upcoming shows</h1><p class="lede">A quick view of the shows reserved in the next {{ days }} day{{ days|pluralize }}. Each show uses its complete reserved time slot.</p></div>
+<form class="calendar-filter" method="get"><label for="schedule-date">Starting date</label><input id="schedule-date" type="date" name="date" value="{{ selected_date|date:'Y-m-d' }}"><label for="schedule-days">Days</label><input id="schedule-days" type="number" name="days" min="1" max="31" value="{{ days }}"><button type="submit">Update view</button></form>
+<p>{{ selected_date|date:"l, F j, Y" }} through {{ end_date|date:"l, F j, Y" }}</p>
+{% for item in items %}<article class="list-card"><h2>{{ item.show.title }}</h2><p><strong>{{ item.starts_at|date:"l, F j" }}</strong> · {{ item.starts_at|date:"g:i A" }} to {{ item.ends_at|date:"g:i A" }}</p></article>{% empty %}<div class="empty-state"><h2>No upcoming shows</h2><p>No active recurring show reservations fall in this date range.</p></div>{% endfor %}
+{% endblock %}

@@ -1,1 +1,7 @@
-{% extends "base.html" %}{% block content %}<h1>Shows</h1>{% for show in shows %}<p><a href="{% url 'show-detail' show.pk %}">{{ show.title }}</a> <span class="muted">({{ show.code }})</span></p>{% empty %}<p>No shows yet.</p>{% endfor %}{% endblock %}
+{% extends "base.html" %}
+{% block content %}
+<div class="page-heading"><p class="eyebrow">Catalog</p><h1>Shows</h1><p class="lede">Open a show to manage its episodes and weekly schedule.</p></div>
+<form class="calendar-filter" method="get"><label for="show-type-filter">Filter by show type</label><select id="show-type-filter" name="show_type"><option value="">All types</option>{% for value,label in show_types %}<option value="{{ value }}"{% if show_type_filter == value %} selected{% endif %}>{{ label }}</option>{% endfor %}</select><button type="submit">Apply filter</button></form>
+<p><a class="button-link primary" href="{% url 'show-create' %}">Add a show</a></p>
+{% for show in shows %}<article class="list-card"><h2><a href="{% url 'show-detail' show.pk %}">{{ show.title }}</a></h2>{% if show.description %}<p>{{ show.description }}</p>{% endif %}<p class="muted">Show code: {{ show.code }}{% if show.show_type %} · Type: {% if show.show_type == "other" %}Other – {{ show.show_type_other }}{% else %}{{ show.get_show_type_display }}{% endif %}{% endif %} · {{ show.episode_count }} episode{{ show.episode_count|pluralize }}</p><p><a class="button-link" href="{% url 'show-detail' show.pk %}">Manage episodes</a> <a class="button-link" href="{% url 'show-edit' show.pk %}">Edit show</a></p></article>{% empty %}<div class="empty-state"><p>No shows yet.</p><a class="button-link primary" href="{% url 'show-create' %}">Create the first show</a></div>{% endfor %}
+{% endblock %}

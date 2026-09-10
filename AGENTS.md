@@ -21,7 +21,7 @@ Label statements as **proposed**, **accepted**, or **open**. Proposed material i
 - Initial operation is one computer with one owner/editor. Do not overbuild roles or permissions; public access is deferred.
 - Restrict the server to loopback by default. Shared LAN access and accounts are later options only if needed.
 - V1 covers playlist preparation and media-management notes while retaining scheduling, catalog, and history as core scope. Leightronix file/schedule exchange is a future roadmap item, not an MVP prerequisite.
-- Replays always use the same episode as that week's premiere. If there is no new premiere, staff choose an older episode case by case; there is no automatic rerun or slate selection.
+- Episode reuse follows a premiere-to-premiere broadcast cycle, not the Monday calendar boundary. A replay after a premiere uses that premiere's episode until the next premiere; a replay earlier in the calendar week than the premiere still belongs to the prior cycle. If there is no new premiere, staff choose an older episode case by case. The app may suggest the next pending episode and next configured premiere, but the owner confirms the plan; there is no silent assignment.
 - V1 plans the full 24-hour broadcast day, including filler, station IDs, PSAs, live events, and programs. The app plans the whole day manually; it does not exchange schedules or control broadcast equipment.
 - Reusable non-episode assets and timed live entries are first-class schedule items.
 - Keep a complete planned day distinct from evidence that a day actually aired.

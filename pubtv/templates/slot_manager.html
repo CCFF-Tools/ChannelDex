@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block page_title %}{{ show.title }} weekly times · PUB-TV{% endblock %}
+{% block content %}
+<div class="page-heading"><p class="eyebrow">Catalog · {{ show.title }}</p><h1>Weekly time slots</h1><p class="lede">Manage every regular air time for this show. One active slot starts each new premiere cycle; later replay slots keep using that episode until the next premiere.</p></div>
+<div class="action-bar"><a class="button-link primary" href="{% url 'slot-create' %}?show={{ show.pk }}">Add weekly time</a><a class="button-link" href="{% url 'show-slot-duration-edit' show.pk %}">{% if show.slot_duration_seconds %}Change{% else %}Set{% endif %} show time slot length</a><a class="button-link" href="{% url 'assignment-create' %}?show={{ show.pk }}">Plan next premiere</a><a class="button-link" href="{% url 'show-detail' show.pk %}">Back to show</a></div>
+<p><strong>Time slot length for every occurrence:</strong> {{ show.slot_duration_label }}</p>
+{% if warning %}<aside class="alerts" role="alert"><strong>Needs attention</strong><p>{{ warning }}</p></aside>{% endif %}
+<table><thead><tr><th>Day</th><th>Local start</th><th>Role</th><th>Effective dates</th><th></th></tr></thead><tbody>
+{% for slot in slots %}<tr><td>{{ slot.get_weekday_display }}</td><td>{{ slot.start_time|time:"g:i A" }}</td><td>{% if slot.is_premiere %}<span class="badge premiere">Premiere</span>{% else %}<span class="badge replay">Replay</span>{% endif %}</td><td>{{ slot.active_from|default:"Ongoing" }}{% if slot.active_until %} through {{ slot.active_until }}{% endif %}</td><td><a href="{% url 'slot-edit' slot.pk %}">Edit</a></td></tr>
+{% empty %}<tr><td colspan="5">No weekly times yet. Set the show time slot length, then <a href="{% url 'slot-create' %}?show={{ show.pk }}">add the premiere time</a>.</td></tr>{% endfor %}
+</tbody></table>
+<p class="muted">Changing a definition affects future materialization only. Existing planned and historical occurrences retain their recorded times.</p>
+{% endblock %}

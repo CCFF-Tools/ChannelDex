@@ -1,18 +1,169 @@
 # PUB-TV
 
-PUB-TV is a local-first scheduling and logging app for one owner/editor on one computer. The product plan, data model, architecture, decisions, and Python + Django + SQLite stack were approved for implementation on 2026-09-09. This repository now contains an implemented V1 scaffold; packaging and operational pilot work remain separate.
+PUB-TV is a private, local application for planning a television station's full
+broadcast day. It brings the program catalog, episode queue, recurring airtimes,
+one-off schedule items, media-preparation notes, schedule-upload records, and
+broadcast history into one place.
 
-The accepted initial runtime, packaging, and testing target is macOS 26.x on Apple Silicon on the development machine. Intel Mac support is a later compatibility-validation target and is not yet proven; no single universal binary is promised. Packaging mechanics, installation restrictions, and the final distribution form remain open.
+It is designed for one PUB-TV owner/editor using one Mac. It runs on that Mac and
+opens in a web browser; ordinary use does not require cloud hosting or an internet
+connection.
 
-The first station boundary is PUB-TV. Scheduling, catalog, and broadcast history remain core; V1 manually plans the complete 24-hour day, including programs, filler, station IDs, PSAs, and live events, alongside playlist preparation and media-management notes. Reusable non-episode assets and timed live entries are first-class schedule items. Preserve confirmed history with source and actor provenance. Manual history entry comes first; Leightronix file/schedule exchange and broadcast control remain future roadmap items. The design should not require vendor APIs, external hosting, cloud or CDN runtime services, or an AI runtime.
+> **Current status:** PUB-TV is a locally tested V1 application, not a signed or
+> notarized product release. The current packaged build targets Apple Silicon on
+> macOS 26.x. Intel compatibility, installer behavior, signing, notarization, and
+> general distribution have not been validated.
 
-Replays always use the same episode as that week's premiere. When there is no new premiere, staff choose an older episode case by case. Keep a complete planned day distinct from evidence that it actually aired. The scheduling week starts Monday at 00:00 Eastern on a macOS host. Private in-app day/week/agenda views are V1; export is a near-term roadmap follow-up. Public access and shared LAN/accounts are deferred.
+## What PUB-TV does
 
-Planning documents:
+- Plans the complete 24-hour day, including programs, episodes, station IDs,
+  PSAs, filler, reusable assets, and timed live events.
+- Shows day, Monday-through-Sunday week, and agenda views with reserved and
+  available time.
+- Warns about overlaps, programs that exceed their fixed slots, and gaps shorter
+  than the 60-second ideal. It does not silently move, trim, or fill anything.
+- Keeps an ordered upcoming-premiere queue for each show.
+- Plans an episode from its premiere through the following replays until the next
+  premiere cycle begins.
+- Records deliveries, media references, workflow milestones, preparation facts,
+  device programming, and exact uploaded schedule revisions.
+- Keeps planned schedules separate from reports or log-backed evidence that
+  something actually aired.
+- Retains an audit trail for important changes.
 
-- [Product plan](docs/PRODUCT_PLAN.md)
-- [Data model](docs/DATA_MODEL.md)
-- [Architecture](docs/ARCHITECTURE.md)
-- [Decisions](docs/DECISIONS.md)
+PUB-TV records and organizes the owner's work. It does **not** fetch files from
+Dropbox, email, or SMB; encode or move media; upload schedules; control broadcast
+equipment; confirm that content aired; or publish a public calendar.
 
-The implemented scaffold covers local Django/SQLite records, server-rendered planning views, recurrence and weekly assignment rules, preparation/history provenance, conflict warnings, and stale-edit checks. It does not claim macOS packaging, vendor exchange, device automation, public/LAN access, or production deployment. Proposed, accepted, and open statements remain clearly distinguished in project documentation.
+## Starting and stopping PUB-TV
+
+### Packaged Mac application
+
+If you have been given a local `PUB-TV.app` build:
+
+1. Open `PUB-TV.app`.
+2. Wait for PUB-TV to open in the default browser.
+3. Keep the application running while you use the browser interface.
+4. When finished, use **Quit PUB-TV** in the upper-right corner of the page.
+
+Closing the browser tab or window does not stop PUB-TV. You can also terminate the
+application from the Dock or Activity Monitor. The packaged application listens
+only on this computer at `127.0.0.1:8000` by default.
+
+The package is currently unsigned. macOS may prevent it from opening depending on
+local security policy; distribution and installation guidance are still open work.
+Developers can build and run the current source by following the
+[developer guide](docs/DEVELOPMENT.md).
+
+## First-time setup
+
+On the first launch:
+
+1. Select **Settings → Station** and create the PUB-TV station record. Station
+   time is interpreted in Eastern Time (`America/Detroit`).
+2. Select **Settings → Devices** and add each playback or scheduling target that
+   needs to appear in operational records.
+3. Select **Catalog → Shows**, add a show, and then set its weekly airtimes from
+   the show workflow.
+4. Add the show's producer and episodes. Put pending episodes in the order the
+   producer wants them to premiere.
+
+Producer contacts, submission references, and storage paths are private local
+metadata. PUB-TV does not send them to another service.
+
+## Everyday workflow
+
+### 1. Maintain the catalog
+
+Open **Catalog → Shows** to add or update shows and their recurring time slots.
+Open a show to add episodes and review its pending producer-directed queue. Lower
+queue numbers premiere first unless the producer directs otherwise.
+
+An episode page keeps several kinds of information deliberately separate:
+
+- delivery details describe how the submission was made available;
+- media references identify source and encoded files without storing the files;
+- workflow stages record manual progress from received through scheduled;
+- planned occurrences show intended broadcast use; and
+- broadcast history provides separate evidence about what aired.
+
+### 2. Plan a premiere cycle
+
+Use **Schedule → Plan next premiere** to choose the episode for a show's next
+premiere. PUB-TV may suggest the next pending episode and next configured premiere,
+but the owner must confirm the choice.
+
+Replays use the episode from the most recent premiere until the next premiere. The
+cycle does not reset on Monday: for example, a Monday replay before a Wednesday
+premiere still belongs to the preceding premiere cycle. If there is no new
+premiere, choose an older episode explicitly; PUB-TV never makes that assignment
+silently.
+
+### 3. Complete the broadcast day
+
+Use **Schedule → Day** or **Week** to review reserved and available time. Add
+programs, IDs, PSAs, filler, live events, or other items with **Add schedule item**.
+Program start times remain fixed.
+
+The calendar distinguishes:
+
+- **Reserved:** a planned item or active recurring reservation;
+- **Available:** time outside reservations; and
+- **Virtual-channel filler:** a reserved remainder after shorter known content.
+
+A plan is only intent. It does not mean that the day was uploaded or aired.
+
+### 4. Record preparation and scheduling work
+
+Open **Schedule → What needs scheduling today** for planned items that do not yet
+have an active upload record covering their exact current revision. For each item,
+record preparation and device-programming facts as the real work is completed.
+
+When the external schedule has actually been uploaded, use **Record schedule
+upload** and identify the device and every occurrence revision it covers. Editing
+a covered schedule item makes that older coverage stale; record a new upload for
+the revised item. An upload can later be superseded or invalidated without erasing
+its history.
+
+### 5. Record what actually happened
+
+Use **Operations → History and workflow** to review plans, uploads, audit events,
+and airing evidence. A sighting or producer report is stored as an attributed
+report. A checked device log can be stored as log-verified evidence. Corrections
+remain linked to the earlier record instead of replacing history.
+
+Scheduled, reported, and log-verified are different states. None is silently
+promoted to another.
+
+## Data and backups
+
+The packaged application stores its database and supporting runtime data in:
+
+```text
+~/Library/Application Support/PUB-TV
+```
+
+PUB-TV stores records and file references, not the source or encoded media itself.
+Backups are manual in V1:
+
+1. Quit PUB-TV and confirm it is no longer running.
+2. Copy the entire `PUB-TV` data folder to the chosen private backup location.
+3. Keep the backup access-controlled because it can contain contacts and private
+   operational metadata.
+
+Do not copy only the visible SQLite file while the application is running. A live
+copy can miss SQLite sidecar data and other files needed for a consistent restore.
+Restore procedures have not yet been packaged as an end-user feature, so retain an
+untouched backup before attempting a manual restore.
+
+## Important limitations
+
+- One owner/editor on one computer; there are no user accounts or shared-LAN mode.
+- No automatic file download, network mount, transcoding, or media validation.
+- No Leightronix or TelVue schedule exchange and no broadcast-device control.
+- No public calendar or calendar export.
+- No automatic proof of airing.
+- No signed/notarized installer or validated Intel Mac build.
+
+For implementation details, local source setup, tests, packaging, and the product
+contracts, see the [developer guide](docs/DEVELOPMENT.md).

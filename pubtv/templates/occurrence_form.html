@@ -1,1 +1,11 @@
-{% extends "base.html" %}{% block content %}<h1>{{ title }}</h1><form method="post">{% csrf_token %}{{ form.as_p }}{% if occurrence %}<input type="hidden" name="expected_revision" value="{{ occurrence.revision }}">{% endif %}<button type="submit">Save</button></form>{% endblock %}
+{% extends "base.html" %}
+{% block page_title %}{{ title }} · PUB-TV{% endblock %}
+{% block content %}
+<div class="page-heading"><h1>{{ title }}</h1><p class="lede">Plan a fixed-start broadcast item. PUB-TV flags gaps, overlaps, and over-slot episodes; it never shifts or trims items automatically.</p></div>
+<form method="post" class="stacked-form" novalidate>{% csrf_token %}
+  {% if form.non_field_errors %}<div class="form-errors" role="alert">{{ form.non_field_errors }}</div>{% endif %}
+  {% for field in form.visible_fields %}<div class="field{% if field.errors %} has-error{% endif %}">{{ field.label_tag }}{{ field }}{% if field.help_text %}<div class="helptext">{{ field.help_text }}</div>{% endif %}{{ field.errors }}</div>{% endfor %}
+  {% for hidden in form.hidden_fields %}{{ hidden }}{% endfor %}
+  <button class="primary" type="submit">Save schedule item</button>
+</form>
+{% endblock %}

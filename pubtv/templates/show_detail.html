@@ -1,1 +1,13 @@
-{% extends "base.html" %}{% block content %}<h1>{{ show.title }}</h1><p>Producer: {{ show.producer_name|default:"Not recorded" }}{% if show.producer_contact %} · private contact: {{ show.producer_contact }}{% endif %}</p><h2>Pending producer-directed queue</h2>{% for episode in pending %}<p>{{ episode.intended_air_order|default:"—" }} · {{ episode.title }}{% if episode.intended_premiere_date %} · intended {{ episode.intended_premiere_date }}{% endif %}</p>{% empty %}<p>No pending episodes.</p>{% endfor %}<h2>Scheduled occurrences</h2>{% for o in show.occurrences.all %}<p>{{ o.starts_at|date:"Y-m-d H:i" }} · {{ o.label }}</p>{% endfor %}{% endblock %}
+{% extends "base.html" %}
+{% block content %}
+<h1>{{ show.title }}</h1>
+{% if show.description %}<p>{{ show.description }}</p>{% endif %}
+<p>Producer: {{ show.producer_name|default:"Not recorded" }}{% if show.producer_phone %} · {{ show.producer_phone }}{% endif %}{% if show.producer_email %} · {{ show.producer_email }}{% endif %}{% if show.legacy_producer_contact %} · legacy contact: {{ show.legacy_producer_contact }}{% endif %}</p>
+<p><a class="button-link" href="{% url 'show-edit' show.pk %}">Edit show</a> <a class="button-link primary" href="{% url 'episode-create' %}?show={{ show.pk }}">Add episode</a></p>
+<h2>Episodes</h2>
+{% for episode in show.episodes.all %}<p><a href="{% url 'episode-detail' episode.pk %}">{{ episode.title }}</a> · <a href="{% url 'episode-edit' episode.pk %}">Edit episode</a>{% if episode.status == 'pending' %} · Pending{% endif %}</p>{% empty %}<p>No episodes yet.</p>{% endfor %}
+<h2>Queued episodes</h2>
+{% for episode in pending %}<p>{{ episode.intended_air_order|default:"–" }} · {{ episode.title }}{% if episode.intended_premiere_date %} · intended {{ episode.intended_premiere_date }}{% endif %}</p>{% empty %}<p>No queued episodes.</p>{% endfor %}
+<h2>Scheduled occurrences</h2>
+{% for o in show.occurrences.all %}<p>{{ o.starts_at|date:"Y-m-d H:i" }} · {{ o.label }}{% if o.episode %} · <a href="{% url 'episode-detail' o.episode.pk %}">{{ o.episode.title }}</a>{% endif %}</p>{% empty %}<p>No scheduled occurrences yet.</p>{% endfor %}
+{% endblock %}

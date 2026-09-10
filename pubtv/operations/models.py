@@ -1,26 +1,84 @@
-from datetime import timedelta
+from datetime import date, timedelta
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from django.core.exceptions import ValidationError
 from django.db import models
 from django.utils import timezone
+import uuid
+
+def _duration_label(seconds):
+    if seconds is None:
+        return "Not recorded"
+    hours, remainder = divmod(seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    parts = []
+    if hours: parts.append(f"{hours} hr")
+    if minutes: parts.append(f"{minutes} min")
+    if seconds: parts.append(f"{seconds} sec")
+    return " ".join(parts) or "0 min"
 
 class Station(models.Model):
     name = models.CharField(max_length=120, default="PUB-TV")
     timezone = models.CharField(max_length=64, default="America/Detroit")
+    def __str__(self): return self.name
 
 class Show(models.Model):
+    DELIVERY_METHODS = [("google_drive", "Google Drive"), ("dropbox", "Dropbox"), ("email_link", "Email link"), ("smb_transfer", "SMB Transfer"), ("other", "Other")]
+    SHOW_TYPES = [("arts_and_culture", "Arts and Culture"), ("religious", "Religious"), ("opinion", "Opinion"), ("public_affairs", "Public Affairs"), ("government", "Government"), ("education", "Education"), ("community", "Community"), ("entertainment", "Entertainment"), ("sports", "Sports"), ("other", "Other")]
     station = models.ForeignKey(Station, on_delete=models.CASCADE, related_name="shows")
     title = models.CharField(max_length=160)
     code = models.SlugField(max_length=40)
+    show_type = models.CharField(max_length=24, choices=SHOW_TYPES, blank=True)
+    show_type_other = models.CharField(max_length=160, blank=True)
+    description = models.TextField(blank=True)
     producer_name = models.CharField(max_length=160, blank=True)
-    producer_contact = models.CharField(max_length=240, blank=True)
+    producer_phone = models.CharField(max_length=80, blank=True)
+    producer_email = models.EmailField(blank=True)
+    legacy_producer_contact = models.CharField(max_length=240, blank=True)
+    website = models.URLField(blank=True)
+    youtube = models.URLField(blank=True)
+    facebook = models.URLField(blank=True)
+    instagram = models.URLField(blank=True)
+    primary_delivery_method = models.CharField(max_length=20, choices=DELIVERY_METHODS, blank=True)
+    primary_delivery_other = models.CharField(max_length=160, blank=True)
+    slot_duration_seconds = models.PositiveIntegerField(null=True, blank=True)
     class Meta:
         constraints = [models.UniqueConstraint(fields=["station", "code"], name="unique_station_show_code")]
     def __str__(self): return self.title
+    def clean(self):
+        super().clean()
+        if self.primary_delivery_method == "other" and not self.primary_delivery_other.strip():
+            raise ValidationError({"primary_delivery_other": "Describe the other delivery method."})
+        if self.show_type == "other" and not self.show_type_other.strip():
+            raise ValidationError({"show_type_other": "Describe the other show type."})
+
+    @property
+    def slot_duration_label(self):
+        return _duration_label(self.slot_duration_seconds)
+
+class Producer(models.Model):
+    station = models.ForeignKey(Station, on_delete=models.CASCADE, related_name="producers")
+    first_name = models.CharField(max_length=80)
+    last_name = models.CharField(max_length=80)
+    phone = models.CharField(max_length=80, blank=True)
+    email = models.EmailField(blank=True)
+    legacy_contact = models.CharField(max_length=240, blank=True)
+    external_membership_number = models.CharField(max_length=120, blank=True)
+    notes = models.TextField(blank=True)
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ["last_name", "first_name", "pk"]
+
+    def __str__(self):
+        return f"{self.first_name} {self.last_name}".strip()
 
 class Episode(models.Model):
     show = models.ForeignKey(Show, on_delete=models.CASCADE, related_name="episodes")
     title = models.CharField(max_length=160)
-    producer_id = models.CharField(max_length=120, blank=True)
+    producer = models.ForeignKey(
+        Producer, null=True, blank=True, on_delete=models.PROTECT, related_name="episodes"
+    )
+    legacy_producer_reference = models.CharField(max_length=120, blank=True)
     intended_air_order = models.PositiveIntegerField(null=True, blank=True)
     intended_premiere_date = models.DateField(null=True, blank=True)
     runtime_seconds = models.PositiveIntegerField(null=True, blank=True)
@@ -28,47 +86,161 @@ class Episode(models.Model):
     received_at = models.DateTimeField(null=True, blank=True)
     def __str__(self): return f"{self.show.code}: {self.title}"
 
+    def clean(self):
+        super().clean()
+        if self.producer_id and self.producer.station_id != self.show.station_id:
+            raise ValidationError("Producer must belong to the same station as the episode's show.")
+
+    @property
+    def latest_workflow_stage(self):
+        milestone = max(
+            self.workflow_milestones.all(),
+            key=lambda item: EpisodeWorkflowMilestone.STAGE_ORDER[item.stage],
+            default=None,
+        )
+        return milestone.get_stage_display() if milestone else "Not started"
+
+    @property
+    def runtime_label(self):
+        return _duration_label(self.runtime_seconds)
+
+class EpisodeWorkflowMilestone(models.Model):
+    STAGES = [
+        ("received", "Received"),
+        ("downloaded", "Downloaded"),
+        ("encoded", "Encoded"),
+        ("transferred", "Transferred"),
+        ("scheduled", "Scheduled"),
+    ]
+    STAGE_ORDER = {value: index for index, (value, _) in enumerate(STAGES)}
+
+    episode = models.ForeignKey(
+        Episode, on_delete=models.CASCADE, related_name="workflow_milestones"
+    )
+    stage = models.CharField(max_length=16, choices=STAGES)
+    completed_at = models.DateTimeField(default=timezone.now)
+    actor = models.CharField(max_length=120, default="owner")
+    provenance = models.CharField(max_length=200, default="manual")
+    notes = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ["completed_at", "pk"]
+
+    def clean(self):
+        super().clean()
+        if self.episode_id:
+            later = self.episode.workflow_milestones.exclude(pk=self.pk).filter(
+                stage__in=[
+                    value
+                    for value, index in self.STAGE_ORDER.items()
+                    if index > self.STAGE_ORDER.get(self.stage, -1)
+                ]
+            )
+            if later.exists():
+                raise ValidationError(
+                    "An earlier workflow stage cannot be recorded after a later stage. "
+                    "Review the existing milestones first."
+                )
+
 class MediaAsset(models.Model):
+    asset_id = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
     episode = models.ForeignKey(Episode, null=True, blank=True, on_delete=models.SET_NULL, related_name="assets")
     label = models.CharField(max_length=160)
+    file_name = models.CharField(max_length=255, blank=True)
     kind = models.CharField(max_length=16, choices=[("source", "Source"), ("encoded", "Encoded")])
     version = models.CharField(max_length=80, default="v1")
     runtime_seconds = models.PositiveIntegerField(null=True, blank=True)
     smb_reference = models.CharField(max_length=300, blank=True)
 
+    def __str__(self):
+        return self.file_name or self.label or f"Asset for {self.episode or 'unlinked episode'}"
+
+    def save(self, *args, **kwargs):
+        # Keep the legacy label populated while filename becomes the owner-facing field.
+        if self.file_name and not self.label:
+            self.label = self.file_name
+        elif self.label and not self.file_name:
+            self.file_name = self.label
+        super().save(*args, **kwargs)
+
 class Delivery(models.Model):
-    method = models.CharField(max_length=16, choices=[("dropbox", "Dropbox"), ("email", "Email"), ("smb", "SMB")])
+    METHOD_CHOICES = Show.DELIVERY_METHODS
+    method = models.CharField(max_length=20, choices=METHOD_CHOICES)
+    other_method = models.CharField(max_length=160, blank=True)
     reference = models.CharField(max_length=300)
     notified_at = models.DateTimeField(null=True, blank=True)
     received_at = models.DateTimeField(null=True, blank=True)
     notes = models.TextField(blank=True)
     episodes = models.ManyToManyField(Episode, blank=True, related_name="deliveries")
+    def __str__(self):
+        return self.reference or self.get_method_display()
+    def clean(self):
+        super().clean()
+        if self.method == "other" and not self.other_method.strip():
+            raise ValidationError({"other_method": "Describe the other delivery method."})
 
 class Device(models.Model):
     name = models.CharField(max_length=120, unique=True)
 
+    def __str__(self):
+        return self.name
+
 class RecurrenceSlot(models.Model):
-    WEEKDAYS = [(i, str(i)) for i in range(7)]
+    WEEKDAYS = list(enumerate(("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")))
     station = models.ForeignKey(Station, on_delete=models.CASCADE, related_name="slots")
     show = models.ForeignKey(Show, null=True, blank=True, on_delete=models.CASCADE, related_name="slots")
     weekday = models.PositiveSmallIntegerField(choices=WEEKDAYS)
     start_time = models.TimeField()
     duration_seconds = models.PositiveIntegerField()
+    is_premiere = models.BooleanField(default=False)
     active_from = models.DateField(null=True, blank=True)
     active_until = models.DateField(null=True, blank=True)
+    def __str__(self):
+        show = self.show.title if self.show else "Unassigned show"
+        start = self.start_time.strftime("%H:%M") if hasattr(self.start_time, "strftime") else str(self.start_time)
+        return f"{show} · {self.get_weekday_display()} {start}"
     def clean(self):
         if self.show_id and self.show and self.station_id != self.show.station_id:
             raise ValidationError("Recurrence slot show must belong to its station.")
         if self.active_from and self.active_until and self.active_from > self.active_until:
             raise ValidationError("Recurrence slot active dates are reversed.")
+        if self.is_premiere and self.show_id:
+            start = self.active_from or date.min
+            end = self.active_until or date.max
+            overlapping = RecurrenceSlot.objects.filter(show_id=self.show_id, is_premiere=True).exclude(pk=self.pk)
+            overlapping = overlapping.filter(
+                models.Q(active_until__isnull=True) | models.Q(active_until__gte=start),
+                models.Q(active_from__isnull=True) | models.Q(active_from__lte=end),
+            )
+            if overlapping.exists():
+                raise ValidationError(
+                    "This show already has a premiere slot active during these effective dates."
+                )
+
+    def save(self, *args, **kwargs):
+        if self.show_id and not self.pk and not self.is_premiere:
+            self.is_premiere = not RecurrenceSlot.objects.filter(show_id=self.show_id).exists()
+        if self.show_id and not self.show.slot_duration_seconds and self.duration_seconds:
+            Show.objects.filter(pk=self.show_id, slot_duration_seconds=None).update(
+                slot_duration_seconds=self.duration_seconds
+            )
+            self.show.slot_duration_seconds = self.duration_seconds
+        super().save(*args, **kwargs)
+
+    @property
+    def duration_label(self):
+        return _duration_label(self.duration_seconds)
 
 class WeeklyEpisodeAssignment(models.Model):
     show = models.ForeignKey(Show, on_delete=models.CASCADE, related_name="weekly_assignments")
     week_start = models.DateField()
+    premiere_date = models.DateField(null=True, blank=True)
     episode = models.ForeignKey(Episode, null=True, blank=True, on_delete=models.SET_NULL)
     selection_type = models.CharField(max_length=16, choices=[("premiere", "New premiere"), ("rerun", "Selected older rerun"), ("none", "No program")])
     class Meta:
         constraints = [models.UniqueConstraint(fields=["show", "week_start"], name="unique_show_week")]
+    def __str__(self):
+        return f"{self.show.title} · week of {self.week_start:%Y-%m-%d}"
     def clean(self):
         if self.week_start and self.week_start.weekday() != 0:
             raise ValidationError("Week start must be a Monday.")
@@ -78,6 +250,16 @@ class WeeklyEpisodeAssignment(models.Model):
             raise ValidationError("A no-program assignment cannot include an episode.")
         if self.selection_type in {"premiere", "rerun"} and not self.episode_id:
             raise ValidationError("A premiere or rerun assignment requires an episode.")
+        if self.premiere_date and self.show_id:
+            premiere_slots = self.show.slots.filter(is_premiere=True)
+            matching = [
+                slot for slot in premiere_slots
+                if slot.weekday == self.premiere_date.weekday()
+                and (not slot.active_from or slot.active_from <= self.premiere_date)
+                and (not slot.active_until or slot.active_until >= self.premiere_date)
+            ]
+            if len(matching) != 1:
+                raise ValidationError({"premiere_date": "Choose a date matching this show's active premiere time."})
 
 class Occurrence(models.Model):
     TYPES = [(x, x.replace("_", " ").title()) for x in ("episode", "media", "station_id", "psa", "filler", "live")]
@@ -94,6 +276,30 @@ class Occurrence(models.Model):
     reason = models.TextField(blank=True)
     revision = models.PositiveIntegerField(default=1)
     weekly_assignment = models.ForeignKey("WeeklyEpisodeAssignment", null=True, blank=True, on_delete=models.PROTECT, related_name="occurrences")
+    recurrence_slot = models.ForeignKey(
+        RecurrenceSlot, null=True, blank=True, on_delete=models.SET_NULL, related_name="occurrences"
+    )
+    schedule_role = models.CharField(
+        max_length=16,
+        choices=[("manual", "Manual schedule item"), ("premiere", "New premiere"), ("replay", "Replay"), ("rerun", "Selected older episode")],
+        default="manual",
+    )
+    def __str__(self):
+        show_title = self.show.title if self.show else None
+        episode_title = self.episode.title if self.episode else None
+        item = " · ".join(part for part in (show_title, episode_title) if part) or self.label
+        starts_at = self.starts_at
+        if hasattr(starts_at, "strftime"):
+            if timezone.is_aware(starts_at):
+                timezone_name = getattr(self.station, "timezone", "America/Detroit") if self.station_id else "America/Detroit"
+                try:
+                    starts_at = timezone.localtime(starts_at, ZoneInfo(timezone_name))
+                except (ZoneInfoNotFoundError, ValueError):
+                    starts_at = timezone.localtime(starts_at, ZoneInfo("America/Detroit"))
+            time_label = starts_at.strftime("%Y-%m-%d %H:%M")
+        else:
+            time_label = str(starts_at)
+        return f"{item} · {time_label}"
     def clean(self):
         if self.item_type == "episode" and not self.episode: raise ValidationError("Episode items require an episode.")
         if self.item_type == "live" and self.asset: raise ValidationError("Live items cannot have a media asset.")
@@ -112,6 +318,41 @@ class Occurrence(models.Model):
         if self.pk and not skip_revision:
             self.revision = models.F("revision") + 1
         super().save(*args, **kwargs)
+
+    @property
+    def schedule_context(self):
+        if self.schedule_role != "manual":
+            return self.get_schedule_role_display()
+        if not self.weekly_assignment_id:
+            return "Manual schedule item"
+        if self.weekly_assignment.selection_type == "rerun":
+            return "Selected older episode"
+        if self.weekly_assignment.selection_type == "none":
+            return "No program"
+        if not self.recurrence_slot:
+            return self.weekly_assignment.get_selection_type_display()
+        return "New premiere" if self.recurrence_slot and self.recurrence_slot.is_premiere else "Replay"
+
+    @property
+    def duration_label(self):
+        return _duration_label(self.planned_duration_seconds)
+
+    @property
+    def actual_runtime_seconds(self):
+        """Return recorded media runtime, never the reserved slot duration."""
+        if self.episode and self.episode.runtime_seconds is not None:
+            return self.episode.runtime_seconds
+        if self.asset and self.asset.runtime_seconds is not None:
+            return self.asset.runtime_seconds
+        return None
+
+    @property
+    def actual_runtime_label(self):
+        return _duration_label(self.actual_runtime_seconds)
+
+    @property
+    def unique_asset_id_label(self):
+        return str(self.asset.asset_id) if self.asset else "Not assigned"
 
 class Preparation(models.Model):
     occurrence = models.OneToOneField(Occurrence, on_delete=models.CASCADE, related_name="preparation")
@@ -139,6 +380,9 @@ class UploadedScheduleRevision(models.Model):
     occurrences = models.ManyToManyField(Occurrence, through="UploadedOccurrenceCoverage", blank=True, related_name="uploaded_revisions")
     supersession_reason = models.TextField(blank=True)
     revision = models.PositiveIntegerField(default=1)
+    def __str__(self):
+        reference = self.external_reference or "Uploaded schedule"
+        return f"{reference} · {self.uploaded_at:%Y-%m-%d %H:%M}"
 
 class UploadedOccurrenceCoverage(models.Model):
     upload = models.ForeignKey(UploadedScheduleRevision, on_delete=models.CASCADE)
@@ -159,6 +403,8 @@ class OccurrenceProgramming(models.Model):
     device = models.ForeignKey(Device, on_delete=models.PROTECT)
     confirmed_at = models.DateTimeField(default=timezone.now)
     note = models.TextField(blank=True)
+    def __str__(self):
+        return f"{self.occurrence} · {self.device}"
 
 class AiringEvidence(models.Model):
     occurrence = models.ForeignKey(Occurrence, null=True, blank=True, on_delete=models.SET_NULL, related_name="airing_evidence")
@@ -169,6 +415,9 @@ class AiringEvidence(models.Model):
     created_at = models.DateTimeField(default=timezone.now)
     actor = models.CharField(max_length=120, blank=True)
     supersedes = models.ForeignKey("self", null=True, blank=True, on_delete=models.PROTECT, related_name="corrections")
+    def __str__(self):
+        item = self.occurrence or "Unlinked occurrence"
+        return f"{item} · {self.get_status_display()} · {self.aired_at:%Y-%m-%d %H:%M}"
 
 class AuditEvent(models.Model):
     actor = models.CharField(max_length=120, default="owner")

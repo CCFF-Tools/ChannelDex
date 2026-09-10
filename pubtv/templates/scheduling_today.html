@@ -1,0 +1,8 @@
+{% extends "base.html" %}
+{% block page_title %}What needs scheduling · PUB-TV{% endblock %}
+{% block content %}
+<div class="page-heading"><p class="eyebrow">Schedule · Daily work</p><h1>What needs scheduling on {{ selected_date|date:"l, F j" }}</h1><p class="lede">This list shows planned items that are not yet covered by an active upload record for their exact current revision. An item disappears after that scheduling confirmation is recorded.</p></div>
+<p><a href="?date={{ previous_date|date:'Y-m-d' }}">Previous day</a> · <a href="?date={{ next_date|date:'Y-m-d' }}">Next day</a> · <a class="button-link" href="{% url 'day-view' %}?date={{ selected_date|date:'Y-m-d' }}">Open full day plan</a></p>
+<p><strong>{{ remaining|length }}</strong> remaining · <strong>{{ completed_count }}</strong> confirmed scheduled · {{ total_count }} planned total</p>
+{% for item in remaining %}<article class="list-card"><h2>{{ item.starts_at|date:"g:i A" }} · {{ item.label }}</h2><p><span class="badge">{{ item.schedule_context }}</span>{% if item.episode %} · {{ item.episode.title }}{% endif %} · {{ item.readiness.label }}</p><div class="action-bar"><a class="button-link" href="{% url 'preparation-edit' item.pk %}">Update preparation</a><a class="button-link" href="{% url 'occurrence-edit' item.pk %}">Edit plan</a></div></article>{% empty %}<div class="empty-state"><h2>Nothing left to schedule for this day</h2><p>Every planned item has exact active upload coverage, or there are no planned items yet.</p><a class="button-link" href="{% url 'day-view' %}?date={{ selected_date|date:'Y-m-d' }}">Review the full day</a></div>{% endfor %}
+{% endblock %}

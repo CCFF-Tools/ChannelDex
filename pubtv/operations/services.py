@@ -1,6 +1,7 @@
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 from django.db import transaction, connection
+from django.db.models import F
 from django.core.exceptions import ValidationError
 from django.utils import timezone
 from django.core.signing import TimestampSigner, BadSignature
@@ -89,25 +90,99 @@ def occurrences_for_slot(slot: RecurrenceSlot, start_date, end_date):
             ).first() if slot.show_id else None
             if slot.show_id:
                 if assignment and assignment.selection_type != "none" and assignment.episode:
-                    result.append(Occurrence(station=slot.station, show=slot.show, episode=assignment.episode, weekly_assignment=assignment, item_type="episode", label=slot.show.title, starts_at=starts_at, planned_duration_seconds=slot.duration_seconds))
+                    role = "rerun" if assignment.selection_type == "rerun" else ("premiere" if slot.is_premiere else "replay")
+                    duration = slot.show.slot_duration_seconds or slot.duration_seconds
+                    result.append(Occurrence(station=slot.station, show=slot.show, episode=assignment.episode, weekly_assignment=assignment, recurrence_slot=slot, schedule_role=role, item_type="episode", label=slot.show.title, starts_at=starts_at, planned_duration_seconds=duration))
             else:
-                result.append(Occurrence(station=slot.station, show=None, episode=None, weekly_assignment=None, item_type="media", label="Recurring slot", starts_at=starts_at, planned_duration_seconds=slot.duration_seconds))
+                result.append(Occurrence(station=slot.station, show=None, episode=None, weekly_assignment=None, recurrence_slot=slot, item_type="media", label="Recurring slot", starts_at=starts_at, planned_duration_seconds=slot.duration_seconds))
         day += timedelta(days=1)
     return result
+
+
+def active_premiere_slot(show, premiere_date):
+    matches = [
+        slot for slot in show.slots.filter(is_premiere=True)
+        if slot.weekday == premiere_date.weekday()
+        and (not slot.active_from or slot.active_from <= premiere_date)
+        and (not slot.active_until or slot.active_until >= premiere_date)
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def next_premiere_date(show, after=None):
+    """Return the next active premiere date after the last planned cycle or a given date."""
+    latest = show.weekly_assignments.exclude(premiere_date=None).order_by("-premiere_date").first()
+    cursor = after or (latest.premiere_date + timedelta(days=1) if latest else timezone.localdate())
+    for offset in range(0, 370):
+        candidate = cursor + timedelta(days=offset)
+        if active_premiere_slot(show, candidate):
+            return candidate
+    return None
+
+
+def suggested_pending_episode(show):
+    return show.episodes.filter(status="pending").exclude(
+        weeklyepisodeassignment__show=show,
+        weeklyepisodeassignment__selection_type="premiere",
+    ).order_by(
+        F("intended_air_order").asc(nulls_last=True),
+        F("intended_premiere_date").asc(nulls_last=True),
+        F("received_at").asc(nulls_last=True),
+        "pk",
+    ).first()
+
+
+def occurrences_for_cycle(assignment):
+    """Build one premiere-to-premiere cycle, independent of Monday calendar boundaries."""
+    premiere_date = assignment.premiere_date
+    if not premiere_date:
+        premiere_slot = assignment.show.slots.filter(is_premiere=True).order_by("pk").first()
+        premiere_date = assignment.week_start + timedelta(days=premiere_slot.weekday if premiere_slot else 0)
+    premiere_slot = active_premiere_slot(assignment.show, premiere_date)
+    if not premiere_slot or assignment.selection_type == "none" or not assignment.episode:
+        return []
+    tz = ZoneInfo(assignment.show.station.timezone)
+    cycle_start = datetime.combine(premiere_date, premiere_slot.start_time, tzinfo=tz)
+    cycle_end = cycle_start + timedelta(days=7)
+    result = []
+    for slot in assignment.show.slots.all():
+        for offset in range(0, 8):
+            day = premiere_date + timedelta(days=offset)
+            if day.weekday() != slot.weekday:
+                continue
+            if slot.active_from and day < slot.active_from:
+                continue
+            if slot.active_until and day > slot.active_until:
+                continue
+            starts_at = datetime.combine(day, slot.start_time, tzinfo=tz)
+            if not (cycle_start <= starts_at < cycle_end):
+                continue
+            role = "rerun" if assignment.selection_type == "rerun" else (
+                "premiere" if slot.pk == premiere_slot.pk else "replay"
+            )
+            result.append(Occurrence(
+                station=assignment.show.station, show=assignment.show,
+                episode=assignment.episode, weekly_assignment=assignment,
+                recurrence_slot=slot, schedule_role=role, item_type="episode",
+                label=assignment.show.title, starts_at=starts_at,
+                planned_duration_seconds=assignment.show.slot_duration_seconds or slot.duration_seconds,
+            ))
+    return sorted(result, key=lambda item: item.starts_at)
 
 
 @transaction.atomic
 def materialize_assignment(assignment):
     """Create all occurrences for an assignment, validating each before saving."""
     assignment.full_clean()
-    slots = RecurrenceSlot.objects.filter(show=assignment.show, station=assignment.show.station)
-    start = assignment.week_start
-    for slot in slots:
-        for occurrence in occurrences_for_slot(slot, start, start + timedelta(days=6)):
-            if Occurrence.objects.filter(weekly_assignment=assignment, starts_at=occurrence.starts_at).exists():
-                continue
-            occurrence.full_clean()
-            occurrence.save(skip_revision=True)
+    for occurrence in occurrences_for_cycle(assignment):
+        if Occurrence.objects.filter(
+            weekly_assignment=assignment,
+            starts_at=occurrence.starts_at,
+            status="planned",
+        ).exists():
+            continue
+        occurrence.full_clean()
+        occurrence.save(skip_revision=True)
 
 
 @transaction.atomic
@@ -138,6 +213,121 @@ def schedule_alerts(occurrences):
         elif delta < 60: alerts.append(("short_gap", previous, current))
     alerts.extend(("over_slot", item, None) for item in ordered if item.over_slot)
     return alerts
+
+
+def calendar_capacity(station, selected_date, days=1):
+    """Return reserved/available intervals in station-local time.
+
+    Recurring slots reserve their full configured duration even when no episode
+    runtime is recorded.  A shorter known runtime creates a labeled virtual
+    channel filler interval inside that reservation; it never becomes available.
+    """
+    tz = ZoneInfo(station.timezone)
+    utc = ZoneInfo("UTC")
+    result = []
+    for offset in range(days):
+        day = selected_date + timedelta(days=offset)
+        local_start = datetime.combine(day, datetime.min.time(), tzinfo=tz)
+        local_end = datetime.combine(day + timedelta(days=1), datetime.min.time(), tzinfo=tz)
+        start = local_start.astimezone(utc)
+        end = local_end.astimezone(utc)
+        reservations = []
+        planned = list(Occurrence.objects.filter(
+            station=station, status="planned", starts_at__lt=end,
+        ).select_related("show", "episode", "asset"))
+        for item in planned:
+            item_start = item.starts_at.astimezone(utc)
+            item_end = item.ends_at.astimezone(utc)
+            if item_end > start:
+                reservations.append((max(item_start, start), min(item_end, end), item, "planned"))
+        slots = RecurrenceSlot.objects.filter(station=station).select_related("show")
+        for slot in slots:
+            candidate_days = [day]
+            if slot.duration_seconds > 0:
+                candidate_days.append(day - timedelta(days=1))
+            for slot_day in candidate_days:
+                if slot.weekday != slot_day.weekday() or (slot.active_from and slot_day < slot.active_from) or (slot.active_until and slot_day > slot.active_until):
+                    continue
+                local_slot_start = datetime.combine(slot_day, slot.start_time, tzinfo=tz)
+                slot_start = local_slot_start.astimezone(utc)
+                slot_end = slot_start + timedelta(seconds=slot.duration_seconds)
+                if slot_start >= end or slot_end <= start:
+                    continue
+                matching = next((
+                    item for item in planned
+                    if item.recurrence_slot_id == slot.pk
+                    and item.starts_at.astimezone(utc) == slot_start
+                ), None)
+                reservations.append((max(slot_start, start), min(slot_end, end), matching, "recurring"))
+        reservations.sort(key=lambda value: value[0])
+        merged = []
+        for interval_start, interval_end, item, source in reservations:
+            # Keep adjacent reservations separate so one show's filler cannot
+            # consume the next reserved slot. Overlaps remain a union below.
+            if merged and interval_start < merged[-1]["end"]:
+                merged[-1]["end"] = max(merged[-1]["end"], interval_end)
+                # The union no longer has one unambiguous content runtime.
+                existing = merged[-1]["item"]
+                if not (
+                    existing is not None
+                    and item is not None
+                    and getattr(existing, "pk", None) == getattr(item, "pk", None)
+                ):
+                    merged[-1]["item"] = None
+                    merged[-1]["source"] = "overlap"
+                elif source == "recurring":
+                    # A materialized recurring occurrence is also present as a
+                    # planned item. Preserve its show-reservation semantics.
+                    merged[-1]["source"] = "recurring"
+                continue
+            merged.append({"start": interval_start, "end": interval_end, "item": item, "source": source})
+        intervals = []
+        cursor = start
+        for index, reservation in enumerate(merged):
+            if cursor < reservation["start"]:
+                intervals.append({"start": cursor.astimezone(tz), "end": reservation["start"].astimezone(tz), "status": "available", "label": "Available"})
+            item = reservation["item"]
+            runtime = None
+            if item and item.episode_id:
+                runtime = item.episode.runtime_seconds
+            elif item and item.asset_id:
+                runtime = item.asset.runtime_seconds
+            # Render only the portion not already occupied by an earlier
+            # reservation; availability still uses the merged union.
+            filler_start = max(reservation["start"], cursor)
+            if filler_start >= reservation["end"]:
+                cursor = max(cursor, reservation["end"])
+                continue
+            if runtime is not None:
+                content_end = min(reservation["end"], filler_start + timedelta(seconds=runtime))
+                if filler_start < content_end:
+                    intervals.append({"start": filler_start.astimezone(tz), "end": content_end.astimezone(tz), "status": "reserved", "label": "Reserved", "item": item})
+                if content_end < reservation["end"]:
+                    intervals.append({"start": content_end.astimezone(tz), "end": reservation["end"].astimezone(tz), "status": "virtual-channel-filler", "label": "Virtual-channel filler (reserved)", "item": item})
+            elif reservation["source"] == "recurring":
+                intervals.append({"start": filler_start.astimezone(tz), "end": reservation["end"].astimezone(tz), "status": "reserved", "label": "Reserved (runtime not determined)", "item": item})
+            else:
+                intervals.append({"start": filler_start.astimezone(tz), "end": reservation["end"].astimezone(tz), "status": "reserved", "label": "Reserved", "item": item})
+            cursor = max(cursor, reservation["end"])
+        if cursor < end:
+            intervals.append({"start": cursor.astimezone(tz), "end": end.astimezone(tz), "status": "available", "label": "Available"})
+        result.append({"date": day, "intervals": intervals})
+    return result
+
+def preparation_readiness(occurrence):
+    """Return manual preparation status only; this is not evidence that an item aired."""
+    required = ["source_available", "ame_preset", "ftp_output_device", "library_registration", "slot_assignment", "uploaded_schedule_revision"]
+    prep = getattr(occurrence, "preparation", None)
+    if occurrence.item_type == "live":
+        values = {field: "N/A (live)" for field in required}
+        values["slot_assignment"] = ""
+        values["uploaded_schedule_revision"] = ""
+        if prep:
+            values.update({field: getattr(prep, field, "") for field in ("slot_assignment", "uploaded_schedule_revision")})
+    else:
+        values = {field: getattr(prep, field, "") if prep else "" for field in required}
+    complete = sum(1 for value in values.values() if value not in ("", None, "no"))
+    return {"complete": complete, "total": len(required), "label": f"{complete}/{len(required)} preparation facts", "ready": complete == len(required)}
 
 @transaction.atomic
 def advance_passed_premiere(occurrence, now=None):

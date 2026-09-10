@@ -22,3 +22,5 @@ staticfiles/
 *.pkg
 *.ipa
 .DS_Store
+packaging/build/
+packaging/dist/

@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block page_title %}{{ title }} · PUB-TV{% endblock %}
+{% block content %}
+<div class="page-heading"><p class="eyebrow">Schedule</p><h1>{{ title }}</h1><p class="lede">PUB-TV suggests the next episode and premiere date from the show's queue and regular times. Confirm the suggestion before it becomes part of the planned schedule.</p></div>
+{% if selected_show %}
+<section class="cycle-explainer"><h2>{{ selected_show.title }} cycle</h2><p><span class="badge premiere">Premiere</span> starts a new cycle. Every replay after it uses that episode until the next premiere. A replay earlier in the calendar week – such as Monday before a Wednesday premiere – still belongs to the previous cycle.</p>{% if prior_cycle %}<p><strong>Most recently planned cycle:</strong> {{ prior_cycle.premiere_date }} · {{ prior_cycle.episode|default:"No episode" }}</p>{% else %}<p>No earlier premiere cycle is recorded yet. Verify any replay before the first premiere you seed.</p>{% endif %}</section>
+<section class="help-panel"><h2>Upcoming episode queue</h2>{% for queued in queue %}<p><strong>{{ queued.intended_air_order|default:"Unnumbered" }}</strong> · <a href="{% url 'episode-detail' queued.pk %}">{{ queued.title }}</a>{% if forloop.first %} <span class="badge">Suggested next</span>{% endif %}</p>{% empty %}<p>No upcoming episodes are waiting in the queue. Choose a previously scheduled episode below or leave the episode blank to record no program for this cycle.</p>{% endfor %}</section>
+{% else %}<p class="context-card">Choose a show to load its next premiere date, episode suggestion, and queue.</p>{% endif %}
+<form method="post" class="stacked-form" novalidate>{% csrf_token %}
+  {% if form.non_field_errors %}<div class="form-errors" role="alert">{{ form.non_field_errors }}</div>{% endif %}
+  {% for field in form.visible_fields %}<div class="field{% if field.errors %} has-error{% endif %}">{{ field.label_tag }}{{ field }}{% if field.help_text %}<div class="helptext">{{ field.help_text }}</div>{% endif %}{{ field.errors }}</div>{% endfor %}
+  {% for hidden in form.hidden_fields %}{{ hidden }}{% endfor %}
+  <button class="primary" type="submit">Confirm premiere and replay plan</button>
+</form>
+<script>document.querySelectorAll('[data-cycle-show]').forEach(select=>select.addEventListener('change',()=>{if(select.value)window.location=`?show=${encodeURIComponent(select.value)}`;}));</script>
+{% endblock %}

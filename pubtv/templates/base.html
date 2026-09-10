@@ -1,1 +1,59 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><title>PUB-TV</title>{% load static %}<link rel="stylesheet" href="{% static 'pubtv.css' %}"></head><body><header><a href="/">PUB-TV operations</a> · <a href="/shows/">Shows</a> · <a href="/day/">Day</a> · <a href="/week/">Week</a> · <a href="/agenda/">Agenda</a> · <a href="/history/">History</a> · <a href="/occurrences/new/">Add item</a> · <a href="/assignments/new/">Weekly selection</a> · <a href="/uploads/new/">Upload preview</a></header><main>{% if messages %}{% for message in messages %}<p class="message">{{ message }}</p>{% endfor %}{% endif %}{% block content %}{% endblock %}</main></body></html>
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block page_title %}PUB-TV{% endblock %}</title>
+  {% load static %}<link rel="stylesheet" href="{% static 'pubtv.css' %}">
+</head>
+<body>
+<header class="app-header">
+  <nav class="primary-nav" aria-label="Primary navigation">
+    <a class="brand" href="{% url 'dashboard' %}">PUB-TV</a>
+    <a href="{% url 'dashboard' %}">Dashboard</a>
+    <details><summary>Schedule</summary><div class="nav-menu">
+      <a href="{% url 'day-view' %}">Day</a><a href="{% url 'week-view' %}">Week</a>
+      <a href="{% url 'agenda' %}">Agenda</a><a href="{% url 'reserved-schedule' %}">Upcoming shows</a><a href="{% url 'occurrence-create' %}">Add schedule item</a>
+      <a href="{% url 'assignment-create' %}">Plan next premiere</a>
+    </div></details>
+    <details><summary>Catalog</summary><div class="nav-menu">
+      <a href="{% url 'show-list' %}">Shows</a><a href="{% url 'episode-list' %}">Episodes</a>
+    </div></details>
+    <details><summary>Operations</summary><div class="nav-menu">
+      <a href="{% url 'history' %}">History and workflow</a>
+    </div></details>
+    <details><summary>Settings</summary><div class="nav-menu">
+      <a href="{% url 'setup-station' %}">Station</a><a href="{% url 'setup-device' %}">Devices</a>
+    </div></details>
+  </nav>
+  {% if quit_enabled %}<form class="quit-form" method="post" action="{% url 'quit-app' %}">{% csrf_token %}<button class="danger" type="submit">Quit PUB-TV</button></form>{% endif %}
+</header>
+<main>
+  {% if messages %}{% for message in messages %}<p class="message" role="status">{{ message }}</p>{% endfor %}{% endif %}
+  {% block content %}{% endblock %}
+</main>
+<script>
+function pubtvNowValue(){
+  const parts=new Intl.DateTimeFormat('en-US',{timeZone:'America/Detroit',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).formatToParts(new Date());
+  const values=Object.fromEntries(parts.map(part=>[part.type,part.value]));
+  return `${values.year}-${values.month}-${values.day}T${values.hour}:${values.minute}`;
+}
+document.querySelectorAll('[data-now-for]').forEach(button=>button.addEventListener('click',()=>{
+  const field=document.getElementById(button.dataset.nowFor); if(field){field.value=pubtvNowValue();field.dispatchEvent(new Event('change',{bubbles:true}));}
+}));
+function updateConditionalOther(selectId,containerSelector){
+  const select=document.getElementById(selectId), container=document.querySelector(containerSelector);
+  if(!select||!container)return;
+  const sync=()=>{const visible=select.value==='other';container.hidden=!visible;const input=container.querySelector('input');if(input){input.required=visible;if(!visible)input.value='';}};
+  select.addEventListener('change',sync);sync();
+}
+updateConditionalOther('id_method','[data-other-method]');
+updateConditionalOther('id_primary_delivery_method','[data-primary-other-method]');
+updateConditionalOther('id_show_type','[data-show-type-other]');
+const toolbarMenus=[...document.querySelectorAll('.primary-nav > details')];
+toolbarMenus.forEach(menu=>menu.addEventListener('toggle',()=>{
+  if(menu.open)toolbarMenus.forEach(other=>{if(other!==menu)other.open=false;});
+}));
+</script>
+</body>
+</html>
