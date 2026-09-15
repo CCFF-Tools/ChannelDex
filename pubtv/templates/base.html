@@ -3,13 +3,13 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{% block page_title %}PUB-TV{% endblock %}</title>
-  {% load static %}<link rel="stylesheet" href="{% static 'pubtv.css' %}">
+  <title>{% block page_title %}ChannelDex{% endblock %}</title>
+  {% load static %}<link rel="icon" type="image/png" href="{% static 'images/channeldex-favicon.png' %}"><link rel="stylesheet" href="{% static 'pubtv.css' %}">
 </head>
 <body>
 <header class="app-header">
   <nav class="primary-nav" aria-label="Primary navigation">
-    <a class="brand" href="{% url 'dashboard' %}">PUB-TV</a>
+    <a class="brand" href="{% url 'dashboard' %}"><img class="brand-lockup" src="{% static 'images/channeldex-full-logo-color.png' %}" alt="ChannelDex" height="44"><img class="brand-compact" src="{% static 'images/channeldex-favicon.png' %}" alt="ChannelDex" width="44" height="44"></a>
     <a href="{% url 'dashboard' %}">Dashboard</a>
     <details><summary>Schedule</summary><div class="nav-menu">
       <a href="{% url 'day-view' %}">Day</a><a href="{% url 'week-view' %}">Week</a>
@@ -26,7 +26,7 @@
       <a href="{% url 'setup-station' %}">Station</a><a href="{% url 'setup-device' %}">Devices</a>
     </div></details>
   </nav>
-  {% if quit_enabled %}<form class="quit-form" method="post" action="{% url 'quit-app' %}">{% csrf_token %}<button class="danger" type="submit">Quit PUB-TV</button></form>{% endif %}
+  {% if quit_enabled %}<form class="quit-form" method="post" action="{% url 'quit-app' %}">{% csrf_token %}<button class="danger" type="submit">Quit ChannelDex</button></form>{% endif %}
 </header>
 <main>
   {% if messages %}{% for message in messages %}<p class="message" role="status">{{ message }}</p>{% endfor %}{% endif %}

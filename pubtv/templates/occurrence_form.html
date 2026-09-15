@@ -1,7 +1,7 @@
 {% extends "base.html" %}
-{% block page_title %}{{ title }} · PUB-TV{% endblock %}
+{% block page_title %}{{ title }} · ChannelDex{% endblock %}
 {% block content %}
-<div class="page-heading"><h1>{{ title }}</h1><p class="lede">Plan a fixed-start broadcast item. PUB-TV flags gaps, overlaps, and over-slot episodes; it never shifts or trims items automatically.</p></div>
+<div class="page-heading"><h1>{{ title }}</h1><p class="lede">Plan a fixed-start broadcast item. ChannelDex flags gaps, overlaps, and over-slot episodes; it never shifts or trims items automatically.</p></div>
 <form method="post" class="stacked-form" novalidate>{% csrf_token %}
   {% if form.non_field_errors %}<div class="form-errors" role="alert">{{ form.non_field_errors }}</div>{% endif %}
   {% for field in form.visible_fields %}<div class="field{% if field.errors %} has-error{% endif %}">{{ field.label_tag }}{{ field }}{% if field.help_text %}<div class="helptext">{{ field.help_text }}</div>{% endif %}{{ field.errors }}</div>{% endfor %}

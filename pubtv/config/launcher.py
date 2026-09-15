@@ -9,7 +9,17 @@ import threading
 
 
 def default_data_dir() -> Path:
-    return Path.home() / "Library" / "Application Support" / "PUB-TV"
+    """Return ChannelDex's data directory, retaining existing PUB-TV installs.
+
+    The legacy directory is selected only when it already contains data; new
+    installs use ChannelDex. PUBTV_DATA_DIR remains the compatibility override.
+    """
+    support = Path.home() / "Library" / "Application Support"
+    legacy = support / "PUB-TV"
+    current = support / "ChannelDex"
+    if not current.exists() and (legacy / "pubtv.sqlite3").exists():
+        return legacy
+    return current
 
 
 def prepare_data_dir() -> Path:

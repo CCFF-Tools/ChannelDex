@@ -367,7 +367,7 @@ class TodoWorkflowTests(TestCase):
         self.assertContains(response, "Catalog")
         self.assertContains(response, "Operations")
         self.assertContains(response, "Settings")
-        self.assertNotContains(response, "Quit PUB-TV")
+        self.assertNotContains(response, "Quit ChannelDex")
 
     def test_premiere_cycle_handles_monday_replay_before_wednesday_premiere(self):
         self.slot.delete()

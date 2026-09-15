@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block page_title %}What needs scheduling · PUB-TV{% endblock %}
+{% block page_title %}What needs scheduling · ChannelDex{% endblock %}
 {% block content %}
 <div class="page-heading"><p class="eyebrow">Schedule · Daily work</p><h1>What needs scheduling on {{ selected_date|date:"l, F j" }}</h1><p class="lede">This list shows planned items that are not yet covered by an active upload record for their exact current revision. An item disappears after that scheduling confirmation is recorded.</p></div>
 <p><a href="?date={{ previous_date|date:'Y-m-d' }}">Previous day</a> · <a href="?date={{ next_date|date:'Y-m-d' }}">Next day</a> · <a class="button-link" href="{% url 'day-view' %}?date={{ selected_date|date:'Y-m-d' }}">Open full day plan</a></p>

@@ -22,13 +22,13 @@ analysis = Analysis(
     excludes=[], noarchive=False,
 )
 pyz = PYZ(analysis.pure)
-exe = EXE(pyz, analysis.scripts, [], exclude_binaries=True, name="PUB-TV", console=False)
+exe = EXE(pyz, analysis.scripts, [], exclude_binaries=True, name="ChannelDex", console=False)
 app = BUNDLE(
-    COLLECT(exe, analysis.binaries, analysis.datas, strip=False, upx=False, name="PUB-TV"),
-    name="PUB-TV.app", icon=None,
+    COLLECT(exe, analysis.binaries, analysis.datas, strip=False, upx=False, name="ChannelDex"),
+    name="ChannelDex.app", icon=str(ROOT / "pubtv" / "static" / "images" / "channeldex-app-icon.icns"),
     info_plist={
-        "CFBundleDisplayName": "PUB-TV", "CFBundleIdentifier": "com.capitalcityfilmfest.pubtv",
-        "CFBundleName": "PUB-TV", "CFBundleShortVersionString": "0.1.0",
+        "CFBundleDisplayName": "ChannelDex", "CFBundleIdentifier": "com.capitalcityfilmfest.pubtv",
+        "CFBundleName": "ChannelDex", "CFBundleShortVersionString": "0.1.0",
         "CFBundleVersion": "0.1.0", "LSMinimumSystemVersion": "26.0", "LSUIElement": False,
     },
 )

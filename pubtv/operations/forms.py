@@ -68,7 +68,7 @@ class OccurrenceForm(forms.ModelForm):
         fields = ["item_type", "label", "show", "episode", "starts_at", "planned_duration_seconds", "status", "reason"]
         labels = {"starts_at": "Start date and time"}
         help_texts = {
-            "starts_at": "Interpreted in the PUB-TV station timezone (America/Detroit).",
+            "starts_at": "Interpreted in the ChannelDex station timezone (America/Detroit).",
             "status": "This is planned schedule status, not evidence that the item aired.",
         }
         widgets = {"starts_at": forms.DateTimeInput(attrs={"type": "datetime-local"}, format="%Y-%m-%dT%H:%M")}
@@ -170,7 +170,7 @@ class EpisodeForm(forms.ModelForm):
         help_texts = {
             "producer": "Choose the producer by name. The internal record ID is never used as their display name.",
             "intended_air_order": "Lower numbers air first; producer direction may override the usual FIFO order.",
-            "received_at": "When PUB-TV received or accepted the episode – not when it aired or was encoded.",
+            "received_at": "When ChannelDex received or accepted the episode – not when it aired or was encoded.",
         }
         widgets = {
             "intended_premiere_date": forms.DateInput(attrs={"type": "date"}),
@@ -192,8 +192,8 @@ class EpisodeForm(forms.ModelForm):
 
 class EpisodeMilestoneForm(forms.ModelForm):
     STAGE_HELP = {
-        "received": "PUB-TV received the submission or delivery notice.",
-        "downloaded": "The source file was copied into PUB-TV's working or storage workflow.",
+        "received": "ChannelDex received the submission or delivery notice.",
+        "downloaded": "The source file was copied into ChannelDex's working or storage workflow.",
         "encoded": "The required encoded rendition was produced and recorded.",
         "transferred": "The encoded file was transferred to the target playback system.",
         "scheduled": "The episode was placed in a recorded schedule revision; this is not proof of airing.",
@@ -227,7 +227,7 @@ class AssetForm(forms.ModelForm):
         fields = ["episode", "file_name", "label", "kind", "version", "runtime_seconds", "smb_reference"]
         labels = {"file_name": "File name", "label": "Legacy display label"}
         widgets = {"asset_id": forms.TextInput(attrs={"readonly": True}), "label": forms.HiddenInput()}
-        help_texts = {"smb_reference": "A private metadata reference only; PUB-TV does not mount, fetch, move, or rename the file."}
+        help_texts = {"smb_reference": "A private metadata reference only; ChannelDex does not mount, fetch, move, or rename the file."}
 
     def __init__(self, *args, station=None, **kwargs):
         super().__init__(*args, **kwargs)
@@ -260,7 +260,7 @@ class DeliveryForm(forms.ModelForm):
             "received_at": "File received date and time",
             "episodes": "Linked episodes",
         }
-        help_texts = {"reference": "Metadata only. PUB-TV does not fetch links, connect to accounts, or mount storage."}
+        help_texts = {"reference": "Metadata only. ChannelDex does not fetch links, connect to accounts, or mount storage."}
         widgets = {
             "notified_at": forms.DateTimeInput(attrs={"type": "datetime-local"}, format="%Y-%m-%dT%H:%M"),
             "received_at": forms.DateTimeInput(attrs={"type": "datetime-local"}, format="%Y-%m-%dT%H:%M"),

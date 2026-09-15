@@ -8,7 +8,20 @@ from unittest.mock import patch
 class LauncherTests(unittest.TestCase):
     def test_default_data_dir(self):
         from pubtv.config import launcher
-        self.assertEqual(launcher.default_data_dir(), Path.home() / "Library" / "Application Support" / "PUB-TV")
+        support = Path.home() / "Library" / "Application Support"
+        expected = support / "PUB-TV" if (support / "ChannelDex").exists() is False and (support / "PUB-TV" / "pubtv.sqlite3").exists() else support / "ChannelDex"
+        self.assertEqual(launcher.default_data_dir(), expected)
+
+    def test_existing_legacy_data_dir_is_preserved(self):
+        from pubtv.config import launcher
+        with tempfile.TemporaryDirectory() as temp_dir:
+            support = Path(temp_dir) / "Library" / "Application Support"
+            support.mkdir(parents=True)
+            legacy = support / "PUB-TV"
+            legacy.mkdir()
+            (legacy / "pubtv.sqlite3").touch()
+            with patch("pathlib.Path.home", return_value=Path(temp_dir)):
+                self.assertEqual(launcher.default_data_dir(), legacy)
 
     def test_data_dir_override_creates_protected_secret(self):
         from pubtv.config import launcher

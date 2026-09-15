@@ -27,7 +27,7 @@ def quit_app(request):
         master_pid = 0
     if master_pid <= 1 or master_pid == os.getpid():
         return HttpResponse("Quit is unavailable.", status=404)
-    response = HttpResponse("PUB-TV is shutting down.")
+    response = HttpResponse("ChannelDex is shutting down.")
     # Delay until the response has been handed to the browser.
     def terminate_master():
         os.kill(master_pid, signal.SIGTERM)
@@ -258,8 +258,8 @@ def _crud(request, model, form_class, title, pk=None, initial=None):
     intros = {
         "Create show": "Add the show once, then manage its episodes and weekly air times from the show page.",
         "Edit show": "Delivery method is a preference only; each actual delivery keeps its own provenance.",
-        "Record media asset": "Record a source or encoded rendition as private metadata. PUB-TV does not move or validate the file.",
-        "Record delivery": "Record how a submission was made available and link one or more episodes. PUB-TV does not fetch it.",
+        "Record media asset": "Record a source or encoded rendition as private metadata. ChannelDex does not move or validate the file.",
+        "Record delivery": "Record how a submission was made available and link one or more episodes. ChannelDex does not fetch it.",
     }
     return render(request, "simple_form.html", {"form": form, "title": title, "intro": intros.get(title)})
 def setup_station(request):

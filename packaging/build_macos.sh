@@ -32,4 +32,4 @@ clean_generated_dir packaging/build
 clean_generated_dir packaging/dist
 export PYINSTALLER_CONFIG_DIR="$ROOT/packaging/build/pyinstaller-config"
 "$PYINSTALLER" --noconfirm --clean --workpath packaging/build --distpath packaging/dist packaging/pubtv.spec
-echo "Built $ROOT/packaging/dist/PUB-TV.app"
+echo "Built $ROOT/packaging/dist/ChannelDex.app"

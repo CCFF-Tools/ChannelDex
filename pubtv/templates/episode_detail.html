@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block page_title %}{{ episode.title }} · PUB-TV{% endblock %}
+{% block page_title %}{{ episode.title }} · ChannelDex{% endblock %}
 {% block content %}
 <div class="page-heading"><p class="eyebrow"><a href="{% url 'show-detail' episode.show_id %}">{{ episode.show.title }}</a> · Episode</p><h1>{{ episode.title }}</h1><p class="lede">Track the episode's manual handoffs, private source references, planned use, and evidence separately.</p></div>
 <p><a class="button-link primary" href="{% url 'episode-milestone-create' episode.pk %}">Record workflow stage</a> · <a href="{% url 'episode-edit' episode.pk %}">Edit episode</a> · <a href="{% url 'asset-create' %}?episode={{ episode.pk }}">Record media reference</a> · <a href="{% url 'delivery-create' %}?episode={{ episode.pk }}">Record delivery</a> · <a href="{% url 'assignment-create' %}?show={{ episode.show_id }}&amp;episode={{ episode.pk }}">Plan this premiere cycle</a> · <a href="{% url 'occurrence-create' %}?show={{ episode.show_id }}&amp;episode={{ episode.pk }}">Add one-off schedule item</a></p>

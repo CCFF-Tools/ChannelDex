@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block page_title %}{{ title }} · PUB-TV{% endblock %}
+{% block page_title %}{{ title }} · ChannelDex{% endblock %}
 {% block content %}
 <div class="page-heading"><h1>{{ title }}</h1>{% if intro %}<p class="lede">{{ intro }}</p>{% endif %}</div>
 {% if occurrence %}<p class="context-card">Scheduled item: <strong>{{ occurrence.label }}</strong> · <a href="{% url 'occurrence-edit' occurrence.pk %}">Edit plan</a></p>{% endif %}

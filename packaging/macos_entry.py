@@ -1,4 +1,4 @@
-"""PyInstaller entrypoint for the PUB-TV macOS application bundle."""
+"""PyInstaller entrypoint for the ChannelDex macOS application bundle."""
 import os
 
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "pubtv.config.settings")

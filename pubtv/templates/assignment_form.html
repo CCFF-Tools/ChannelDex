@@ -1,7 +1,7 @@
 {% extends "base.html" %}
-{% block page_title %}{{ title }} · PUB-TV{% endblock %}
+{% block page_title %}{{ title }} · ChannelDex{% endblock %}
 {% block content %}
-<div class="page-heading"><p class="eyebrow">Schedule</p><h1>{{ title }}</h1><p class="lede">PUB-TV suggests the next episode and premiere date from the show's queue and regular times. Confirm the suggestion before it becomes part of the planned schedule.</p></div>
+<div class="page-heading"><p class="eyebrow">Schedule</p><h1>{{ title }}</h1><p class="lede">ChannelDex suggests the next episode and premiere date from the show's queue and regular times. Confirm the suggestion before it becomes part of the planned schedule.</p></div>
 {% if selected_show %}
 <section class="cycle-explainer"><h2>{{ selected_show.title }} cycle</h2><p><span class="badge premiere">Premiere</span> starts a new cycle. Every replay after it uses that episode until the next premiere. A replay earlier in the calendar week – such as Monday before a Wednesday premiere – still belongs to the previous cycle.</p>{% if prior_cycle %}<p><strong>Most recently planned cycle:</strong> {{ prior_cycle.premiere_date }} · {{ prior_cycle.episode|default:"No episode" }}</p>{% else %}<p>No earlier premiere cycle is recorded yet. Verify any replay before the first premiere you seed.</p>{% endif %}</section>
 <section class="help-panel"><h2>Upcoming episode queue</h2>{% for queued in queue %}<p><strong>{{ queued.intended_air_order|default:"Unnumbered" }}</strong> · <a href="{% url 'episode-detail' queued.pk %}">{{ queued.title }}</a>{% if forloop.first %} <span class="badge">Suggested next</span>{% endif %}</p>{% empty %}<p>No upcoming episodes are waiting in the queue. Choose a previously scheduled episode below or leave the episode blank to record no program for this cycle.</p>{% endfor %}</section>
