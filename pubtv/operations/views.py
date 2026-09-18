@@ -636,14 +636,17 @@ def week_view(request):
     tz = ZoneInfo(station.timezone) if station else ZoneInfo("America/Detroit")
     start = timezone.make_aware(datetime.combine(selected, datetime.min.time()), tz)
     end = timezone.make_aware(datetime.combine(selected + timedelta(days=7), datetime.min.time()), tz)
+    view_mode = request.GET.get("view", "scheduled")
+    if view_mode not in {"scheduled", "availability"}:
+        view_mode = "scheduled"
     occurrences = Occurrence.objects.filter(
         station=station, status="planned",
         starts_at__lt=end,
     ).select_related("show", "episode", "weekly_assignment", "recurrence_slot", "preparation").order_by("starts_at") if station else []
-    show_type = request.GET.get("show_type", "")
+    occurrences = [item for item in occurrences if item.ends_at > start]
+    show_type = request.GET.get("show_type", "") if view_mode == "scheduled" else ""
     if show_type:
         occurrences = [item for item in occurrences if item.show and item.show.show_type == show_type]
-    occurrences = [item for item in occurrences if item.ends_at > start]
     for item in occurrences: item.readiness = preparation_readiness(item)
     day_segments = []
     for day in days:
@@ -655,7 +658,18 @@ def week_view(request):
                                      "start": max(item.starts_at, day_start).astimezone(tz),
                                      "end": min(item.ends_at, day_end).astimezone(tz)})
     capacity = calendar_capacity(station, selected, 7) if station else []
-    return render(request, "calendar_week.html", {"title": "Week plan", "occurrences": occurrences, "day_segments": day_segments, "week_days": days, "selected_date": selected, "previous_week": selected - timedelta(days=7), "next_week": selected + timedelta(days=7), "capacity": capacity, "capacity_filter": request.GET.get("capacity", "all"), "show_type_filter": show_type, "show_types": Show.SHOW_TYPES, "alerts": _alerts(occurrences)})
+    capacity_filter = request.GET.get("capacity", "all")
+    if capacity_filter not in {"all", "reserved", "available"}:
+        capacity_filter = "all"
+    return render(request, "calendar_week.html", {
+        "title": "Week plan", "view_mode": view_mode, "occurrences": occurrences if view_mode == "scheduled" else [],
+        "day_segments": day_segments if view_mode == "scheduled" else [], "week_days": days,
+        "selected_date": selected, "previous_week": selected - timedelta(days=7),
+        "next_week": selected + timedelta(days=7), "capacity": capacity,
+        "capacity_filter": capacity_filter, "show_type_filter": show_type,
+        "show_types": Show.SHOW_TYPES,
+        "alerts": _alerts(occurrences) if view_mode == "scheduled" else [],
+    })
 
 def agenda_view(request):
     try:

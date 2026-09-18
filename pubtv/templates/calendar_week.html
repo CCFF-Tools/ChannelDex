@@ -1,1 +1,35 @@
-{% extends "base.html" %}{% block content %}<div class="page-heading"><p class="eyebrow">Schedule</p><h1>{{ title }}</h1><p class="lede">Review reserved and available time for the Monday–Sunday calendar view. Reserved includes planned occurrences and active recurring show reservations.</p></div><p><a href="?date={{ previous_week|date:'Y-m-d' }}">Previous week</a> · Week of {{ selected_date }} · <a href="?date={{ next_week|date:'Y-m-d' }}">Next week</a></p><form class="calendar-filter" method="get"><input type="hidden" name="date" value="{{ selected_date|date:'Y-m-d' }}"><label for="capacity-filter">Show time</label><select id="capacity-filter" name="capacity"><option value="all"{% if capacity_filter == 'all' %} selected{% endif %}>All time</option><option value="reserved"{% if capacity_filter == 'reserved' %} selected{% endif %}>Reserved</option><option value="available"{% if capacity_filter == 'available' %} selected{% endif %}>Available</option></select><label for="show-type-filter">Filter planned show items by type</label><select id="show-type-filter" name="show_type"><option value="">All types</option>{% for value,label in show_types %}<option value="{{ value }}"{% if show_type_filter == value %} selected{% endif %}>{{ label }}</option>{% endfor %}</select><button type="submit">Apply filters</button></form><p class="help">Capacity stays station-wide; show type only filters planned show items.</p><p class="legend"><span class="badge reserved">Reserved</span> · <span class="badge available">Available</span> · <span class="badge filler">Virtual-channel filler (reserved)</span></p>{% if alerts %}<aside class="alerts"><strong>Warnings</strong>{% for alert in alerts %}<p>{{ alert }}</p>{% endfor %}</aside>{% endif %}{% if not occurrences %}<div class="empty-state"><p>No planned items for this week.</p><a href="{% url 'assignment-create' %}">Confirm the next premiere cycle</a> or <a href="{% url 'occurrence-create' %}">add another schedule item</a>.</div>{% endif %}<div class="calendar-grid">{% for day in week_days %}<section><h2>{{ day|date:'D M j' }}</h2>{% for capacity_day in capacity %}{% if capacity_day.date == day %}{% for interval in capacity_day.intervals %}{% if capacity_filter == 'all' or interval.status == capacity_filter or interval.status == 'virtual-channel-filler' and capacity_filter == 'reserved' %}<p class="capacity-interval"><span class="badge {{ interval.status }}">{{ interval.label }}</span><br><strong>{{ interval.start|date:'g:i A' }}–{{ interval.end|date:'g:i A' }}</strong></p>{% endif %}{% endfor %}{% endif %}{% endfor %}{% for segment in day_segments %}{% if segment.date == day %}{% with o=segment.occurrence %}<p><strong>{{ segment.start|date:'g:i A' }}–{{ segment.end|date:'g:i A' }}</strong><br><span class="badge">{{ o.schedule_context }}</span> {{ o.label }}<br><small>{{ o.get_item_type_display }}{% if o.show %} · {{ o.show.title }}{% endif %} · {{ o.readiness.label }} · <a href="{% url 'occurrence-edit' o.pk %}">Edit</a></small></p>{% endwith %}{% endif %}{% endfor %}</section>{% endfor %}</div>{% endblock %}
+{% extends "base.html" %}
+{% block content %}
+<div class="page-heading"><p class="eyebrow">Schedule</p><h1>{{ title }}</h1><p class="lede">Review the Monday–Sunday calendar view.</p></div>
+<p><a href="?date={{ previous_week|date:'Y-m-d' }}&amp;view={{ view_mode }}{% if view_mode == 'availability' %}&amp;capacity={{ capacity_filter }}{% elif show_type_filter %}&amp;show_type={{ show_type_filter }}{% endif %}">Previous week</a> · Week of {{ selected_date }} · <a href="?date={{ next_week|date:'Y-m-d' }}&amp;view={{ view_mode }}{% if view_mode == 'availability' %}&amp;capacity={{ capacity_filter }}{% elif show_type_filter %}&amp;show_type={{ show_type_filter }}{% endif %}">Next week</a></p>
+
+<form class="calendar-filter" method="get">
+  <input type="hidden" name="date" value="{{ selected_date|date:'Y-m-d' }}">
+  <label for="week-view">Week view</label>
+  <select id="week-view" name="view">
+    <option value="scheduled"{% if view_mode == 'scheduled' %} selected{% endif %}>Scheduled items</option>
+    <option value="availability"{% if view_mode == 'availability' %} selected{% endif %}>Availability</option>
+  </select>
+  {% if view_mode == "availability" %}
+    <label for="capacity-filter">Show time</label>
+    <select id="capacity-filter" name="capacity"><option value="all"{% if capacity_filter == 'all' %} selected{% endif %}>All time</option><option value="reserved"{% if capacity_filter == 'reserved' %} selected{% endif %}>Reserved</option><option value="available"{% if capacity_filter == 'available' %} selected{% endif %}>Available</option></select>
+  {% else %}
+    <label for="show-type-filter">Filter planned show items by type</label>
+    <select id="show-type-filter" name="show_type"><option value="">All types</option>{% for value,label in show_types %}<option value="{{ value }}"{% if show_type_filter == value %} selected{% endif %}>{{ label }}</option>{% endfor %}</select>
+  {% endif %}
+  <button type="submit">Apply filters</button>
+</form>
+
+{% if view_mode == "availability" %}
+  <p class="help">Availability shows station-wide capacity ranges, including recurring reservations and virtual-channel filler.</p>
+{% else %}
+  <p class="help">Scheduled items shows planned occurrences and their details.</p>
+{% endif %}
+{% if view_mode == "availability" %}<p class="legend"><span class="badge reserved">Reserved</span> · <span class="badge available">Available</span> · <span class="badge filler">Virtual-channel filler (reserved)</span></p>{% endif %}
+{% if alerts %}<aside class="alerts"><strong>Warnings</strong>{% for alert in alerts %}<p>{{ alert }}</p>{% endfor %}</aside>{% endif %}
+{% if view_mode == "scheduled" and not occurrences %}<div class="empty-state"><p>No planned items for this week.</p><a href="{% url 'assignment-create' %}">Confirm the next premiere cycle</a> or <a href="{% url 'occurrence-create' %}">add another schedule item</a>.</div>{% endif %}
+<div class="calendar-grid">
+{% for day in week_days %}<section><h2>{{ day|date:'D M j' }}</h2>
+  {% if view_mode == "availability" %}{% for capacity_day in capacity %}{% if capacity_day.date == day %}{% for interval in capacity_day.intervals %}{% if capacity_filter == 'all' or interval.status == capacity_filter or interval.status == 'virtual-channel-filler' and capacity_filter == 'reserved' %}<p class="capacity-interval"><span class="badge {{ interval.status }}">{{ interval.label }}</span><br><strong>{{ interval.start|date:'g:i A' }}–{{ interval.end|date:'g:i A' }}</strong></p>{% endif %}{% endfor %}{% endif %}{% endfor %}{% else %}{% for segment in day_segments %}{% if segment.date == day %}{% with o=segment.occurrence %}<p><strong>{{ segment.start|date:'g:i A' }}–{{ segment.end|date:'g:i A' }}</strong><br><span class="badge">{{ o.schedule_context }}</span> {{ o.label }}<br><small>{{ o.get_item_type_display }}{% if o.show %} · {{ o.show.title }}{% endif %} · {{ o.readiness.label }} · <a href="{% url 'occurrence-edit' o.pk %}">Edit</a></small></p>{% endwith %}{% endif %}{% endfor %}{% endif %}
+</section>{% endfor %}</div>
+{% endblock %}

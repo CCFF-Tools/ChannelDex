@@ -228,12 +228,40 @@ class TodoWorkflowTests(TestCase):
         starts = datetime(2026, 1, 5, 7, tzinfo=ZoneInfo("America/Detroit"))
         Occurrence.objects.create(station=self.station, show=self.show, episode=self.episode, item_type="episode", label="E", starts_at=starts, planned_duration_seconds=60)
         self.assertContains(Client().get("/day/?date=2026-01-05&capacity=reserved"), "Reserved")
-        self.assertContains(Client().get("/week/?date=2026-01-05&capacity=available"), "Available")
+        self.assertContains(Client().get("/week/?date=2026-01-05&view=availability&capacity=available"), "Available")
         self.show.show_type = "arts_and_culture"
         self.show.save(update_fields=["show_type"])
         self.assertContains(Client().get("/shows/?show_type=arts_and_culture"), "Street Talk")
         self.assertContains(Client().get("/day/?date=2026-01-05&show_type=arts_and_culture"), "Reserved")
         self.assertContains(Client().get("/agenda/?days=7"), "E")
+
+    def test_week_view_separates_scheduled_items_and_availability_modes(self):
+        starts = datetime(2026, 1, 5, 7, tzinfo=ZoneInfo("America/Detroit"))
+        Occurrence.objects.create(
+            station=self.station, show=self.show, episode=self.episode,
+            item_type="episode", label="Week premiere", starts_at=starts,
+            planned_duration_seconds=60,
+        )
+        client = Client()
+
+        scheduled = client.get("/week/?date=2026-01-05")
+        self.assertEqual(scheduled.status_code, 200)
+        scheduled_body = scheduled.content.decode()
+        self.assertIn("Week premiere", scheduled_body)
+        self.assertIn('name="show_type"', scheduled_body)
+        self.assertNotIn('class="capacity-interval"', scheduled_body)
+        self.assertNotIn("Virtual-channel filler (reserved)", scheduled_body)
+        self.assertIn('name="view"', scheduled_body)
+
+        availability = client.get("/week/?date=2026-01-05&view=availability&capacity=reserved")
+        self.assertEqual(availability.status_code, 200)
+        availability_body = availability.content.decode()
+        self.assertNotIn("Week premiere", availability_body)
+        self.assertNotIn('name="show_type"', availability_body)
+        self.assertIn('class="capacity-interval"', availability_body)
+        self.assertIn("Virtual-channel filler (reserved)", availability_body)
+        self.assertIn('name="capacity"', availability_body)
+        self.assertIn('value="availability"', availability_body)
 
     def test_calendar_warnings_context_and_history_readiness(self):
         today = timezone.localdate()
