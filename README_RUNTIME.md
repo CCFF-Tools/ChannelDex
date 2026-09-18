@@ -4,6 +4,12 @@ ChannelDex is owned, developed, and published by Capital Media Systems. The
 existing `pubtv` Python package, `PUBTV_*` environment variables, and
 `Application Support/PUB-TV` data location are compatibility identifiers.
 
+The 2026-09-17 usability overhaul is accepted as an application implementation
+target. It changes owner-facing navigation and workflows, not the loopback
+runtime, packaging, data-folder, or backup contracts described here. Until the
+staged implementation and pilot are verified, this document must not be read as
+claiming that the new Today/Schedule/Shows/History/Settings IA is complete.
+
 The initial supported test target is macOS 26.x on Apple Silicon. Intel Mac compatibility is deferred for later validation and is not currently promised. The runtime and packaging approach must remain portable enough to evaluate that target separately; do not assume one universal executable.
 
 An unsigned local macOS app can be built on the current machine with PyInstaller 6.22.2 (the build targets the current CPU architecture; it is not a universal binary):

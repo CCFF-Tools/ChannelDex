@@ -9,6 +9,12 @@ It is designed for one PUB-TV owner/editor using one Mac. It runs on that Mac an
 opens in a web browser; ordinary use does not require cloud hosting or an internet
 connection.
 
+> **Accepted usability direction (implementation pending):** the owner-facing
+> target is Today, unified Schedule, Shows, History, and Settings, with a
+> schedule-item workbench and a complete Show workspace. This contract has been
+> accepted for implementation; the current build and runtime documentation do
+> not yet claim that every redesign item is complete.
+
 > **Current status:** ChannelDex is an implemented, locally tested V1 application, not a signed or
 > notarized product release. The current packaged build targets Apple Silicon on
 > macOS 26.x. Intel compatibility, installer behavior, signing, notarization, and

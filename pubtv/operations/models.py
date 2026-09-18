@@ -30,10 +30,14 @@ class Show(models.Model):
     show_type = models.CharField(max_length=24, choices=SHOW_TYPES, blank=True)
     show_type_other = models.CharField(max_length=160, blank=True)
     description = models.TextField(blank=True)
-    producer_name = models.CharField(max_length=160, blank=True)
-    producer_phone = models.CharField(max_length=80, blank=True)
-    producer_email = models.EmailField(blank=True)
+    legacy_producer_name = models.CharField(max_length=160, blank=True)
+    legacy_producer_phone = models.CharField(max_length=80, blank=True)
+    legacy_producer_email = models.EmailField(blank=True)
     legacy_producer_contact = models.CharField(max_length=240, blank=True)
+    primary_producer = models.ForeignKey(
+        "Producer", null=True, blank=True, on_delete=models.SET_NULL,
+        related_name="primary_shows",
+    )
     website = models.URLField(blank=True)
     youtube = models.URLField(blank=True)
     facebook = models.URLField(blank=True)
@@ -46,6 +50,8 @@ class Show(models.Model):
     def __str__(self): return self.title
     def clean(self):
         super().clean()
+        if self.primary_producer_id and self.primary_producer.station_id != self.station_id:
+            raise ValidationError("Primary producer must belong to the same station as the show.")
         if self.primary_delivery_method == "other" and not self.primary_delivery_other.strip():
             raise ValidationError({"primary_delivery_other": "Describe the other delivery method."})
         if self.show_type == "other" and not self.show_type_other.strip():
@@ -83,7 +89,7 @@ class Episode(models.Model):
     intended_premiere_date = models.DateField(null=True, blank=True)
     runtime_seconds = models.PositiveIntegerField(null=True, blank=True)
     status = models.CharField(max_length=24, choices=[("pending", "Pending"), ("previously_scheduled", "Previously scheduled")], default="pending")
-    received_at = models.DateTimeField(null=True, blank=True)
+    legacy_received_at = models.DateTimeField(null=True, blank=True)
     def __str__(self): return f"{self.show.code}: {self.title}"
 
     def clean(self):
@@ -103,6 +109,37 @@ class Episode(models.Model):
     @property
     def runtime_label(self):
         return _duration_label(self.runtime_seconds)
+
+    @property
+    def received_at(self):
+        """Canonical receipt time, derived from linked deliveries when possible."""
+        delivery_time = self.deliveries.filter(received_at__isnull=False).order_by("received_at").values_list("received_at", flat=True).first()
+        return delivery_time or self.legacy_received_at
+
+    @property
+    def workflow_timeline(self):
+        """A derived, auditable readiness timeline including legacy assertions."""
+        events = []
+        for milestone in self.workflow_milestones.all():
+            events.append({"stage": milestone.stage, "label": milestone.get_stage_display(), "at": milestone.completed_at, "actor": milestone.actor, "provenance": milestone.provenance, "legacy": True})
+        for delivery in self.deliveries.filter(received_at__isnull=False):
+            events.append({"stage": "received", "label": "Received", "at": delivery.received_at, "actor": "", "provenance": delivery.reference, "legacy": False})
+        for asset in self.assets.all():
+            prep = getattr(asset, "preparation_record", None)
+            if prep:
+                if prep.source_available_at:
+                    events.append({"stage": "received", "label": "Source available", "at": prep.source_available_at, "actor": prep.source_available_actor, "provenance": prep.source_available_provenance, "legacy": False})
+                if prep.ame_at or prep.encoded_at:
+                    events.append({"stage": "encoded", "label": "Encoded", "at": prep.ame_at or prep.encoded_at, "actor": prep.ame_actor or prep.encoded_actor, "provenance": prep.ame_provenance or prep.encoded_provenance, "legacy": False})
+            for transfer in asset.target_transfers.all():
+                if transfer.transferred_at:
+                    events.append({"stage": "transferred", "label": "Transferred", "at": transfer.transferred_at, "actor": transfer.transferred_actor, "provenance": transfer.transfer_provenance, "legacy": False})
+        for occurrence in self.occurrences.all():
+            for programming in occurrence.programming.all():
+                events.append({"stage": "scheduled", "label": "Programmed", "at": programming.confirmed_at, "actor": programming.actor, "provenance": programming.provenance, "legacy": False})
+            for coverage in occurrence.uploaded_revisions.filter(state="active").values("uploaded_at", "device__name"):
+                events.append({"stage": "scheduled", "label": "Schedule uploaded", "at": coverage["uploaded_at"], "actor": "", "provenance": coverage["device__name"], "legacy": False})
+        return sorted(events, key=lambda event: (event["at"] is None, event["at"]))
 
 class EpisodeWorkflowMilestone(models.Model):
     STAGES = [
@@ -145,23 +182,42 @@ class EpisodeWorkflowMilestone(models.Model):
 class MediaAsset(models.Model):
     asset_id = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
     episode = models.ForeignKey(Episode, null=True, blank=True, on_delete=models.SET_NULL, related_name="assets")
-    label = models.CharField(max_length=160)
+    legacy_label = models.CharField(max_length=160, blank=True)
     file_name = models.CharField(max_length=255, blank=True)
     kind = models.CharField(max_length=16, choices=[("source", "Source"), ("encoded", "Encoded")])
     version = models.CharField(max_length=80, default="v1")
     runtime_seconds = models.PositiveIntegerField(null=True, blank=True)
     smb_reference = models.CharField(max_length=300, blank=True)
 
-    def __str__(self):
-        return self.file_name or self.label or f"Asset for {self.episode or 'unlinked episode'}"
+    def __init__(self, *args, **kwargs):
+        # Compatibility for old fixtures/callers; this never populates the
+        # canonical filename or mirrors future changes.
+        legacy_label = kwargs.pop("label", None)
+        super().__init__(*args, **kwargs)
+        if legacy_label is not None and not self.file_name:
+            self.file_name = legacy_label
+        # Seed the canonical filename for legacy Python callers once; later
+        # edits remain deliberately non-mirroring.
+        if legacy_label is not None and not self.file_name:
+            self.file_name = legacy_label
 
     def save(self, *args, **kwargs):
-        # Keep the legacy label populated while filename becomes the owner-facing field.
-        if self.file_name and not self.label:
-            self.label = self.file_name
-        elif self.label and not self.file_name:
-            self.file_name = self.label
-        super().save(*args, **kwargs)
+        if not self.file_name and self.legacy_label:
+            self.file_name = self.legacy_label
+        return super().save(*args, **kwargs)
+
+    @property
+    def label(self):
+        return self.file_name or self.legacy_label
+
+    @label.setter
+    def label(self, value):
+        if not self.legacy_label and self.file_name and self.file_name != value:
+            self.legacy_label = self.file_name
+        self.file_name = value or ""
+
+    def __str__(self):
+        return self.file_name or self.legacy_label or f"Asset for {self.episode or 'unlinked episode'}"
 
 class Delivery(models.Model):
     METHOD_CHOICES = Show.DELIVERY_METHODS
@@ -220,11 +276,8 @@ class RecurrenceSlot(models.Model):
     def save(self, *args, **kwargs):
         if self.show_id and not self.pk and not self.is_premiere:
             self.is_premiere = not RecurrenceSlot.objects.filter(show_id=self.show_id).exists()
-        if self.show_id and not self.show.slot_duration_seconds and self.duration_seconds:
-            Show.objects.filter(pk=self.show_id, slot_duration_seconds=None).update(
-                slot_duration_seconds=self.duration_seconds
-            )
-            self.show.slot_duration_seconds = self.duration_seconds
+        if self.show_id and self.show.slot_duration_seconds:
+            self.duration_seconds = self.show.slot_duration_seconds
         super().save(*args, **kwargs)
 
     @property
@@ -354,14 +407,20 @@ class Occurrence(models.Model):
     def unique_asset_id_label(self):
         return str(self.asset.asset_id) if self.asset else "Not assigned"
 
+    @property
+    def display_label(self):
+        if self.item_type == "episode" and self.episode:
+            return " · ".join(part for part in (self.episode.show.title, self.episode.title) if part)
+        return self.label
+
 class Preparation(models.Model):
     occurrence = models.OneToOneField(Occurrence, on_delete=models.CASCADE, related_name="preparation")
     source_available = models.CharField(max_length=12, choices=[("yes", "Yes"), ("no", "No"), ("na", "N/A")], default="no")
     ame_preset = models.CharField(max_length=160, blank=True)
-    ftp_output_device = models.CharField(max_length=200, blank=True)
+    legacy_ftp_output_device = models.CharField(max_length=200, blank=True)
     library_registration = models.CharField(max_length=200, blank=True)
     slot_assignment = models.CharField(max_length=200, blank=True)
-    uploaded_schedule_revision = models.CharField(max_length=120, blank=True)
+    legacy_uploaded_schedule_revision = models.CharField(max_length=120, blank=True)
     provenance = models.TextField(blank=True)
     revision = models.PositiveIntegerField(default=1)
     source_available_actor = models.CharField(max_length=120, blank=True); source_available_at = models.DateTimeField(null=True, blank=True); source_available_provenance = models.TextField(blank=True)
@@ -370,6 +429,73 @@ class Preparation(models.Model):
     library_actor = models.CharField(max_length=120, blank=True); library_at = models.DateTimeField(null=True, blank=True); library_provenance = models.TextField(blank=True)
     slot_actor = models.CharField(max_length=120, blank=True); slot_at = models.DateTimeField(null=True, blank=True); slot_provenance = models.TextField(blank=True)
     upload_actor = models.CharField(max_length=120, blank=True); upload_at = models.DateTimeField(null=True, blank=True); upload_provenance = models.TextField(blank=True)
+
+    def __init__(self, *args, **kwargs):
+        ftp_device = kwargs.pop("ftp_output_device", None)
+        upload_revision = kwargs.pop("uploaded_schedule_revision", None)
+        super().__init__(*args, **kwargs)
+        if ftp_device is not None and not self.legacy_ftp_output_device:
+            self.legacy_ftp_output_device = ftp_device
+        if upload_revision is not None and not self.legacy_uploaded_schedule_revision:
+            self.legacy_uploaded_schedule_revision = upload_revision
+
+    @property
+    def ftp_output_device(self):
+        return self.legacy_ftp_output_device
+
+    @ftp_output_device.setter
+    def ftp_output_device(self, value):
+        self.legacy_ftp_output_device = value or ""
+
+    @property
+    def uploaded_schedule_revision(self):
+        return self.legacy_uploaded_schedule_revision
+
+    @uploaded_schedule_revision.setter
+    def uploaded_schedule_revision(self, value):
+        self.legacy_uploaded_schedule_revision = value or ""
+
+
+class AssetPreparation(models.Model):
+    SOURCE_CHOICES = [("yes", "Yes"), ("no", "No"), ("na", "N/A")]
+    asset = models.OneToOneField(MediaAsset, on_delete=models.CASCADE, related_name="preparation_record")
+    source_available = models.CharField(max_length=12, choices=SOURCE_CHOICES, default="no")
+    source_available_at = models.DateTimeField(null=True, blank=True)
+    source_available_actor = models.CharField(max_length=120, blank=True)
+    source_available_provenance = models.TextField(blank=True)
+    ame_preset = models.CharField(max_length=160, blank=True)
+    ame_details = models.TextField(blank=True)
+    ame_at = models.DateTimeField(null=True, blank=True)
+    ame_actor = models.CharField(max_length=120, blank=True)
+    ame_provenance = models.TextField(blank=True)
+    encoded_at = models.DateTimeField(null=True, blank=True)
+    encoded_actor = models.CharField(max_length=120, blank=True)
+    encoded_provenance = models.TextField(blank=True)
+
+    def clean(self):
+        super().clean()
+        if self.source_available == "yes" and not self.source_available_at:
+            raise ValidationError({"source_available_at": "Record when the source became available."})
+        if self.ame_details and not self.ame_preset:
+            raise ValidationError({"ame_preset": "An AME preset is required when AME details are recorded."})
+
+
+class AssetTargetTransfer(models.Model):
+    asset = models.ForeignKey(MediaAsset, on_delete=models.CASCADE, related_name="target_transfers")
+    device = models.ForeignKey(Device, on_delete=models.PROTECT, related_name="asset_transfers")
+    ftp_details = models.TextField(blank=True)
+    library_registration = models.CharField(max_length=200, blank=True)
+    transferred_at = models.DateTimeField(null=True, blank=True)
+    transferred_actor = models.CharField(max_length=120, blank=True)
+    transfer_provenance = models.TextField(blank=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["asset", "device"], name="unique_asset_target_transfer")]
+
+    def clean(self):
+        super().clean()
+        if not self.ftp_details and not self.library_registration:
+            raise ValidationError("Record FTP transfer details or library registration.")
 
 class UploadedScheduleRevision(models.Model):
     STATE = [(x, x.title()) for x in ("active", "superseded", "invalidated")]
@@ -401,8 +527,13 @@ class UploadedOccurrenceCoverage(models.Model):
 class OccurrenceProgramming(models.Model):
     occurrence = models.ForeignKey(Occurrence, on_delete=models.CASCADE, related_name="programming")
     device = models.ForeignKey(Device, on_delete=models.PROTECT)
+    slot_assignment = models.CharField(max_length=200, blank=True)
     confirmed_at = models.DateTimeField(default=timezone.now)
+    actor = models.CharField(max_length=120, blank=True)
+    provenance = models.TextField(blank=True)
     note = models.TextField(blank=True)
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["occurrence", "device"], name="unique_occurrence_programming_device")]
     def __str__(self):
         return f"{self.occurrence} · {self.device}"
 

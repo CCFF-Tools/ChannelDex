@@ -44,12 +44,12 @@ class ReservedScheduleViewTests(TestCase):
 
 
 class NavigationTests(TestCase):
-    def test_schedule_navigation_has_upcoming_shows_and_no_upload_action(self):
+    def test_today_navigation_has_recurring_times_and_no_upload_action(self):
         response = self.client.get(reverse("dashboard"))
         self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "Upcoming shows")
+        self.assertContains(response, "Schedule")
+        self.assertContains(self.client.get(reverse("reserved-schedule")), "Recurring times")
         self.assertNotContains(response, "Record schedule upload")
-        self.assertNotContains(response, reverse("scheduling-today"))
         self.assertNotContains(response, reverse("upload-create"))
 
     def test_daily_scheduling_does_not_prompt_for_upload(self):

@@ -5,14 +5,14 @@ from django.db.models import F
 from django.core.exceptions import ValidationError
 from django.utils import timezone
 from django.core.signing import TimestampSigner, BadSignature
-from .models import Occurrence, Episode, RecurrenceSlot, UploadedScheduleRevision, UploadedOccurrenceCoverage, WeeklyEpisodeAssignment, Preparation, AiringEvidence, AuditEvent
+from .models import Occurrence, Episode, RecurrenceSlot, UploadedScheduleRevision, UploadedOccurrenceCoverage, WeeklyEpisodeAssignment, Preparation, AssetPreparation, AssetTargetTransfer, AiringEvidence, AuditEvent
 
 def audit(action, entity, obj=None, summary="", actor="owner"):
     return AuditEvent.objects.create(actor=actor, action=action, entity=entity, entity_id=getattr(obj, "pk", None), revision=getattr(obj, "revision", None), summary=summary)
 
 def confirm_preparation_fact(preparation: Preparation, fact, value, actor="owner", provenance="manual", expected_revision=None):
     """Record one of the six checklist facts with independent provenance."""
-    fields = {"source_available": "source_available", "ame": "ame_preset", "ftp": "ftp_output_device", "library": "library_registration", "slot": "slot_assignment", "upload": "uploaded_schedule_revision"}
+    fields = {"source_available": "source_available", "ame": "ame_preset", "ftp": "legacy_ftp_output_device", "library": "library_registration", "slot": "slot_assignment", "upload": "legacy_uploaded_schedule_revision"}
     if fact not in fields: raise ValueError("unknown preparation fact")
     now = timezone.now()
     expected_revision = preparation.revision if expected_revision is None else expected_revision
@@ -127,7 +127,9 @@ def suggested_pending_episode(show):
     ).order_by(
         F("intended_air_order").asc(nulls_last=True),
         F("intended_premiere_date").asc(nulls_last=True),
-        F("received_at").asc(nulls_last=True),
+        # received_at is a derived Python property; order by its preserved
+        # legacy source column for a stable FIFO-compatible database order.
+        F("legacy_received_at").asc(nulls_last=True),
         "pk",
     ).first()
 
@@ -315,18 +317,65 @@ def calendar_capacity(station, selected_date, days=1):
     return result
 
 def preparation_readiness(occurrence):
-    """Return manual preparation status only; this is not evidence that an item aired."""
+    """Return canonical preparation status with a compatibility fallback.
+
+    This describes readiness and upload coverage only; it is never evidence that
+    an item aired.
+    """
     required = ["source_available", "ame_preset", "ftp_output_device", "library_registration", "slot_assignment", "uploaded_schedule_revision"]
     prep = getattr(occurrence, "preparation", None)
+    asset = occurrence.asset
+    asset_prep = getattr(asset, "preparation_record", None) if asset else None
+    transfers = list(asset.target_transfers.all()) if asset else []
+    coverage_devices = set(UploadedOccurrenceCoverage.objects.filter(
+        occurrence=occurrence,
+        occurrence_revision=occurrence.revision,
+        upload__state="active",
+    ).values_list("upload__device_id", flat=True))
+    programmed_by_device = {
+        row.device_id: row.slot_assignment
+        for row in occurrence.programming.all()
+        if row.slot_assignment
+    }
     if occurrence.item_type == "live":
         values = {field: "N/A (live)" for field in required}
         values["slot_assignment"] = ""
         values["uploaded_schedule_revision"] = ""
         if prep:
-            values.update({field: getattr(prep, field, "") for field in ("slot_assignment", "uploaded_schedule_revision")})
+            values.update({field: getattr(prep, "slot_assignment", "") for field in ("slot_assignment",)})
+        values["slot_assignment"] = bool(programmed_by_device) or values["slot_assignment"]
+        values["uploaded_schedule_revision"] = bool(coverage_devices)
     else:
-        values = {field: getattr(prep, field, "") if prep else "" for field in required}
-    complete = sum(1 for value in values.values() if value not in ("", None, "no"))
+        values = {field: "" for field in required}
+        values["source_available"] = getattr(asset_prep, "source_available", "") if asset_prep else ""
+        values["ame_preset"] = getattr(asset_prep, "ame_preset", "") if asset_prep else ""
+        complete_transfer_devices = {
+            transfer.device_id for transfer in transfers
+            if transfer.ftp_details and transfer.library_registration
+        }
+        # Legacy transfer text can still participate only when it names the
+        # same concrete device used by programming and upload coverage.
+        if not complete_transfer_devices and prep and prep.legacy_ftp_output_device and prep.library_registration:
+            legacy_name = prep.legacy_ftp_output_device.strip()
+            complete_transfer_devices = set(
+                occurrence.programming.filter(device__name=legacy_name, slot_assignment__gt="")
+                .values_list("device_id", flat=True)
+            )
+        chain_devices = complete_transfer_devices & set(programmed_by_device) & coverage_devices
+        chain_ready = bool(chain_devices)
+        transfer = next((item for item in transfers if item.device_id in chain_devices), None)
+        values["ftp_output_device"] = transfer.ftp_details if transfer else (getattr(prep, "legacy_ftp_output_device", "") if prep else "")
+        values["library_registration"] = transfer.library_registration if transfer else (getattr(prep, "library_registration", "") if prep else "")
+        values["slot_assignment"] = bool(chain_ready)
+        values["uploaded_schedule_revision"] = bool(chain_ready)
+        if prep:
+            # Legacy records remain usable until their canonical facts are entered.
+            values["source_available"] = values["source_available"] or prep.source_available
+            values["ame_preset"] = values["ame_preset"] or prep.ame_preset
+            if not chain_ready:
+                values["slot_assignment"] = ""
+                values["uploaded_schedule_revision"] = ""
+    complete = sum(1 for value in values.values() if value not in ("", None, "no", False))
     return {"complete": complete, "total": len(required), "label": f"{complete}/{len(required)} preparation facts", "ready": complete == len(required)}
 
 @transaction.atomic

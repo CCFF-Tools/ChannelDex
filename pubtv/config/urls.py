@@ -3,8 +3,10 @@ from pubtv.operations import views
 
 urlpatterns = [
     path("", views.dashboard, name="dashboard"),
+    path("today/", views.dashboard, name="today"),
     path("schedule-today/", views.scheduling_today, name="scheduling-today"),
-    path("schedule/", views.reserved_schedule, name="reserved-schedule"),
+    path("schedule/", views.schedule_view, name="schedule"),
+    path("schedule/recurring/", views.reserved_schedule, name="reserved-schedule"),
     path("shows/", views.show_list, name="show-list"),
     path("shows/<int:show_id>/", views.show_detail, name="show-detail"),
     path("shows/<int:show_id>/edit/", views.show_edit, name="show-edit"),
@@ -22,7 +24,11 @@ urlpatterns = [
     path("shows/<int:show_id>/slots/length/", views.show_slot_duration_edit, name="show-slot-duration-edit"),
     path("slots/new/", views.slot_create, name="slot-create"), path("slots/<int:pk>/edit/", views.slot_edit, name="slot-edit"), path("assignments/new/", views.assignment_create, name="assignment-create"),
     path("day/", views.day_view, name="day-view"), path("week/", views.week_view, name="week-view"), path("agenda/", views.agenda_view, name="agenda"), path("history/", views.history_view, name="history"),
+    path("settings/", views.settings_view, name="settings"), path("settings/devices/", views.device_list, name="device-list"),
+    path("occurrences/<int:pk>/", views.occurrence_workbench, name="occurrence-workbench"),
     path("occurrences/<int:pk>/preparation/", views.preparation_edit, name="preparation-edit"), path("occurrences/<int:pk>/programming/", views.programming_create, name="programming-create"),
+    path("assets/<int:asset_id>/transfers/new/", views.transfer_create, name="transfer-create"),
+    path("assets/<int:asset_id>/transfers/<int:pk>/edit/", views.transfer_edit, name="transfer-edit"),
     path("uploads/new/", views.upload_create, name="upload-create"), path("occurrences/<int:pk>/airing/", views.airing_create, name="airing-create"),
     path("uploads/<int:pk>/<str:state>/", views.upload_transition, name="upload-transition"),
     path("quit/", views.quit_app, name="quit-app"),

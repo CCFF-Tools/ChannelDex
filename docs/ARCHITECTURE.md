@@ -1,5 +1,29 @@
 # Architecture and scaffolding proposal
 
+## Accepted interaction architecture (2026-09-17)
+
+The application remains one loopback Django service, but its owner-facing
+composition is accepted as: Today; unified Schedule views (Day, Week, Agenda,
+Recurring Times); Shows; History; and Settings. The schedule-item workbench is
+the composition root for contextual plan/media/preparation/programming/upload/
+airing/activity views. The Show workspace composes show, Producer, episode queue,
+weekly times, premiere selection, and upcoming occurrences. Legacy endpoints may
+redirect to their new contextual destinations during migration; this does not
+create duplicate workflows.
+
+The UI should derive statuses and one activity timeline from authoritative facts.
+It must not create a second status store or duplicate event facts merely to make
+the workbench convenient. Technical provenance, immutable IDs, and migration
+values remain expandable history details rather than primary form fields.
+
+The accepted ownership split is asset version for source/encoding, asset version
++ Device for transfer and library registration, Occurrence + Device for playback
+programming, and exact Occurrence revision coverage for uploaded schedules.
+Replays reuse asset preparation but never silently reuse occurrence programming or
+upload coverage. Show-level slot length is materialized as an occurrence snapshot
+when a plan is created or revised. Legacy fields are retained only for migration
+and audit compatibility.
+
 Status: accepted for implementation on 2026-09-09; the initial runtime/testing target is macOS 26.x on Apple Silicon. Unsigned local PyInstaller packaging is implemented and smoke-tested; signing, notarization, distribution, and Intel validation remain open/deferred. Updated 2026-09-09.
 
 ## Recommended shape
@@ -91,6 +115,19 @@ Names and exact module boundaries may be simplified at implementation. Runtime d
 3. **Make the daily workflow usable:** add producer records, next-on-slate visibility, preparation checklists, media notes, weekly/day/agenda views, manual history lookup, and audit behavior. Calendar export follows as a near-term roadmap item.
 4. **Pilot and package:** the unsigned Apple Silicon macOS 26.x `.app` build is implemented in `packaging/`; validate the actual Mac, offline operation, stale edits from multiple tabs, privacy, backup/restore, and the owner's real full-day workflow before operational adoption. Intel requires a separate build and later validation.
 5. **Later expansion:** consider Leightronix file/schedule exchange and historical imports, GOV-TV, TelVue integration, shared access, and public distribution as separately reviewed increments.
+
+## Accepted usability delivery sequence (implementation pending)
+
+1. Build the navigation shell, Today, unified Schedule views, contextual actions,
+   compatibility redirects, and return-to-context behavior.
+2. Build the schedule-item workbench and derived readiness/activity presentation.
+3. Build the Show workspace, canonical Producer/episode/queue/time-slot flows,
+   and migration-only handling for redundant fields.
+4. Reconcile data ownership and add migrations without deleting historical
+   provenance; preserve all accepted separation rules.
+5. Run focused tests, then pilot the complete daily workflow with synthetic and
+   owner-sanitized data. Runtime usability and behavioral verification remain
+   pending until those checks occur.
 
 Future import acceptance must define source namespace plus stable row identity/fingerprint, duplicate file/row no-op behavior, and explicit conflict review when the same identity changes. Retain private originals, mappings, parser versions, and row provenance; commit accepted rows transactionally. Schedule files cannot establish actual airings. Do not promise a format or API before examining representative samples.
 

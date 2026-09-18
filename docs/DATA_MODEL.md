@@ -1,5 +1,40 @@
 # ChannelDex conceptual data model
 
+## Accepted usability contract (2026-09-17)
+
+The model is presented through five owner workflows: Today, unified Schedule,
+Shows, History, and Settings. These are views over the entities below, not new
+storage boundaries. A schedule-item workbench is the canonical contextual view
+for plan, media, preparation, programming, upload coverage, airing evidence, and
+activity. A Show workspace is the canonical view for show metadata, producer,
+episodes/queue, recurring times, and occurrences. Compatibility redirects may
+keep legacy URLs usable during migration.
+
+Canonical ownership for the redesign is: Show -> primary Producer, with an
+optional Episode producer override; filename is a property of each MediaAsset,
+not a duplicate label; delivery notification and actual file receipt remain
+distinct facts; the current Show-level slot length is inherited by future
+occurrences, whose planned-length snapshots preserve history; asset preparation
+is per exact asset version; transfer/library registration is per asset version +
+Device; playback programming is per Occurrence + Device; and an
+UploadedScheduleRevision explicitly covers exact occurrence revisions. Schedule
+labels for episode items are derived from show/episode context. Legacy duplicate
+fields (free-text producer/contact values, mirrored asset labels, redundant
+received/workflow entries, preparation provenance, free-text upload revision,
+copied durations, and duplicate schedule labels) are migration-only metadata,
+not user-facing editable facts.
+
+The accepted replay rule is that reusable asset preparation carries to every
+replay of the same exact asset version. Occurrence-specific programming,
+rescheduling, target changes, and upload coverage remain independent and must be
+re-recorded when their occurrence revision changes. No derived status or timeline
+may imply airing.
+
+The following are deliberately separate model distinctions: plan vs aired
+evidence; reservation vs occurrence; notice vs receipt; source vs encoded;
+fixed slot vs runtime; preparation vs programming vs upload; queue classification
+vs readiness; and reported vs log-verified evidence.
+
 This is a conceptual model for the single-owner MVP, not a database migration or an assumed device/API contract. Every business identifier is scoped to a station unless explicitly global. PUB-TV is the initial station; GOV-TV can be added later without merging its schedules, contacts, or operational history.
 
 ## Core entities
@@ -16,7 +51,7 @@ This is a conceptual model for the single-owner MVP, not a database migration or
 | **Device** | A station-owned operational target (initially Ultra-Nexus HD; later TelVue or another target). Device type/capabilities are descriptive until supported by evidence. |
 | **AssetPreparation** | Per asset-version receipt/transcode checklist/notes and dates. It is independent of a target and does not imply scheduled use. |
 | **AssetTargetTransfer** | Per exact asset version and target transfer/validation state, reference, and date. A later asset-version or target change does not retain this confirmation. |
-| **MediaChecklistEvidence** | Six distinct manual facts: source availability; Adobe Media Encoder preset/version/machine/output; exact FTP output/device; WinLGX library registration; WinLGX playback slot; and uploaded external schedule revision. File-related facts may be recorded N/A for live entries. Existing provenance remains stored as legacy audit metadata but is hidden from the current owner-facing preparation form. Fact ownership and replay reuse remain open pending the preparation redesign. These facts do not imply automated validation or airing. |
+| **MediaChecklistEvidence** | Legacy compatibility projection of the six manual facts. New owner-facing workflows derive source/encoding from asset version, transfer/library registration from asset version + device, programming from occurrence + device, and upload coverage from `UploadedScheduleRevision`. File-related facts may be N/A for live entries. Existing provenance remains stored as migration-only audit metadata and is hidden from owner-facing forms. These facts do not imply automated validation or airing. |
 | **RecurrenceSlot** | Effective-dated weekly intent: station, optional show, zero-based Monday–Sunday weekday stored internally but displayed by name, Eastern local time, second-precision duration presented as hours/minutes, and premiere/replay role. Exactly one active show slot is the premiere slot; other active slots replay that week's explicit selection. Used definitions are superseded with a new effective-dated version rather than rewriting prior occurrences. |
 | **WeeklyEpisodeAssignment** | Legacy internal name for the owner-confirmed premiere cycle: actual premiere date, derived Monday calendar bucket, queue-suggested new episode or explicitly chosen older episode (or no-program), and the replays from that premiere until the next premiere. The calendar week remains Monday-based, but episode reuse does not reset on Monday. |
 | **Occurrence** | A concrete scheduled item, generated or manual: type `episode/media`, `station_id`, `PSA`, `filler`, or `live`; fixed start, slot end, selected asset version/runtime, expected content end, optional reserved virtual-channel filler interval, status planned/cancelled/preempted/rescheduled, and reason. Generated occurrences snapshot their weekly role (`New premiere`, `Replay`, or explicit older rerun) so later slot-definition changes do not relabel history. Live items can declare media preparation N/A. Missing runtime leaves filler amount not determined, never available. |

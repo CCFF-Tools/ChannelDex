@@ -2,6 +2,31 @@
 
 This is a durable implementation backlog. **Accepted** items are confirmed requirements; **proposed** items are design suggestions; **open** items still need an owner decision. A TODO entry is not evidence that the capability is implemented.
 
+## Accepted usability overhaul — implementation staged 2026-09-17
+
+The complete prior usability proposal is accepted for implementation. It is not
+marked complete until code and pilot verification provide evidence.
+
+- [ ] Replace the current navigation with Today, unified Schedule (Day/Week/
+  Agenda/Recurring Times), Shows, History, and Settings.
+- [ ] Add the schedule-item workbench and Show workspace; move actions into
+  context, add inline supporting-record creation, progressive forms, and return
+  users to their working context after save.
+- [ ] Add compatibility redirects from legacy routes and remove duplicate global
+  creation/workflow destinations.
+- [ ] Derive status dimensions and one activity/preparation timeline from
+  authoritative records; keep History principally read-only.
+- [ ] Implement canonical Producer ownership, asset filename, receipt facts,
+  show-level slot setting with occurrence snapshots, asset/device transfer,
+  occurrence/device programming, exact upload coverage, and derived episode
+  labels. Retain legacy fields only as migration/audit metadata.
+- [ ] Migrate safely and auditably; do not delete provenance or silently merge
+  plan/airing, reservation/occurrence, notice/receipt, source/encoded,
+  slot/runtime, preparation/programming/upload, queue/readiness, or
+  reported/log-verified facts.
+- [ ] Execute focused behavioral tests and a synthetic-data pilot. Documentation
+  decisions are complete; runtime implementation and verification remain open.
+
 ## Accepted requirements
 
 ### Show metadata
@@ -141,15 +166,14 @@ These additions are **accepted** and implemented.
 ### Preparation redesign
 
 - [ ] **Accepted:** Redesign preparation around episode- and asset-level facts that carry forward to every replay using the same exact episode/asset version. Occurrence-specific scheduling facts must remain separate and must not be copied when they do not apply.
-- [ ] **Open:** Define which preparation facts belong to the episode, exact media asset/version, target device, or scheduled occurrence before changing the data model. The redesign must preserve audit history and must not treat preparation as proof of airing.
+- [x] **Accepted decision:** Preparation ownership is resolved as asset version (source/encoding), asset version + device (transfer/library registration), occurrence + device (playback programming), and exact occurrence revision (uploaded-schedule coverage). Replays reuse asset preparation but require independent occurrence programming/upload coverage. Implementation and migration remain pending; airing evidence stays separate.
 - [x] **Accepted:** Remove the owner-facing **Provenance** field from the preparation workflow for now. Existing stored values remain as hidden legacy audit metadata; no historical values are discarded.
 - [x] **Accepted:** Replace or clearly define unclear checklist language, including **WinLGX library registration** and **WinLGX playback slot**, using terms that match the owner's actual AME, FTP, WinLGX library, and scheduling handoffs.
 
 ### Uploaded-schedule workflow
 
 - [x] **Accepted:** Remove generic object labels such as `Device object (x)` and `Occurrence object (y)` from every owner-facing control and page. Devices, occurrences, shows, episodes, assets, uploads, and related records now use concise human-readable names; internal numeric IDs remain implementation details.
-- [x] **Accepted:** De-emphasize **Preview and commit uploaded schedule** in the current manual workflow. It is no longer presented in primary navigation or dashboard actions while its final disposition remains open.
-- [ ] **Open:** Decide whether the current page should be removed, renamed, or reshaped as a manual record of an upload. Preserve any existing audit/history data while this is resolved.
+- [x] **Accepted:** De-emphasize **Preview and commit uploaded schedule** in the current manual workflow. It is replaced by a contextual **Record schedule upload** action in the schedule-item workbench; exact coverage preview and audit history remain.
 - [ ] **Deferred:** A future UltraNexus integration may directly propose schedule changes, preview the full change set and conflicts, and commit only after explicit owner confirmation. Do not assume an available API, credentials, supported write interface, or authorization today.
 
 ### Plain-language queue labels

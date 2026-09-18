@@ -1,5 +1,30 @@
 # Decisions and owner review
 
+## Usability and information architecture decision (accepted 2026-09-17)
+
+The owner accepted implementation of the complete usability overhaul from the
+2026-09-17 review. The target IA is **Today**, **Schedule** (Day, Week, Agenda,
+Recurring Times), **Shows**, **History**, and **Settings**. Contextual actions,
+inline supporting-record creation, progressive forms, compatibility redirects,
+and return-to-context navigation are part of the contract. Today is the daily
+work surface; History is principally read-only. A schedule-item workbench and a
+complete Show workspace are the canonical interaction surfaces.
+
+The preparation/replay ownership decision is resolved. Source availability and
+encoding are asset-version facts; transfer and library registration are
+asset-version + device facts; playback programming is occurrence + device; and
+uploaded schedule coverage is an explicit immutable upload-to-occurrence-revision
+relationship. Replays reuse asset preparation for the same exact asset version,
+but programming and upload coverage are occurrence-specific. Show-level slot
+length is the current setting and occurrence revisions retain snapshots.
+
+Canonical Producer, filename, receipt, status, timeline, and label concepts are
+used in owner-facing forms. Legacy duplicates remain migration-only metadata and
+are not editable user-facing fields. The following distinctions are accepted
+invariants and must not be collapsed: plan/airing evidence, reservation/occurrence,
+notice/receipt, source/encoded, slot/runtime, preparation/programming/upload,
+queue/readiness, and reported/log-verified evidence.
+
 Status: approved for V1 implementation on 2026-09-09; packaging and operational details remain open/deferred. Updated 2026-09-09.
 
 ## Confirmed from the owner's request
@@ -82,7 +107,8 @@ The owner approved the complete V1 scope and Python + Django + SQLite stack on 2
 ## Change record
 
 - 2026-09-10: Owner accepted and implementation added an at-a-glance upcoming reserved-show schedule using only show names and full reserved times. Episode-specific operational views retain virtual-channel filler.
-- 2026-09-10: Owner accepted and implementation added show descriptions, separate private producer phone and email fields, legacy contact preservation, conditional Other show-type detail, human-readable object labels, clearer AME/FTP/WinLGX preparation labels, hidden legacy preparation provenance, and the concise Queued episodes heading. The uploaded-schedule page was removed from primary navigation pending its open disposition. Preparation fact ownership and replay reuse remain open.
+- 2026-09-17: Owner accepted the complete usability overhaul: Today/unified Schedule/Shows/History/Settings IA, schedule-item workbench, Show workspace, contextual actions, compatibility redirects, derived status/timeline, canonical data ownership, migration-only legacy fields, and the explicit preparation/asset/device/occurrence/upload replay split. Implementation and pilot verification remain pending.
+- 2026-09-10: Owner accepted and implementation added show descriptions, separate private producer phone and email fields, legacy contact preservation, conditional Other show-type detail, human-readable object labels, clearer AME/FTP/WinLGX preparation labels, hidden legacy preparation provenance, and the concise Queued episodes heading. The 2026-09-17 usability decision supersedes the former standalone upload-page disposition: record upload is contextual in the schedule-item workbench.
 - 2026-09-09: Owner accepted stable unique Asset IDs and separate filenames for each source/encoded media asset, plus direct auditable reordering of the visible upcoming-premiere queue. The relationship between Episode Title and asset identification remains open; preparation-checklist redesign is deferred.
 - 2026-09-09: Owner accepted D14a and the first-class `UploadedScheduleRevision` contract, including exact device/occurrence-revision matching, immutable coverage, supersession, whole-record invalidation, stale-link behavior, and queue/readiness consequences; upload never proves airing.
 - Owner described the manual AME → FTP → WinLGX library → weekly schedule → UltraNexus upload workflow, the mono/audio/color preset intent, and inconsistent filenames/storage across encoding machines. D09 initially proposed six distinct stages; they are now accepted per D09. No technical preset parameters or storage changes have been approved.
