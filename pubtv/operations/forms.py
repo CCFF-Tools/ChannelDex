@@ -14,13 +14,21 @@ from .models import (
 class DurationWidget(forms.MultiWidget):
     """Owner-facing hours/minutes controls backed by integer seconds."""
 
-    def __init__(self, attrs=None):
+    template_name = "widgets/duration.html"
+
+    def __init__(self, attrs=None, show_seconds=False):
+        self.show_seconds = show_seconds
         widgets = [
-            forms.NumberInput(attrs={"min": 0, "step": 1, "aria-label": "Hours", "placeholder": "Hours"}),
-            forms.NumberInput(attrs={"min": 0, "max": 59, "step": 1, "aria-label": "Minutes", "placeholder": "Minutes"}),
-            forms.HiddenInput(),
+            forms.NumberInput(attrs={"min": 0, "step": 1, "aria-label": "Hours"}),
+            forms.NumberInput(attrs={"min": 0, "max": 59, "step": 1, "aria-label": "Minutes"}),
+            forms.NumberInput(attrs={"min": 0, "max": 59, "step": 1, "aria-label": "Seconds"}) if show_seconds else forms.HiddenInput(),
         ]
         super().__init__(widgets, attrs)
+
+    def get_context(self, name, value, attrs):
+        context = super().get_context(name, value, attrs)
+        context["widget"]["show_seconds"] = self.show_seconds
+        return context
 
     def decompress(self, value):
         if value in (None, ""):
@@ -38,13 +46,14 @@ class DurationWidget(forms.MultiWidget):
 class DurationField(forms.MultiValueField):
     widget = DurationWidget
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, show_seconds=False, **kwargs):
         fields = [
             forms.IntegerField(min_value=0, required=False),
             forms.IntegerField(min_value=0, max_value=59, required=False),
             forms.IntegerField(min_value=0, max_value=59, required=False),
         ]
-        kwargs.setdefault("help_text", "Enter hours and minutes. Existing second precision is preserved.")
+        kwargs.setdefault("widget", DurationWidget(show_seconds=show_seconds))
+        kwargs.setdefault("help_text", "Enter hours, minutes, and seconds." if show_seconds else "Enter hours and minutes. Existing second precision is preserved.")
         super().__init__(fields=fields, require_all_fields=False, *args, **kwargs)
 
     def compress(self, data_list):
@@ -116,6 +125,21 @@ class StationForm(forms.ModelForm):
         return name
 
 
+class CarryForwardSettingsForm(forms.ModelForm):
+    class Meta:
+        model = Station
+        fields = ["carry_forward_unassigned_episodes"]
+        labels = {
+            "carry_forward_unassigned_episodes": "Keep the most recent episode in its weekly slots until another episode is explicitly planned",
+        }
+        help_texts = {
+            "carry_forward_unassigned_episodes": (
+                "Applies only to current and future unassigned weeks. Automatically created plans are labeled, "
+                "an explicit episode or No program choice overrides them, and turning this off does not erase existing plans."
+            ),
+        }
+
+
 class DeviceForm(forms.ModelForm):
     class Meta:
         model = Device
@@ -143,6 +167,7 @@ class ShowForm(forms.ModelForm):
         super().__init__(*args, **kwargs)
         if station:
             self.fields["station"].queryset = Station.objects.filter(pk=station.pk)
+            self.fields["primary_producer"].queryset = Producer.objects.filter(station=station)
 
     def clean(self):
         data = super().clean()
@@ -179,7 +204,7 @@ class ProducerForm(forms.ModelForm):
 
 
 class EpisodeForm(forms.ModelForm):
-    runtime_seconds = DurationField(label="Episode runtime", required=False)
+    runtime_seconds = DurationField(label="Episode runtime", required=False, show_seconds=True)
 
     class Meta:
         model = Episode
@@ -237,7 +262,12 @@ class EpisodeMilestoneForm(forms.ModelForm):
 
 
 class AssetForm(forms.ModelForm):
-    runtime_seconds = DurationField(label="Media runtime", required=False)
+    runtime_seconds = DurationField(
+        label="Asset duration",
+        required=False,
+        show_seconds=True,
+        help_text="Optional. Record the exact hours, minutes, and seconds for this source or encoded asset.",
+    )
     asset_id = forms.CharField(label="Asset ID", required=False, disabled=True)
 
     class Meta:
@@ -351,6 +381,10 @@ class AssignmentForm(forms.ModelForm):
 
     def __init__(self, *args, station=None, **kwargs):
         super().__init__(*args, **kwargs)
+        # The model preserves nullable legacy premiere dates, but every new or
+        # corrected owner-entered cycle needs a concrete date. Without this,
+        # an empty date reaches database-only fields and can fail with a 500.
+        self.fields["premiere_date"].required = True
         self.fields["show"].widget.attrs["data-cycle-show"] = "true"
         if station:
             self.fields["show"].queryset = Show.objects.filter(station=station)
@@ -360,6 +394,11 @@ class AssignmentForm(forms.ModelForm):
         show = data.get("show")
         premiere_date = data.get("premiere_date")
         episode = data.get("episode")
+        if show and not premiere_date:
+            self.add_error(
+                "premiere_date",
+                "Choose the premiere date. If no date is available, add one active premiere weekly time for this show first.",
+            )
         if show and episode and episode.show_id != show.pk:
             self.add_error("episode", "Choose an episode from this show.")
         if show and premiere_date:
@@ -386,7 +425,19 @@ class AssetPreparationForm(forms.ModelForm):
     class Meta:
         model = AssetPreparation
         fields = ["source_available", "source_available_at", "ame_preset", "ame_details", "encoded_at"]
-        labels = {"source_available_at": "Source available at", "ame_preset": "Adobe Media Encoder preset", "ame_details": "Encoding details", "encoded_at": "Encoded at"}
+        labels = {
+            "source_available": "Source file available",
+            "source_available_at": "Source available at",
+            "ame_preset": "Adobe Media Encoder preset",
+            "ame_details": "Encoding machine and output notes",
+            "encoded_at": "Encoding completed at",
+        }
+        help_texts = {
+            "source_available": "This belongs to the exact asset version and carries forward when that same asset is reused.",
+            "ame_preset": "Record the standard preset name and version used for this encoded rendition.",
+            "ame_details": "Optional machine, output, or exception notes; do not repeat schedule or playback-slot information here.",
+            "encoded_at": "When this exact encoded rendition finished.",
+        }
         widgets = {"source_available_at": forms.DateTimeInput(attrs={"type": "datetime-local"}, format="%Y-%m-%dT%H:%M"), "encoded_at": forms.DateTimeInput(attrs={"type": "datetime-local"}, format="%Y-%m-%dT%H:%M")}
 
     def __init__(self, *args, **kwargs):
@@ -398,8 +449,18 @@ class AssetPreparationForm(forms.ModelForm):
 class AssetTargetTransferForm(forms.ModelForm):
     class Meta:
         model = AssetTargetTransfer
-        fields = ["device", "ftp_details", "library_registration", "transferred_at", "transferred_actor", "transfer_provenance"]
-        labels = {"ftp_details": "FTP transfer details", "transferred_at": "Transferred at", "transferred_actor": "Recorded by", "transfer_provenance": "Transfer provenance"}
+        fields = ["device", "ftp_details", "library_registration", "transferred_at", "transferred_actor"]
+        labels = {
+            "ftp_details": "FTP transfer details",
+            "library_registration": "WinLGX library registration",
+            "transferred_at": "Transfer completed at",
+            "transferred_actor": "Recorded by",
+        }
+        help_texts = {
+            "device": "Choose the exact playback device that received this asset.",
+            "ftp_details": "Record the FTP destination or transfer confirmation for this device.",
+            "library_registration": "Record the WinLGX library name or identifier assigned after transfer.",
+        }
         widgets = {"transferred_at": forms.DateTimeInput(attrs={"type": "datetime-local"}, format="%Y-%m-%dT%H:%M")}
 
     def __init__(self, *args, station=None, **kwargs):
@@ -418,7 +479,11 @@ class ProgrammingForm(forms.ModelForm):
     class Meta:
         model = OccurrenceProgramming
         fields = ["device", "slot_assignment", "note"]
-        labels = {"slot_assignment": "Playback slot assignment"}
+        labels = {"slot_assignment": "WinLGX playback slot"}
+        help_texts = {
+            "device": "Choose the device programmed for this specific scheduled occurrence.",
+            "slot_assignment": "Record the WinLGX slot or schedule position used for this occurrence; it does not carry forward to replays.",
+        }
 
 
 class UploadForm(forms.ModelForm):

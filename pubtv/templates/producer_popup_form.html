@@ -1,0 +1,20 @@
+{% load static %}
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Add producer · ChannelDex</title>
+  <link rel="stylesheet" href="{% static 'pubtv.css' %}">
+</head>
+<body>
+<main class="popup-main">
+  <div class="page-heading"><h1>Add producer</h1><p class="lede">Contact details remain private local metadata.</p></div>
+  <form method="post" class="stacked-form" novalidate>{% csrf_token %}
+    {% if form.non_field_errors %}<div class="form-errors" role="alert">{{ form.non_field_errors }}</div>{% endif %}
+    {% for field in form.visible_fields %}<div class="field{% if field.errors %} has-error{% endif %}">{{ field.label_tag }}{{ field }}{% if field.help_text %}<div class="helptext">{{ field.help_text }}</div>{% endif %}{{ field.errors }}</div>{% endfor %}
+    <div class="form-actions"><button class="primary" type="submit">Add and select producer</button></div>
+  </form>
+</main>
+</body>
+</html>

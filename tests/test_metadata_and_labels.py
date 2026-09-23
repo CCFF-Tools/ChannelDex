@@ -71,7 +71,7 @@ class HumanReadableLabelsTests(TestCase):
         self.assertIn("episode4.mov", str(asset))
         self.assertIn("January schedule", str(upload))
         self.assertIn("Community Hour", str(slot))
-        self.assertIn("Community Hour · Episode 4 · 2026-01-05 02:00", str(self.occurrence))
+        self.assertIn("Community Hour · Episode 4 · 2026-01-05 2:00 a.m.", str(self.occurrence))
 
     def test_recurrence_slot_label_accepts_unsaved_string_time(self):
         slot = RecurrenceSlot(

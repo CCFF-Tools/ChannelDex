@@ -10,7 +10,7 @@ from pubtv.operations.models import Episode, MediaAsset, Occurrence, RecurrenceS
 ROOT = Path(__file__).resolve().parents[1]
 
 
-class UXOverhaulTests(unittest.TestCase):
+class UXOverhaulTests(TestCase):
   def test_primary_navigation_is_owner_facing_and_contextual(self):
     base = (ROOT / "pubtv/templates/base.html").read_text(encoding="utf-8")
     for label in ("Today", "Schedule", "Shows", "History", "Settings"):
@@ -18,6 +18,29 @@ class UXOverhaulTests(unittest.TestCase):
     assert "Dashboard" not in base
     assert "Catalog" not in base
     assert "Operations" not in base
+
+  def test_schedule_view_switcher_is_styled_and_marks_the_active_view(self):
+    css = (ROOT / "pubtv/static/pubtv.css").read_text(encoding="utf-8")
+    settings = (ROOT / "pubtv/config/settings.py").read_text(encoding="utf-8")
+    assert ".schedule-modes{" in css
+    assert ".schedule-modes a[aria-current=page]" in css
+    assert '"staticfiles": {"BACKEND": "pubtv.config.static.DevelopmentManifestStaticFilesStorage"}' in settings
+    assert "STATICFILES_STORAGE" not in settings
+    for mode, label in (("day", "Day"), ("week", "Week"), ("agenda", "Agenda"), ("recurring", "Recurring times")):
+      response = Client().get(f"/schedule/?mode={mode}")
+      assert response.status_code == 200
+      assert f'aria-current="page">{label}</a>' in response.content.decode()
+
+  def test_week_capacity_show_names_wrap_at_word_boundaries(self):
+    css = (ROOT / "pubtv/static/pubtv.css").read_text(encoding="utf-8")
+    assert ".capacity-show" in css
+    assert "overflow-wrap:normal;word-break:normal" in css
+
+  def test_legacy_schedule_urls_mark_the_matching_view(self):
+    for path, label in (("/day/", "Day"), ("/week/", "Week"), ("/agenda/", "Agenda"), ("/schedule/recurring/", "Recurring times")):
+      response = Client().get(path)
+      assert response.status_code == 200
+      assert f'aria-current="page">{label}</a>' in response.content.decode()
 
 
   def test_today_and_workbench_templates_keep_work_together(self):
@@ -72,15 +95,16 @@ class UXOverhaulTests(unittest.TestCase):
     assert "Legacy preparation facts (read-only migration history)" in workbench
     assert "Quit ChannelDex" in base
 
-  def test_today_and_day_offer_repeated_occurrence_upload_selection(self):
+  def test_upload_recording_is_contextual_and_day_views_stay_schedule_focused(self):
     today = (ROOT / "pubtv/templates/dashboard.html").read_text(encoding="utf-8")
     day = (ROOT / "pubtv/templates/calendar_day.html").read_text(encoding="utf-8")
+    workbench = (ROOT / "pubtv/templates/occurrence_workbench.html").read_text(encoding="utf-8")
     views = (ROOT / "pubtv/operations/views.py").read_text(encoding="utf-8")
-    assert 'action="{% url \'upload-create\' %}"' in today
-    assert 'name="occurrence"' in today
-    assert 'name="occurrences"' in day
-    assert "request.GET.getlist(\"occurrence\")" in views
-    assert "request.GET.getlist(\"occurrences\")" in views
+    assert 'action="{% url \'upload-create\' %}"' not in today
+    assert 'name="occurrence"' not in today
+    assert 'name="occurrences"' not in day
+    assert "Record schedule upload" in workbench
+    assert "Preview and commit uploaded schedule" not in views
     assert "station=station, status=\"planned\"" in views
 
 

@@ -7,25 +7,26 @@ This is a durable implementation backlog. **Accepted** items are confirmed requi
 The complete prior usability proposal is accepted for implementation. It is not
 marked complete until code and pilot verification provide evidence.
 
-- [ ] Replace the current navigation with Today, unified Schedule (Day/Week/
+- [x] Replace the current navigation with Today, unified Schedule (Day/Week/
   Agenda/Recurring Times), Shows, History, and Settings.
-- [ ] Add the schedule-item workbench and Show workspace; move actions into
+- [x] Add the schedule-item workbench and Show workspace; move actions into
   context, add inline supporting-record creation, progressive forms, and return
   users to their working context after save.
-- [ ] Add compatibility redirects from legacy routes and remove duplicate global
+- [x] Add compatibility redirects from legacy routes and remove duplicate global
   creation/workflow destinations.
-- [ ] Derive status dimensions and one activity/preparation timeline from
+- [x] Derive status dimensions and one activity/preparation timeline from
   authoritative records; keep History principally read-only.
-- [ ] Implement canonical Producer ownership, asset filename, receipt facts,
+- [x] Implement canonical Producer ownership, asset filename, receipt facts,
   show-level slot setting with occurrence snapshots, asset/device transfer,
   occurrence/device programming, exact upload coverage, and derived episode
   labels. Retain legacy fields only as migration/audit metadata.
-- [ ] Migrate safely and auditably; do not delete provenance or silently merge
+- [x] Migrate safely and auditably; do not delete provenance or silently merge
   plan/airing, reservation/occurrence, notice/receipt, source/encoded,
   slot/runtime, preparation/programming/upload, queue/readiness, or
   reported/log-verified facts.
-- [ ] Execute focused behavioral tests and a synthetic-data pilot. Documentation
-  decisions are complete; runtime implementation and verification remain open.
+- [x] Execute focused behavioral tests and a synthetic-data pilot. Documentation
+  decisions are complete; runtime implementation and verification are recorded by
+  the 137-test suite and the isolated synthetic premiere/upload pilot.
 
 ## Accepted requirements
 
@@ -40,7 +41,8 @@ marked complete until code and pilot verification provide evidence.
 - [x] Provide an obvious **Add episode** action from show detail, with the show preselected.
 - [x] Provide episode list and episode detail views, including intended order/slate information.
 - [x] From show/episode context, make it possible to link a delivered file/reference and its delivery/provenance metadata to the episode. Keep source and encoded renditions distinct; references remain metadata only.
-- [x] Make schedule preparation clearly support selecting the episode for a premiere and applying that same selected episode to its replays, with older reruns chosen explicitly case by case.
+- [x] Make schedule preparation clearly support selecting the episode for a premiere and applying that same selected episode to its replays, with older reruns chosen explicitly case by case by default.
+- [x] Add an off-by-default global schedule setting that carries the most recent explicitly planned episode into otherwise unassigned current/future weeks. Label and audit generated cycles, preserve explicit episode and No program overrides, stop at No program, and never advance the pending-new queue.
 - [x] Add discoverable per-occurrence workflow/preparation tracking for source availability, encoding, transfer, library registration, slot assignment, and uploaded schedule revision. These are manual facts and do not imply airing.
 
 ### Calendar
@@ -51,6 +53,18 @@ marked complete until code and pilot verification provide evidence.
 ## Current usability notes
 
 - “Add item” is for a schedule item; it is not the show or episode creation flow.
+
+## Open follow-up items
+
+- [x] Add a **Duplicate episode** action. It opens the Add episode page for the same show and pre-fills the editable fields from the reference episode, while leaving the new episode as a separate record.
+- [x] Investigate and fix the **Choose next premiere episode** action, which could return an Internal Server Error. The planner now validates missing dates and resolves legacy assignments by their show/week identity; regression coverage is included.
+- [x] Make the optional **Asset duration** control expose editable hours, minutes, and seconds, matching the exact-runtime control now available for episodes. Continue storing the combined total in `runtime_seconds`.
+- [x] Derive **broadcast-day information** from the canonical show, episode, and schedule-assignment records instead of requiring a second owner-entered field with duplicate identity data. Preserve any legacy duplicate value only as migration/audit metadata.
+- [x] Rework the schedule header layout so the date navigation and primary **Add schedule item** action sit in a right-aligned row horizontally aligned with the Day, Week, Agenda, and Recurring times controls.
+- [x] Align all weekly show times to a consistent right-hand time column. Keep the premiere/replay indicator in its own fixed-width area so the premiere button does not shift the time alignment.
+- [x] Add an episode-level workflow summary derived from the canonical delivery, asset/preparation, programming, upload-coverage, and airing records. Replace milestone-only “Not started” displays while preserving per-occurrence Workbench detail.
+- [x] Make **Open workbench** consistently available for every scheduled occurrence across Day, Week scheduled-items mode, Agenda, Today/needs-scheduling, Show, and Episode contexts. Capacity-only Week mode remains occurrence-free by design.
+- [x] Remove the descriptor text “Set positions, then save. This works without JavaScript.” from the episode queue controls.
 
 ## Proposed implementation sequence
 
@@ -80,9 +94,9 @@ These items were accepted from the owner's hands-on review after the first opera
 ### Recurring show time slots
 
 - [x] Replace weekday values `0`–`6` with day names ordered Monday through Sunday. Continue storing the existing zero-based weekday value internally.
-- [x] Render start times with an appropriate local-time control. It must support typing and keyboard/stepper adjustment of hours and minutes and present 12-hour time with AM/PM where supported by the user's locale. Continue interpreting the value in the station timezone.
-- [x] Rename **Duration seconds** to **Time slot length** and use an hours-and-minutes duration control rather than asking the owner to calculate seconds. Store/convert the value without losing the existing duration data or second-level scheduling contract.
-- [x] Replace the one-slot-at-a-time form with a simple show-level time-slot manager. A show may have multiple weekly air times, and exactly one active slot may be marked as the primary/new-episode premiere slot. Other active slots are replays of that week's explicitly selected episode. Example: Street Talk premieres Wednesday at 7:00 PM and replays Friday at 8:00 PM.
+- [x] Render start times with an appropriate local-time control. It must support typing and keyboard/stepper adjustment of hours and minutes and present 12-hour time. Owner-facing displayed times use lowercase `a.m.`/`p.m.` and spaced hyphens for ranges, such as `7:00 p.m. - 7:30 p.m.`. Continue interpreting the value in the station timezone.
+- [x] Rename **Duration seconds** to **Time slot length** and use an hours-and-minutes duration control rather than asking the owner to calculate seconds. Store/convert the value without losing the existing duration data or second-level scheduling contract. Episode runtime additionally exposes editable seconds for exact media duration.
+- [x] Replace the one-slot-at-a-time form with a simple show-level time-slot manager. A show may have multiple weekly air times, and exactly one active slot may be marked as the primary/new-episode premiere slot. Other active slots are replays of that week's explicitly selected episode. Example: Street Talk premieres Wednesday at 7:00 p.m. and replays Friday at 8:00 p.m.
 - [x] Use the managed time slots plus the weekly episode selection to populate the planned schedule. Replays must use the same episode selected for that week's premiere; a week without a new episode continues to require an explicit older-episode/no-program choice.
 - [x] Preserve historical slot definitions when schedules change. **Active from** and **Active until** currently provide effective dates so a future or seasonal slot change does not rewrite prior schedules. Hide these optional fields under an **Advanced / effective dates** section in the normal UI and explain their purpose; neither should be required for an ongoing slot.
 - [x] Clearly label premiere versus replay occurrences in show, week, day, and agenda views.
@@ -130,6 +144,9 @@ These additions are **accepted** and implemented.
 - [x] Treat virtual-channel filler as reserved time inside a show reservation; virtual-channel switches are not manually scheduled at exact times. Missing runtime remains reserved with a “runtime not determined” label.
 - [x] Add an optional controlled Show type: Arts and Culture, Religious, Opinion, Public Affairs, Government, Education, Community, Entertainment, Sports, Other. Other requires a description and clears when changed.
 - [x] Make every calendar state accessible with text labels, a legend, sufficient contrast, and no color-only meaning.
+- [x] Split Week into two non-redundant views: consecutive Available/Reserved capacity blocks, or individual scheduled items with consecutive Available blocks. Use rectangular capacity cards rather than oversized pill badges.
+- [x] **Accepted:** Open the Week view in the continuous Available/Reserved capacity mode by default; keep the scheduled-items-plus-Available mode as an explicit choice.
+- [x] Identify the recurring show inside reserved capacity blocks when no episode has been assigned yet; preserve the same label in Day capacity intervals.
 
 ### Resolved decisions
 
@@ -141,14 +158,14 @@ These additions are **accepted** and implemented.
 
 - [x] **Accepted:** Rewrite the episode-detail “Where this episode stands” guidance in more natural owner-facing language. It still distinguishes preparation progress, the upcoming-premiere queue, and separately recorded broadcast history.
 - [x] **Accepted:** Give every media asset a unique, stable **Asset ID** and a separately recorded **file name**. An episode commonly has at least one source-video asset and one encoded asset; both remain distinct, linkable records with their own identities and filenames.
-- [ ] **Open:** Decide whether the episode-level **Title** remains a separate owner-facing field or whether the asset ID plus filename is the preferred identifying display. Do not remove or repurpose existing episode titles until this is decided; an episode may have multiple source/encoded assets.
+- [x] **Accepted:** Keep the episode-level **Title** as the human-readable identity, separate from stable asset IDs and filenames. An episode may have multiple source and encoded assets, so no single asset filename replaces the episode title.
 - [x] **Accepted:** Provide a visible upcoming-premiere queue that the owner can reorder directly with drag-and-drop (up or down). Persist the resulting planned episode order and make the order change auditable; producer direction remains authoritative. Keyboard-accessible reordering offers an equivalent path.
-- [ ] **Deferred:** Revisit the preparation checklist after the asset/queue work. Simplify or centralize fields that are normally constant for all shows (for example, the Adobe Media Encoder preset), and rewrite or explain fields that are unclear. This is explicitly not work for the current pass.
+- [x] **Accepted:** Simplify the preparation forms around their canonical ownership boundaries, remove owner-facing provenance entry, and explain the Adobe Media Encoder preset/version, encoding machine/output notes, FTP destination, WinLGX library registration, and occurrence-specific WinLGX playback slot in operational language.
 
-## Deferred automation roadmap
+## Deferred automation roadmap (not part of the V1 implementation checklist)
 
-- [ ] **Further down the road:** Add optional Adobe Media Encoder MPC control to encode received files, transfer them by FTP after a successful encode, and confirm that the transfer completed. This is a future local-workstation automation; it assumes no vendor API, credentials, or service availability today.
-- [ ] **Even further down the road:** Add optional WinLGX MPC control or decode WinLGX schedule files to place transferred shows into a schedule. This is a future integration; it is not part of the current product scope and assumes no vendor API, credentials, or service availability today.
+- **Further down the road:** Optional Adobe Media Encoder MPC control could encode received files, transfer them by FTP after a successful encode, and confirm completion. This remains future local-workstation automation because no vendor API, credentials, or service availability is assumed.
+- **Even further down the road:** Optional WinLGX MPC control or WinLGX schedule-file decoding could place transferred shows into a schedule. This remains outside the current product scope and assumes no vendor API, credentials, or service availability.
 
 ## Owner review follow-up: public-facing schedule and workflow clarity
 
@@ -165,16 +182,17 @@ These additions are **accepted** and implemented.
 
 ### Preparation redesign
 
-- [ ] **Accepted:** Redesign preparation around episode- and asset-level facts that carry forward to every replay using the same exact episode/asset version. Occurrence-specific scheduling facts must remain separate and must not be copied when they do not apply.
-- [x] **Accepted decision:** Preparation ownership is resolved as asset version (source/encoding), asset version + device (transfer/library registration), occurrence + device (playback programming), and exact occurrence revision (uploaded-schedule coverage). Replays reuse asset preparation but require independent occurrence programming/upload coverage. Implementation and migration remain pending; airing evidence stays separate.
+- [x] **Accepted:** Redesign preparation around episode- and asset-level facts that carry forward to every replay using the same exact episode/asset version. Occurrence-specific scheduling facts remain separate and are not copied when they do not apply.
+- [x] **Accepted decision:** Preparation ownership is implemented as asset version (source/encoding), asset version + device (transfer/library registration), occurrence + device (playback programming), and exact occurrence revision (uploaded-schedule coverage). Replays reuse asset preparation but require independent occurrence programming/upload coverage; airing evidence stays separate.
 - [x] **Accepted:** Remove the owner-facing **Provenance** field from the preparation workflow for now. Existing stored values remain as hidden legacy audit metadata; no historical values are discarded.
 - [x] **Accepted:** Replace or clearly define unclear checklist language, including **WinLGX library registration** and **WinLGX playback slot**, using terms that match the owner's actual AME, FTP, WinLGX library, and scheduling handoffs.
 
 ### Uploaded-schedule workflow
 
 - [x] **Accepted:** Remove generic object labels such as `Device object (x)` and `Occurrence object (y)` from every owner-facing control and page. Devices, occurrences, shows, episodes, assets, uploads, and related records now use concise human-readable names; internal numeric IDs remain implementation details.
-- [x] **Accepted:** De-emphasize **Preview and commit uploaded schedule** in the current manual workflow. It is replaced by a contextual **Record schedule upload** action in the schedule-item workbench; exact coverage preview and audit history remain.
-- [ ] **Deferred:** A future UltraNexus integration may directly propose schedule changes, preview the full change set and conflicts, and commit only after explicit owner confirmation. Do not assume an available API, credentials, supported write interface, or authorization today.
+- [x] **Accepted:** Remove the redundant **Preview and commit uploaded schedule** surface from the current manual workflow. Schedule coverage is recorded directly from the contextual **Record schedule upload** action in the schedule-item workbench; immutable coverage and audit history remain internal records.
+- [x] **Accepted:** Make the Shows index sortable by title, code, type, episode count, or earliest weekly time, and show each active show’s weekly reserved times in a right-hand summary on its catalog card.
+- **Deferred roadmap:** A future UltraNexus integration may directly propose schedule changes, preview the full change set and conflicts, and commit only after explicit owner confirmation. No available API, credentials, supported write interface, or authorization is assumed today.
 
 ### Plain-language queue labels
 

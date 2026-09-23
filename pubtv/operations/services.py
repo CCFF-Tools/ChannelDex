@@ -188,6 +188,48 @@ def materialize_assignment(assignment):
 
 
 @transaction.atomic
+def ensure_carry_forward_week(station, week_start):
+    """Materialize owner-authorized fallback cycles for one current/future week."""
+    today = timezone.localdate()
+    current_week = today - timedelta(days=today.weekday())
+    if not station or not station.carry_forward_unassigned_episodes or week_start < current_week:
+        return []
+    created = []
+    for show in station.shows.prefetch_related("slots", "weekly_assignments").order_by("pk"):
+        if show.weekly_assignments.filter(week_start=week_start).exists():
+            continue
+        prior = show.weekly_assignments.filter(week_start__lt=week_start).order_by("-week_start", "-pk").first()
+        # An explicit no-program cycle is a stop signal; never jump over it to
+        # revive an older episode.
+        if not prior or prior.selection_type == "none" or not prior.episode_id:
+            continue
+        premiere_dates = []
+        for offset in range(7):
+            candidate = week_start + timedelta(days=offset)
+            if active_premiere_slot(show, candidate):
+                premiere_dates.append(candidate)
+        if len(premiere_dates) != 1:
+            continue
+        assignment = WeeklyEpisodeAssignment(
+            show=show,
+            week_start=week_start,
+            premiere_date=premiere_dates[0],
+            episode=prior.episode,
+            selection_type="rerun",
+            is_automatic_carry_forward=True,
+        )
+        assignment.full_clean()
+        assignment.save()
+        materialize_assignment(assignment)
+        audit(
+            "create", "WeeklyEpisodeAssignment", assignment,
+            f"Automatically carried {prior.episode} forward from week of {prior.week_start}",
+        )
+        created.append(assignment)
+    return created
+
+
+@transaction.atomic
 def create_upload_snapshot(*, device, occurrences, external_reference="", actor="owner"):
     """Create one immutable upload revision and exact occurrence snapshots."""
     selected = list(occurrences)
@@ -241,7 +283,7 @@ def calendar_capacity(station, selected_date, days=1):
             item_start = item.starts_at.astimezone(utc)
             item_end = item.ends_at.astimezone(utc)
             if item_end > start:
-                reservations.append((max(item_start, start), min(item_end, end), item, "planned"))
+                reservations.append((max(item_start, start), min(item_end, end), item, "planned", item.show))
         slots = RecurrenceSlot.objects.filter(station=station).select_related("show")
         for slot in slots:
             candidate_days = [day]
@@ -260,10 +302,10 @@ def calendar_capacity(station, selected_date, days=1):
                     if item.recurrence_slot_id == slot.pk
                     and item.starts_at.astimezone(utc) == slot_start
                 ), None)
-                reservations.append((max(slot_start, start), min(slot_end, end), matching, "recurring"))
+                reservations.append((max(slot_start, start), min(slot_end, end), matching, "recurring", slot.show))
         reservations.sort(key=lambda value: value[0])
         merged = []
-        for interval_start, interval_end, item, source in reservations:
+        for interval_start, interval_end, item, source, show in reservations:
             # Keep adjacent reservations separate so one show's filler cannot
             # consume the next reserved slot. Overlaps remain a union below.
             if merged and interval_start < merged[-1]["end"]:
@@ -276,19 +318,22 @@ def calendar_capacity(station, selected_date, days=1):
                     and getattr(existing, "pk", None) == getattr(item, "pk", None)
                 ):
                     merged[-1]["item"] = None
+                    merged[-1]["show"] = None
                     merged[-1]["source"] = "overlap"
                 elif source == "recurring":
                     # A materialized recurring occurrence is also present as a
                     # planned item. Preserve its show-reservation semantics.
                     merged[-1]["source"] = "recurring"
                 continue
-            merged.append({"start": interval_start, "end": interval_end, "item": item, "source": source})
+            merged.append({"start": interval_start, "end": interval_end, "item": item, "source": source, "show": show})
         intervals = []
         cursor = start
         for index, reservation in enumerate(merged):
             if cursor < reservation["start"]:
-                intervals.append({"start": cursor.astimezone(tz), "end": reservation["start"].astimezone(tz), "status": "available", "label": "Available"})
+                intervals.append({"start": cursor.astimezone(tz), "end": reservation["start"].astimezone(tz), "status": "available", "label": "Available", "show_label": None})
             item = reservation["item"]
+            show = reservation["show"]
+            show_label = show.title if show else None
             runtime = None
             if item and item.episode_id:
                 runtime = item.episode.runtime_seconds
@@ -303,16 +348,16 @@ def calendar_capacity(station, selected_date, days=1):
             if runtime is not None:
                 content_end = min(reservation["end"], filler_start + timedelta(seconds=runtime))
                 if filler_start < content_end:
-                    intervals.append({"start": filler_start.astimezone(tz), "end": content_end.astimezone(tz), "status": "reserved", "label": "Reserved", "item": item})
+                    intervals.append({"start": filler_start.astimezone(tz), "end": content_end.astimezone(tz), "status": "reserved", "label": "Reserved", "item": item, "show_label": show_label})
                 if content_end < reservation["end"]:
-                    intervals.append({"start": content_end.astimezone(tz), "end": reservation["end"].astimezone(tz), "status": "virtual-channel-filler", "label": "Virtual-channel filler (reserved)", "item": item})
+                    intervals.append({"start": content_end.astimezone(tz), "end": reservation["end"].astimezone(tz), "status": "virtual-channel-filler", "label": "Virtual-channel filler (reserved)", "item": item, "show_label": show_label})
             elif reservation["source"] == "recurring":
-                intervals.append({"start": filler_start.astimezone(tz), "end": reservation["end"].astimezone(tz), "status": "reserved", "label": "Reserved (runtime not determined)", "item": item})
+                intervals.append({"start": filler_start.astimezone(tz), "end": reservation["end"].astimezone(tz), "status": "reserved", "label": "Reserved (runtime not determined)", "item": item, "show_label": show_label})
             else:
-                intervals.append({"start": filler_start.astimezone(tz), "end": reservation["end"].astimezone(tz), "status": "reserved", "label": "Reserved", "item": item})
+                intervals.append({"start": filler_start.astimezone(tz), "end": reservation["end"].astimezone(tz), "status": "reserved", "label": "Reserved", "item": item, "show_label": show_label})
             cursor = max(cursor, reservation["end"])
         if cursor < end:
-            intervals.append({"start": cursor.astimezone(tz), "end": end.astimezone(tz), "status": "available", "label": "Available"})
+            intervals.append({"start": cursor.astimezone(tz), "end": end.astimezone(tz), "status": "available", "label": "Available", "show_label": None})
         result.append({"date": day, "intervals": intervals})
     return result
 

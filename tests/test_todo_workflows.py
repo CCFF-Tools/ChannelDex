@@ -196,6 +196,7 @@ class TodoWorkflowTests(TestCase):
             if item["status"] == "reserved" and item["start"].hour == 7
         )
         self.assertEqual(matched_slot["label"], "Reserved (runtime not determined)")
+        self.assertEqual(matched_slot["show_label"], "Street Talk")
 
     def test_capacity_uses_elapsed_time_across_dst_and_plain_labels_for_timed_items(self):
         eastern = ZoneInfo("America/Detroit")
@@ -238,7 +239,8 @@ class TodoWorkflowTests(TestCase):
         starts = datetime(2026, 1, 5, 7, tzinfo=ZoneInfo("America/Detroit"))
         Occurrence.objects.create(station=self.station, show=self.show, episode=self.episode, item_type="episode", label="E", starts_at=starts, planned_duration_seconds=60)
         self.assertContains(Client().get("/day/?date=2026-01-05&capacity=reserved"), "Reserved")
-        self.assertContains(Client().get("/week/?date=2026-01-05&view=availability&capacity=available"), "Available")
+        self.assertContains(Client().get("/week/?date=2026-01-05&view=capacity"), "Available")
+        self.assertContains(Client().get("/week/?date=2026-01-12&view=capacity"), "Street Talk")
         self.show.show_type = "arts_and_culture"
         self.show.save(update_fields=["show_type"])
         self.assertContains(Client().get("/shows/?show_type=arts_and_culture"), "Street Talk")
@@ -254,23 +256,36 @@ class TodoWorkflowTests(TestCase):
         )
         client = Client()
 
-        scheduled = client.get("/week/?date=2026-01-05")
+        scheduled = client.get("/week/?date=2026-01-05&view=schedule")
         self.assertEqual(scheduled.status_code, 200)
         scheduled_body = scheduled.content.decode()
         self.assertIn("Street Talk · Episode 1", scheduled_body)
         self.assertNotIn('name="show_type"', scheduled_body)
-        self.assertIn('class="capacity-interval"', scheduled_body)
-        self.assertIn("Reserved", scheduled_body)
+        self.assertIn('class="capacity-block available"', scheduled_body)
+        self.assertNotIn('class="capacity-block reserved"', scheduled_body)
+        self.assertIn('class="week-block scheduled-block"', scheduled_body)
         self.assertIn('name="view"', scheduled_body)
 
-        availability = client.get("/week/?date=2026-01-05&view=availability&capacity=reserved")
-        self.assertEqual(availability.status_code, 200)
-        availability_body = availability.content.decode()
-        self.assertIn("Street Talk · Episode 1", availability_body)
-        self.assertNotIn('name="show_type"', availability_body)
-        self.assertIn('class="capacity-interval"', availability_body)
-        self.assertIn("Reserved", availability_body)
-        self.assertIn('value="availability"', availability_body)
+        capacity = client.get("/week/?date=2026-01-05&view=capacity")
+        self.assertEqual(capacity.status_code, 200)
+        capacity_body = capacity.content.decode()
+        self.assertNotIn("Street Talk · Episode 1", capacity_body)
+        self.assertIn('class="capacity-block available"', capacity_body)
+        self.assertIn('class="capacity-block reserved"', capacity_body)
+        self.assertEqual(capacity_body.count('class="capacity-block reserved"'), 1)
+        self.assertNotIn('class="week-block scheduled-block"', capacity_body)
+        self.assertIn('value="capacity" selected', capacity_body)
+
+        default = client.get("/week/?date=2026-01-05")
+        default_body = default.content.decode()
+        self.assertIn('value="capacity" selected', default_body)
+        self.assertNotIn('value="schedule" selected', default_body)
+        self.assertLess(default_body.index('value="capacity"'), default_body.index('value="schedule"'))
+
+        # Old bookmarks map to the capacity-only view instead of restoring the
+        # former redundant episode-plus-reservation overlay.
+        legacy = client.get("/week/?date=2026-01-05&view=availability")
+        self.assertNotIn("Street Talk · Episode 1", legacy.content.decode())
 
     def test_calendar_warnings_context_and_history_readiness(self):
         today = timezone.localdate()
@@ -286,7 +301,7 @@ class TodoWorkflowTests(TestCase):
             starts_at=starts_at + timedelta(seconds=30),
             planned_duration_seconds=60,
         )
-        self.assertContains(Client().get(f"/week/?date={today.isoformat()}"), "Warnings")
+        self.assertContains(Client().get(f"/week/?date={today.isoformat()}&view=schedule"), "Warnings")
         self.assertContains(Client().get("/agenda/?days=31"), "New premiere")
         self.assertContains(Client().get(f"/?date={today.isoformat()}"), "0/6 preparation facts")
 
@@ -345,7 +360,7 @@ class TodoWorkflowTests(TestCase):
         manager = client.get(f"/shows/{self.show.pk}/")
         self.assertContains(manager, "Wednesday")
         self.assertContains(manager, "Friday")
-        self.assertContains(manager, "7:00 PM")
+        self.assertContains(manager, "7:00 p.m.")
         self.assertContains(manager, "30 min")
         assignment = WeeklyEpisodeAssignment.objects.create(
             show=self.show, week_start=date(2026, 1, 5), episode=self.episode,

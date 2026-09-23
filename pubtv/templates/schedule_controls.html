@@ -1,1 +1,23 @@
-<nav class="schedule-modes" aria-label="Schedule view"><a href="{% url 'schedule' %}?mode=day&date={{ selected_date|date:'Y-m-d' }}"{% if request.GET.mode == 'day' or not request.GET.mode %} aria-current="page"{% endif %}>Day</a><a href="{% url 'schedule' %}?mode=week&date={{ selected_date|date:'Y-m-d' }}"{% if request.GET.mode == 'week' %} aria-current="page"{% endif %}>Week</a><a href="{% url 'schedule' %}?mode=agenda&days={{ days|default:'7' }}"{% if request.GET.mode == 'agenda' %} aria-current="page"{% endif %}>Agenda</a><a href="{% url 'schedule' %}?mode=recurring&date={{ selected_date|date:'Y-m-d' }}&days={{ days|default:'7' }}"{% if request.GET.mode == 'recurring' %} aria-current="page"{% endif %}>Recurring times</a></nav>
+<div class="schedule-toolbar">
+  <nav class="schedule-modes" aria-label="Schedule view">
+    <a href="{% url 'schedule' %}?mode=day&amp;date={{ selected_date|date:'Y-m-d' }}"{% if request.GET.mode == 'day' or not request.GET.mode and request.path != '/week/' and request.path != '/agenda/' and request.path != '/schedule/recurring/' %} aria-current="page"{% endif %}>Day</a>
+    <a href="{% url 'schedule' %}?mode=week&amp;date={{ selected_date|date:'Y-m-d' }}"{% if request.GET.mode == 'week' or request.path == '/week/' %} aria-current="page"{% endif %}>Week</a>
+    <a href="{% url 'schedule' %}?mode=agenda&amp;days={{ days|default:'7' }}"{% if request.GET.mode == 'agenda' or request.path == '/agenda/' %} aria-current="page"{% endif %}>Agenda</a>
+    <a href="{% url 'schedule' %}?mode=recurring&amp;date={{ selected_date|date:'Y-m-d' }}&amp;days={{ days|default:'7' }}"{% if request.GET.mode == 'recurring' or request.path == '/schedule/recurring/' %} aria-current="page"{% endif %}>Recurring times</a>
+  </nav>
+  <nav class="schedule-toolbar-actions" aria-label="Current schedule view actions">
+    {% if request.GET.mode == 'week' or request.path == '/week/' %}
+      <a href="{% url 'schedule' %}?mode=week&amp;date={{ previous_week|date:'Y-m-d' }}&amp;view={{ view_mode }}">Previous week</a>
+      <strong>Week of {{ selected_date }}</strong>
+      <a href="{% url 'schedule' %}?mode=week&amp;date={{ next_week|date:'Y-m-d' }}&amp;view={{ view_mode }}">Next week</a>
+      <a class="button-link primary" href="{% url 'occurrence-create' %}">Add schedule item</a>
+    {% elif request.GET.mode == 'agenda' or request.path == '/agenda/' %}
+      <a class="button-link primary" href="{% url 'occurrence-create' %}">Add schedule item</a>
+    {% elif request.GET.mode != 'recurring' and request.path != '/schedule/recurring/' %}
+      <a href="{% url 'schedule' %}?mode=day&amp;date={{ previous_date|date:'Y-m-d' }}">Previous day</a>
+      <strong>{{ selected_date|date:'l, F j, Y' }}</strong>
+      <a href="{% url 'schedule' %}?mode=day&amp;date={{ next_date|date:'Y-m-d' }}">Next day</a>
+      <a class="button-link primary" href="{% url 'occurrence-create' %}">Add schedule item</a>
+    {% endif %}
+  </nav>
+</div>

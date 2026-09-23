@@ -3,6 +3,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from django.core.exceptions import ValidationError
 from django.db import models
 from django.utils import timezone
+from django.utils.functional import cached_property
 import uuid
 
 def _duration_label(seconds):
@@ -16,9 +17,16 @@ def _duration_label(seconds):
     if seconds: parts.append(f"{seconds} sec")
     return " ".join(parts) or "0 min"
 
+
+def _clock_label(value):
+    """Render owner-facing clock times in the shared ChannelDex style."""
+    label = value.strftime("%I:%M %p").lstrip("0")
+    return label.replace(" AM", " a.m.").replace(" PM", " p.m.")
+
 class Station(models.Model):
     name = models.CharField(max_length=120, default="PUB-TV")
     timezone = models.CharField(max_length=64, default="America/Detroit")
+    carry_forward_unassigned_episodes = models.BooleanField(default=False)
     def __str__(self): return self.name
 
 class Show(models.Model):
@@ -79,6 +87,16 @@ class Producer(models.Model):
         return f"{self.first_name} {self.last_name}".strip()
 
 class Episode(models.Model):
+    WORKFLOW_STAGE_ORDER = {
+        "received": 10,
+        "downloaded": 20,
+        "encoded": 30,
+        "transferred": 40,
+        "programmed": 50,
+        "scheduled": 60,
+        "uploaded": 60,
+        "aired": 70,
+    }
     show = models.ForeignKey(Show, on_delete=models.CASCADE, related_name="episodes")
     title = models.CharField(max_length=160)
     producer = models.ForeignKey(
@@ -97,14 +115,25 @@ class Episode(models.Model):
         if self.producer_id and self.producer.station_id != self.show.station_id:
             raise ValidationError("Producer must belong to the same station as the episode's show.")
 
-    @property
+    @cached_property
     def latest_workflow_stage(self):
-        milestone = max(
-            self.workflow_milestones.all(),
-            key=lambda item: EpisodeWorkflowMilestone.STAGE_ORDER[item.stage],
-            default=None,
+        return self.workflow_summary["label"]
+
+    @cached_property
+    def workflow_summary(self):
+        """Concise status derived from the same canonical facts as the timeline."""
+        events = self.workflow_timeline
+        if not events:
+            return {"label": "Not started", "stage": None, "fact_count": 0}
+        _, latest = max(
+            enumerate(events),
+            key=lambda pair: (self.WORKFLOW_STAGE_ORDER.get(pair[1]["stage"], -1), pair[0]),
         )
-        return milestone.get_stage_display() if milestone else "Not started"
+        return {
+            "label": latest["label"],
+            "stage": latest["stage"],
+            "fact_count": len(events),
+        }
 
     @property
     def runtime_label(self):
@@ -116,7 +145,7 @@ class Episode(models.Model):
         delivery_time = self.deliveries.filter(received_at__isnull=False).order_by("received_at").values_list("received_at", flat=True).first()
         return delivery_time or self.legacy_received_at
 
-    @property
+    @cached_property
     def workflow_timeline(self):
         """A derived, auditable readiness timeline including legacy assertions."""
         events = []
@@ -127,18 +156,24 @@ class Episode(models.Model):
         for asset in self.assets.all():
             prep = getattr(asset, "preparation_record", None)
             if prep:
-                if prep.source_available_at:
+                if prep.source_available in {"yes", "na"} or prep.source_available_at:
                     events.append({"stage": "received", "label": "Source available", "at": prep.source_available_at, "actor": prep.source_available_actor, "provenance": prep.source_available_provenance, "legacy": False})
-                if prep.ame_at or prep.encoded_at:
+                if prep.ame_at or prep.encoded_at or prep.ame_preset or prep.ame_details:
                     events.append({"stage": "encoded", "label": "Encoded", "at": prep.ame_at or prep.encoded_at, "actor": prep.ame_actor or prep.encoded_actor, "provenance": prep.ame_provenance or prep.encoded_provenance, "legacy": False})
             for transfer in asset.target_transfers.all():
-                if transfer.transferred_at:
+                if transfer.transferred_at or transfer.ftp_details or transfer.library_registration:
                     events.append({"stage": "transferred", "label": "Transferred", "at": transfer.transferred_at, "actor": transfer.transferred_actor, "provenance": transfer.transfer_provenance, "legacy": False})
         for occurrence in self.occurrences.all():
             for programming in occurrence.programming.all():
-                events.append({"stage": "scheduled", "label": "Programmed", "at": programming.confirmed_at, "actor": programming.actor, "provenance": programming.provenance, "legacy": False})
-            for coverage in occurrence.uploaded_revisions.filter(state="active").values("uploaded_at", "device__name"):
-                events.append({"stage": "scheduled", "label": "Schedule uploaded", "at": coverage["uploaded_at"], "actor": "", "provenance": coverage["device__name"], "legacy": False})
+                events.append({"stage": "programmed", "label": "Programmed", "at": programming.confirmed_at, "actor": programming.actor, "provenance": programming.provenance, "legacy": False})
+            for coverage in UploadedOccurrenceCoverage.objects.filter(
+                occurrence=occurrence,
+                occurrence_revision=occurrence.revision,
+                upload__state="active",
+            ).select_related("upload__device"):
+                events.append({"stage": "uploaded", "label": "Schedule uploaded", "at": coverage.upload.uploaded_at, "actor": "", "provenance": coverage.upload.device.name, "legacy": False})
+            for evidence in occurrence.airing_evidence.all():
+                events.append({"stage": "aired", "label": "Airing evidence recorded", "at": evidence.aired_at, "actor": evidence.actor, "provenance": evidence.source, "legacy": False})
         return sorted(events, key=lambda event: (event["at"] is None, event["at"]))
 
 class EpisodeWorkflowMilestone(models.Model):
@@ -219,6 +254,10 @@ class MediaAsset(models.Model):
     def __str__(self):
         return self.file_name or self.legacy_label or f"Asset for {self.episode or 'unlinked episode'}"
 
+    @property
+    def runtime_label(self):
+        return _duration_label(self.runtime_seconds)
+
 class Delivery(models.Model):
     METHOD_CHOICES = Show.DELIVERY_METHODS
     method = models.CharField(max_length=20, choices=METHOD_CHOICES)
@@ -253,7 +292,7 @@ class RecurrenceSlot(models.Model):
     active_until = models.DateField(null=True, blank=True)
     def __str__(self):
         show = self.show.title if self.show else "Unassigned show"
-        start = self.start_time.strftime("%H:%M") if hasattr(self.start_time, "strftime") else str(self.start_time)
+        start = _clock_label(self.start_time) if hasattr(self.start_time, "strftime") else str(self.start_time)
         return f"{show} · {self.get_weekday_display()} {start}"
     def clean(self):
         if self.show_id and self.show and self.station_id != self.show.station_id:
@@ -290,6 +329,7 @@ class WeeklyEpisodeAssignment(models.Model):
     premiere_date = models.DateField(null=True, blank=True)
     episode = models.ForeignKey(Episode, null=True, blank=True, on_delete=models.SET_NULL)
     selection_type = models.CharField(max_length=16, choices=[("premiere", "New premiere"), ("rerun", "Selected older rerun"), ("none", "No program")])
+    is_automatic_carry_forward = models.BooleanField(default=False)
     class Meta:
         constraints = [models.UniqueConstraint(fields=["show", "week_start"], name="unique_show_week")]
     def __str__(self):
@@ -349,7 +389,7 @@ class Occurrence(models.Model):
                     starts_at = timezone.localtime(starts_at, ZoneInfo(timezone_name))
                 except (ZoneInfoNotFoundError, ValueError):
                     starts_at = timezone.localtime(starts_at, ZoneInfo("America/Detroit"))
-            time_label = starts_at.strftime("%Y-%m-%d %H:%M")
+            time_label = f"{starts_at:%Y-%m-%d} {_clock_label(starts_at)}"
         else:
             time_label = str(starts_at)
         return f"{item} · {time_label}"
@@ -374,6 +414,8 @@ class Occurrence(models.Model):
 
     @property
     def schedule_context(self):
+        if self.weekly_assignment_id and self.weekly_assignment.is_automatic_carry_forward:
+            return "Automatic carry-forward replay"
         if self.schedule_role != "manual":
             return self.get_schedule_role_display()
         if not self.weekly_assignment_id:
@@ -508,7 +550,7 @@ class UploadedScheduleRevision(models.Model):
     revision = models.PositiveIntegerField(default=1)
     def __str__(self):
         reference = self.external_reference or "Uploaded schedule"
-        return f"{reference} · {self.uploaded_at:%Y-%m-%d %H:%M}"
+        return f"{reference} · {self.uploaded_at:%Y-%m-%d} {_clock_label(self.uploaded_at)}"
 
 class UploadedOccurrenceCoverage(models.Model):
     upload = models.ForeignKey(UploadedScheduleRevision, on_delete=models.CASCADE)
@@ -548,7 +590,7 @@ class AiringEvidence(models.Model):
     supersedes = models.ForeignKey("self", null=True, blank=True, on_delete=models.PROTECT, related_name="corrections")
     def __str__(self):
         item = self.occurrence or "Unlinked occurrence"
-        return f"{item} · {self.get_status_display()} · {self.aired_at:%Y-%m-%d %H:%M}"
+        return f"{item} · {self.get_status_display()} · {self.aired_at:%Y-%m-%d} {_clock_label(self.aired_at)}"
 
 class AuditEvent(models.Model):
     actor = models.CharField(max_length=120, default="owner")

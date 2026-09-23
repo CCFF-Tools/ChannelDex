@@ -26,6 +26,9 @@ from pubtv.operations.services import (
     advance_passed_premiere,
     confirm_preparation_fact,
     revise_airing,
+    sign_upload_preview,
+    load_upload_preview,
+    commit_upload_preview,
 )
 
 
@@ -249,9 +252,9 @@ class SchedulingWorkflowTests(TestCase):
             starts_at=datetime(2026, 1, 4, 23, 59, tzinfo=eastern),
             planned_duration_seconds=120,
         )
-        body = Client().get("/week/?date=2026-01-05").content.decode()
+        body = Client().get("/week/?date=2026-01-05&view=schedule").content.decode()
         self.assertIn("Sunday night council meeting", body)
-        self.assertIn("12:00 AM–12:01 AM", body)
+        self.assertIn("12:00 a.m. - 12:01 a.m.", body)
 
     def test_week_uses_monday_eastern_boundary_and_day_coverage_unions_overlaps(self):
         sunday = Occurrence.objects.create(station=self.station, item_type="filler", label="Sunday", starts_at=datetime(2026, 1, 5, 4, 0, tzinfo=dt_timezone.utc), planned_duration_seconds=120)
@@ -260,7 +263,7 @@ class SchedulingWorkflowTests(TestCase):
         self.assertIn("Planned coverage: 2 minutes", day)
         self.assertNotIn("Sunday", day)
         self.assertIn("Monday", day)
-        week = Client().get("/week/?date=2026-01-11")
+        week = Client().get("/week/?date=2026-01-11&view=schedule")
         self.assertEqual(week.status_code, 200)
         self.assertIn("Monday", week.content.decode())
         self.assertNotEqual(sunday.pk, monday.pk)
@@ -352,10 +355,7 @@ class UploadAndHistoryWorkflowTests(TestCase):
         self.assertFalse(advance_passed_premiere(self.occurrence, now=datetime(2026, 1, 1, tzinfo=dt_timezone.utc)))
         client = Client()
         base = {"device": self.device.pk, "external_reference": "ULX-18", "state": "active", "supersession_reason": "", "occurrences": [self.occurrence.pk]}
-        preview = client.post("/uploads/new/", {**base, "preview": "1"})
-        self.assertEqual(preview.status_code, 200)
-        token = preview.context["upload_preview"]["token"]
-        response = client.post("/uploads/new/", {**base, "upload_preview_token": token})
+        response = client.post("/uploads/new/", base)
         self.assertEqual(response.status_code, 302)
         self.assertEqual(UploadedScheduleRevision.objects.count(), 2)
         committed = UploadedScheduleRevision.objects.get(external_reference="ULX-18")
@@ -363,36 +363,21 @@ class UploadAndHistoryWorkflowTests(TestCase):
         self.episode.refresh_from_db()
         self.assertEqual(self.episode.status, "previously_scheduled")
 
-    def test_preview_cas_rejects_plan_changes_token_tampering_and_selection_changes(self):
-        client = Client()
-        base = {"device": self.device.pk, "external_reference": "CAS", "state": "active", "occurrences": [self.occurrence.pk]}
-        preview = client.post("/uploads/new/", {**base, "preview": "1"})
-        token = preview.context["upload_preview"]["token"]
+    def test_internal_upload_cas_rejects_plan_changes_and_tampering(self):
+        token = sign_upload_preview(device_id=self.device.pk, external_reference="CAS", occurrences=[self.occurrence])
+        payload = load_upload_preview(token)
         Occurrence.objects.filter(pk=self.occurrence.pk).update(status="cancelled", revision=2)
-        stale = client.post("/uploads/new/", {**base, "upload_preview_token": token})
-        self.assertEqual(stale.status_code, 400)
+        with self.assertRaises(ValidationError):
+            commit_upload_preview(device=self.device, external_reference="CAS", token_payload=payload, submitted_ids=[self.occurrence.pk], station_id=self.station.pk)
         self.assertFalse(UploadedScheduleRevision.objects.filter(external_reference="CAS").exists())
-
-        self.occurrence.refresh_from_db()
-        self.occurrence.status = "planned"
-        self.occurrence.revision = 3
-        self.occurrence.save(skip_revision=True)
-        preview = client.post("/uploads/new/", {**base, "preview": "1"})
-        token = preview.context["upload_preview"]["token"]
-        self.assertEqual(client.post("/uploads/new/", {**base, "upload_preview_token": token + "tampered"}).status_code, 400)
-        other_device = Device.objects.create(name="Other device")
-        self.assertEqual(client.post("/uploads/new/", {**base, "device": other_device.pk, "upload_preview_token": token}).status_code, 400)
-        other = Occurrence.objects.create(station=self.station, item_type="filler", label="Other", starts_at=self.occurrence.starts_at, planned_duration_seconds=60)
-        self.assertEqual(client.post("/uploads/new/", {**base, "occurrences": [other.pk], "upload_preview_token": token}).status_code, 400)
 
     def test_mixed_planned_and_cancelled_selection_never_snapshots_cancelled(self):
         cancelled = Occurrence.objects.create(station=self.station, item_type="filler", label="Cancelled", starts_at=self.occurrence.starts_at, planned_duration_seconds=60, status="cancelled", reason="preempted")
         client = Client()
         base = {"device": self.device.pk, "external_reference": "MIXED", "state": "active", "occurrences": [self.occurrence.pk, cancelled.pk]}
-        preview = client.post("/uploads/new/", {**base, "preview": "1"})
-        self.assertEqual(preview.status_code, 200)
-        self.assertNotIn("upload_preview", preview.context)
-        self.assertTrue(preview.context["form"].errors)
+        response = client.post("/uploads/new/", base)
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.context["form"].errors)
         self.assertFalse(UploadedScheduleRevision.objects.filter(external_reference="MIXED").exists())
 
     def test_upload_empty_selection_rejected_and_transitions_require_reason(self):

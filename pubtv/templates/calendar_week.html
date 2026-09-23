@@ -1,1 +1,48 @@
-{% extends "base.html" %}{% block content %}<div class="page-heading"><p class="eyebrow">Schedule / Week</p><h1>{{ title }}</h1><p class="lede">Review planned items with availability overlaid in the same week grid.</p></div><p><a href="?mode=week&date={{ previous_week|date:'Y-m-d' }}&view={{ view_mode }}">Previous week</a> · Week of {{ selected_date }} · <a href="?mode=week&date={{ next_week|date:'Y-m-d' }}&view={{ view_mode }}">Next week</a></p><form class="calendar-filter" method="get"><input type="hidden" name="mode" value="week"><input type="hidden" name="date" value="{{ selected_date|date:'Y-m-d' }}"><label for="week-view">Availability overlay</label><select id="week-view" name="view"><option value="scheduled"{% if view_mode == 'scheduled' %} selected{% endif %}>Show planned and availability</option><option value="availability"{% if view_mode == 'availability' %} selected{% endif %}>Emphasize availability</option></select><button type="submit">Apply</button></form>{% if alerts %}<aside class="alerts"><h2>Warnings</h2>{% for alert in alerts %}<p>{{ alert }}</p>{% endfor %}</aside>{% endif %}<div class="calendar-grid">{% for day in week_days %}<section><h2>{{ day|date:'D M j' }}</h2>{% for segment in day_segments %}{% if segment.date == day %}{% with o=segment.occurrence %}<p class="list-card"><strong>{{ segment.start|date:'g:i A' }}–{{ segment.end|date:'g:i A' }}</strong><br><span class="badge">{{ o.schedule_context }}</span> {{ o.display_label }}<br><a href="{% url 'occurrence-workbench' o.pk %}">Open workbench</a></p>{% endwith %}{% endif %}{% endfor %}{% for capacity_day in capacity %}{% if capacity_day.date == day %}{% for interval in capacity_day.intervals %}<p class="capacity-interval"><span class="badge {{ interval.status }}">{{ interval.label }}</span> {{ interval.start|date:'g:i A' }}–{{ interval.end|date:'g:i A' }}</p>{% endfor %}{% endif %}{% endfor %}</section>{% endfor %}</div>{% endblock %}
+{% extends "base.html" %}
+{% block content %}
+<div class="page-heading">
+  <p class="eyebrow">Schedule / Week</p>
+  <h1>{{ title }}</h1>
+  {% if view_mode == 'capacity' %}
+    <p class="lede">A continuous capacity map. Every part of each day is classified as either Available or Reserved; individual scheduled items are intentionally hidden.</p>
+  {% else %}
+    <p class="lede">Individual scheduled items appear alongside open Available blocks. Reserved capacity is represented by its scheduled item instead of being repeated.</p>
+  {% endif %}
+</div>
+<form class="calendar-filter" method="get">
+  <input type="hidden" name="mode" value="week">
+  <input type="hidden" name="date" value="{{ selected_date|date:'Y-m-d' }}">
+  <label for="week-view">Week view</label>
+  <select id="week-view" name="view">
+    <option value="capacity"{% if view_mode == 'capacity' %} selected{% endif %}>Availability and reserved blocks</option>
+    <option value="schedule"{% if view_mode == 'schedule' %} selected{% endif %}>Scheduled items and available blocks</option>
+  </select>
+  <button type="submit">Apply</button>
+</form>
+{% if alerts %}<aside class="alerts"><h2>Warnings</h2>{% for alert in alerts %}<p>{{ alert }}</p>{% endfor %}</aside>{% endif %}
+<div class="calendar-grid week-grid">
+  {% for column in week_columns %}
+    <section>
+      <h2>{{ column.date|date:'D M j' }}</h2>
+      {% for item in column.items %}
+        {% if item.kind == 'occurrence' %}
+          {% with o=item.occurrence %}<article class="week-block scheduled-block">
+            <span class="week-block-time">{{ item.start|date:'g:i a' }} - {{ item.end|date:'g:i a' }}</span>
+            <strong>{{ o.display_label }}</strong>
+            <span><span class="badge">{{ o.schedule_context }}</span> {{ o.get_item_type_display }}</span>
+            <a href="{% url 'occurrence-workbench' o.pk %}">Open workbench</a>
+          </article>{% endwith %}
+        {% else %}
+          <article class="capacity-block {{ item.status }}">
+            <strong>{{ item.label }}</strong>
+            {% if item.show_label %}<span class="capacity-show">{{ item.show_label }}</span>{% endif %}
+            <span class="week-block-time">{{ item.start|date:'g:i a' }} - {{ item.end|date:'g:i a' }}</span>
+          </article>
+        {% endif %}
+      {% empty %}
+        <p class="muted">No blocks in this view.</p>
+      {% endfor %}
+    </section>
+  {% endfor %}
+</div>
+{% endblock %}
