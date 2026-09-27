@@ -56,6 +56,14 @@ marked complete until code and pilot verification provide evidence.
 
 ## Open follow-up items
 
+- [ ] **Accepted follow-up:** Add owner-controlled database portability tools:
+  export a self-contained SQLite database snapshot and open a selected different
+  database. The portable database/bundle must carry the information required to
+  identify its schema/version and be suitable for storage on a network share and
+  later opening by one ChannelDex instance. Define and verify the safe workflow
+  for network-share paths, including SQLite sidecars, locking, integrity checks,
+  and protection against concurrent access; do not imply that a live shared
+  multi-writer database is supported until that behavior is validated.
 - [x] Add a **Duplicate episode** action. It opens the Add episode page for the same show and pre-fills the editable fields from the reference episode, while leaving the new episode as a separate record.
 - [x] Investigate and fix the **Choose next premiere episode** action, which could return an Internal Server Error. The planner now validates missing dates and resolves legacy assignments by their show/week identity; regression coverage is included.
 - [x] Make the optional **Asset duration** control expose editable hours, minutes, and seconds, matching the exact-runtime control now available for episodes. Continue storing the combined total in `runtime_seconds`.
