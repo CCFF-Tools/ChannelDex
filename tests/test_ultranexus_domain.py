@@ -1,7 +1,9 @@
 from datetime import datetime, timezone as dt_timezone
 
 from django.core.exceptions import ValidationError
+from django.db import IntegrityError
 from django.test import TestCase
+from unittest.mock import patch
 
 from pubtv.operations.models import (
     ArtifactRevision,
@@ -11,6 +13,7 @@ from pubtv.operations.models import (
     MediaAsset,
     MediaInspection,
     MediaBinding,
+    MediaIdAllocation,
     Occurrence,
     PreparationBatch,
     PreparationJob,
@@ -20,7 +23,7 @@ from pubtv.operations.models import (
     Station,
     UltraNexusTargetSettings,
 )
-from pubtv.operations.automation import restricted_target_blockers
+from pubtv.operations.automation import _reserve_media_identifiers, restricted_target_blockers
 
 
 class UltraNexusDomainTests(TestCase):
@@ -60,6 +63,24 @@ class UltraNexusDomainTests(TestCase):
         another_current = UltraNexusTargetSettings(target=self.device, version=3, is_current=True)
         with self.assertRaises(ValidationError):
             another_current.validate_constraints()
+
+    def test_identifier_reservation_retries_collision_and_is_stable(self):
+        manager = MediaIdAllocation.objects
+        real_create = manager.create
+        calls = 0
+        def collide_once(**kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise IntegrityError("simulated concurrent allocation")
+            return real_create(**kwargs)
+        with patch.object(manager, "create", side_effect=collide_once):
+            reservation = _reserve_media_identifiers(self.device, "a" * 64, "clip.mp4")
+        self.assertEqual(calls, 2)
+        self.assertEqual(_reserve_media_identifiers(self.device, "a" * 64, "clip.mp4").pk,
+                         reservation.pk)
+        with self.assertRaisesRegex(RuntimeError, "different media"):
+            _reserve_media_identifiers(self.device, "b" * 64, "clip.mp4")
 
     def test_approval_boundaries_are_separate_and_require_snapshots(self):
         batch = PreparationBatch.objects.create(target=self.device)

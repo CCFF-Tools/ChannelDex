@@ -41,7 +41,10 @@ one immutable mutation plan across the format-specific NMG and BIN writers, then
 checks Thursday-epoch event identity, Switchbacks, adjacency, wrap behavior, and
 intentional base gaps before publication. New resource references additionally
 require the target's resource-registration gate; edits using existing references
-do not inherit that unrelated blocker.
+do not inherit that unrelated blocker. Both formats retain exact byte-range
+audits and are reparsed from their atomic temporary files before their immutable
+artifact rows are committed. Identifier reservations occur transactionally
+before transfer and remain permanent even when later work fails.
 See [ULTRANEXUS_AUTOMATION.md](ULTRANEXUS_AUTOMATION.md).
 
 ## Recommended shape

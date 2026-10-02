@@ -43,6 +43,7 @@ class StdlibFTPAdapter(FTPAdapter):
             if remote_hash.hexdigest() != digest:
                 try: ftp.delete(target)
                 except Exception: pass
+                target = None
                 raise TransferError("remote upload hash verification failed")
             if self.staging: ftp.rename(target, remote_path)
             target = None

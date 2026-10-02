@@ -26,6 +26,14 @@ resource-registration gating, and a complete measured FFmpeg qualification
 matrix. These checks do not constitute destination qualification; the private
 AME comparisons and controlled controller observations remain external evidence.
 
+**Implemented 2026-10-02 software completion:** NMG and BIN now publish through
+the same immutable byte-mutation contract with exact range audits and disk
+reparse. Nexus Mono duration units are explicitly derived as the decimal ceiling
+of probed seconds times 30. The qualification command can execute and parse
+paired `signalstats` and `ebur128` measurements. Permanent identifier reservation
+and database-enforced single active publication behavior cover concurrent local
+work. None of these local checks replaces destination hardware qualification.
+
 ## Usability and information architecture decision (accepted 2026-09-17)
 
 The owner accepted implementation of the complete usability overhaul from the

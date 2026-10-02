@@ -3,7 +3,7 @@
 The workspace stores references and hashes, never media bytes. It is an aid to
 owner review; a recorded comparison does not qualify FFmpeg automatically.
 """
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -62,6 +62,7 @@ class QualificationPair:
     ame_probe: dict[str, Any]
     ffmpeg_probe: dict[str, Any]
     comparison_report: dict[str, Any]
+    measurements: dict[str, Any] = field(default_factory=dict)
     status: str = "experimental"
     owner_review: str = "pending"
 
@@ -72,7 +73,8 @@ class QualificationPair:
                ffmpeg_probe: str | bytes | dict,
                case_kind: str = "",
                ffmpeg_profile_identity: str = "",
-               comparison_report: dict[str, Any] | None = None) -> "QualificationPair":
+               comparison_report: dict[str, Any] | None = None,
+               measurements: dict[str, Any] | None = None) -> "QualificationPair":
         if case_kind not in REQUIRED_CASE_CHECKS:
             raise ValueError("case kind is not part of the required qualification matrix")
         if not all(value.strip() for value in (case_id, preset_identity, ffmpeg_build_identity,
@@ -84,7 +86,7 @@ class QualificationPair:
         return cls(case_id, case_kind, EvidenceFile.capture(source), EvidenceFile.capture(ame_output),
                    EvidenceFile.capture(ffmpeg_output), preset_identity, ffmpeg_build_identity,
                    ffmpeg_profile_identity,
-                   ame.raw, ffmpeg.raw, report)
+                   ame.raw, ffmpeg.raw, report, measurements or {})
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -119,6 +121,15 @@ def pair_acceptance_blockers(pair: dict[str, Any]) -> list[str]:
     missing = sorted(name for name in REQUIRED_CASE_CHECKS[kind] if checks.get(name) != "passed")
     if missing:
         blockers.append("required checks are not passed: " + ", ".join(missing))
+    measurements = pair.get("measurements") or {}
+    if kind == "illegal_levels" and any(
+            not (measurements.get(side) or {}).get("video_signalstats")
+            for side in ("ame", "ffmpeg")):
+        blockers.append("signalstats measurements are required for both outputs")
+    if kind in {"audio", "loudness_limiter"} and any(
+            not (measurements.get(side) or {}).get("audio_ebur128")
+            for side in ("ame", "ffmpeg")):
+        blockers.append("ebur128 measurements are required for both outputs")
     return blockers
 
 

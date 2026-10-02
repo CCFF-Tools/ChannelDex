@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from pubtv.ultranexus.encoding import FFmpegEncoder
 from pubtv.ultranexus.qualification import (QualificationPair, QualificationWorkspace,
@@ -22,6 +23,14 @@ class QualificationTests(unittest.TestCase):
                 "qualification": "experimental",
                 "checks": {check: "passed" for check in checks}}
 
+    def measurements(self):
+        measured = {"video_signalstats": {"YMIN": {"minimum": 16, "maximum": 16,
+                                                       "last": 16, "samples": 1}},
+                    "audio_ebur128": {"integrated_lufs": -24.0,
+                                       "loudness_range_lu": 2.0,
+                                       "true_peak_dbtp": -2.0}}
+        return {"ame": measured, "ffmpeg": measured}
+
     def test_command_maps_selected_streams(self):
         encoder = FFmpegEncoder(video_stream=1, audio_stream=2)
         argv = encoder.command("in", "out").argv
@@ -32,6 +41,21 @@ class QualificationTests(unittest.TestCase):
         self.assertIn("0:v:1", video.argv)
         self.assertIn("ebur128=peak=true", audio.argv)
         self.assertIn("0:a:2", audio.argv)
+
+    def test_analysis_executes_and_parses_signalstats_and_ebur128(self):
+        outputs = iter((
+            SimpleNamespace(returncode=0, stdout="lavfi.signalstats.YMIN=16\nlavfi.signalstats.YMAX=235\n",
+                            stderr=""),
+            SimpleNamespace(returncode=0, stdout="",
+                            stderr="I: -24.0 LUFS\nLRA: 2.0 LU\nPeak: -2.0 dBFS\n"),
+        ))
+        calls = []
+        def runner(argv, **kwargs):
+            calls.append((argv, kwargs)); return next(outputs)
+        measured = FFmpegEncoder().measure("output.mp4", runner=runner)
+        self.assertEqual(measured["video_signalstats"]["YMIN"]["minimum"], 16.0)
+        self.assertEqual(measured["audio_ebur128"]["integrated_lufs"], -24.0)
+        self.assertEqual(len(calls), 2)
 
     def test_pairs_hashes_and_stays_experimental_until_review(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -74,9 +98,14 @@ class QualificationTests(unittest.TestCase):
             pairs.append({"case_id": kind, "case_kind": kind, "owner_review": "accepted",
                           "ffmpeg_build_identity": "b", "preset_identity": "p",
                           "ffmpeg_profile_identity": "f",
+                          "measurements": self.measurements(),
                           "comparison_report": self.report(*checks)})
         self.assertEqual(validate_qualification_manifest(
             {"schema": 2, "pairs": pairs}, build_hash="b", preset_hash="p", profile_hash="f"), [])
         pairs[0]["comparison_report"]["unmeasured"] = ["video_levels"]
+        self.assertTrue(validate_qualification_manifest(
+            {"schema": 2, "pairs": pairs}, build_hash="b", preset_hash="p", profile_hash="f"))
+        pairs[0]["comparison_report"]["unmeasured"] = []
+        pairs[2]["measurements"] = {}
         self.assertTrue(validate_qualification_manifest(
             {"schema": 2, "pairs": pairs}, build_hash="b", preset_hash="p", profile_hash="f"))

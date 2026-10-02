@@ -90,6 +90,25 @@ class ControllerTransportTests(unittest.TestCase):
         with self.assertRaisesRegex(CommandError, "CONTROLLER_REJECTED"):
             ControllerCommandTransport(sock).authenticate("operator", "example", nonce="1A2B3C4D")
 
+    def test_fragmented_success_explicit_failure_and_ambiguous_disconnect(self):
+        fragmented = Socket([b"3", b"31 ready\r", b"\n23", b"0 accepted\r\n",
+                             b"200 loaded\r\n"])
+        client = ControllerCommandTransport(fragmented)
+        client.authenticate("operator", "example", nonce="1A2B3C4D")
+        self.assertEqual(client.activate_schedule(), "200 loaded")
+
+        rejected = Socket([b"331 ready\r\n", b"230 accepted\r\n", b"500 rejected\r\n"])
+        client = ControllerCommandTransport(rejected)
+        client.authenticate("operator", "example", nonce="1A2B3C4D")
+        with self.assertRaisesRegex(CommandError, "CONTROLLER_REJECTED"):
+            client.activate_schedule()
+
+        disconnected = Socket([b"331 ready\r\n", b"230 accepted\r\n", b""])
+        client = ControllerCommandTransport(disconnected)
+        client.authenticate("operator", "example", nonce="1A2B3C4D")
+        with self.assertRaisesRegex(CommandError, "AMBIGUOUS"):
+            client.activate_schedule()
+
     def test_delivery_hash_and_recovery(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "candidate.bin"

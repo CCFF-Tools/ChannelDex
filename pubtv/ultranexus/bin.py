@@ -5,7 +5,8 @@ from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
 import struct
-from typing import Iterable, Mapping
+from typing import Iterable
+from .mutation import MutationError, MutationPlan, apply_mutation_plan, diff_ranges
 
 BIN_LENGTH = 5_649_624
 MAGIC = b"WinLGX 7"
@@ -61,15 +62,6 @@ def validate_checksum(data: bytes) -> None:
     if len(data) < CHECKSUM_OFFSET + 4 or _u32(data, CHECKSUM_OFFSET) != stored_checksum(data):
         raise BinFormatError("schedule.bin checksum mismatch")
 
-def diff_ranges(before: bytes, after: bytes) -> tuple[tuple[int, int], ...]:
-    if len(before) != len(after): raise ValueError("cannot diff buffers of different lengths")
-    ranges=[]; start=None
-    for i, (a, b) in enumerate(zip(before, after)):
-        if a != b and start is None: start=i
-        if a == b and start is not None: ranges.append((start, i)); start=None
-    if start is not None: ranges.append((start, len(before)))
-    return tuple(ranges)
-
 @dataclass(frozen=True)
 class ResourceRecord:
     slot: int; offset: int; group: int; reference: int; title: str; filename: str
@@ -79,18 +71,6 @@ class ResourceRecord:
 class ScheduleRecord:
     slot: int; offset: int; occurrence: int; reference: int; day: int; start: int; end: int
     duration: int; in_point: int; out_point: int; title: str; comment: str; storage: str; filename: str
-
-@dataclass(frozen=True)
-class MutationPlan:
-    """Declarative byte edits. Changes are (absolute offset, replacement bytes)."""
-    changes: tuple[tuple[int, bytes], ...]
-    label: str = ""
-    def __post_init__(self):
-        if tuple(sorted(self.changes)) != self.changes: raise BinValidationError("mutation changes must be sorted")
-        last=-1
-        for off, value in self.changes:
-            if off < 0 or off < last or not isinstance(value, bytes): raise BinValidationError("invalid mutation range")
-            last=off+len(value)
 
 class BinImage:
     def __init__(self, data: bytes, *, expected_sha256: str | None = None, validate=True):
@@ -170,20 +150,19 @@ class BinImage:
         return tuple(out)
 
     def apply(self, plan: MutationPlan, *, expected_changes: Iterable[tuple[int,int]] | None = None):
-        out=bytearray(self.data)
-        for off, value in plan.changes:
-            if off < 0 or off+len(value)>len(out): raise BinValidationError("mutation outside BIN")
-            out[off:off+len(value)] = value
+        try:
+            mutated, _ = apply_mutation_plan(self.data, plan)
+        except MutationError as exc:
+            raise BinValidationError(str(exc)) from exc
+        out=bytearray(mutated)
         out[CHECKSUM_OFFSET:CHECKSUM_OFFSET+4]=b"\0"*4; _put32(out,CHECKSUM_OFFSET,stored_checksum(out))
         actual=diff_ranges(self.data,out)
         if expected_changes is not None and actual != tuple(expected_changes): raise BinValidationError("undeclared byte changes")
         result=BinImage(bytes(out)); return result, {"label":plan.label,"ranges":actual,"sha256":sha256(out).hexdigest()}
 
     def _schedule_result(self, data: bytearray, label: str):
-        data[CHECKSUM_OFFSET:CHECKSUM_OFFSET + 4] = b"\0" * 4
-        _put32(data, CHECKSUM_OFFSET, stored_checksum(data))
-        result = BinImage(bytes(data))
-        return result, {"label": label, "ranges": diff_ranges(self.data, result.data), "sha256": sha256(result.data).hexdigest()}
+        plan = MutationPlan.between(self.data, bytes(data), label)
+        return self.apply(plan)
 
     def replace_schedule(self, slot: int, record: bytes):
         """Replace exactly one selected 574-byte record, retaining all other bytes."""

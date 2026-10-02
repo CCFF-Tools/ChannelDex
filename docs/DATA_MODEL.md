@@ -47,7 +47,10 @@ Approval 1 and its execution. `MediaInspection`, `MediaBinding`, `MediaIdAllocat
 `TransferAttempt` preserve exact bytes, probe evidence, controller identifiers,
 permanent target-scoped ID reservations, and remote verification. Historical
 bindings are backfilled into the allocation ledger during migration; prior
-qualified base versions also reserve their imported IDs. `ControllerSnapshot`, `SchedulePublicationBatch`,
+qualified base versions also reserve their imported IDs. New reservations are
+created transactionally before transfer, survive failed work, and are reused
+only for the same exact media hash and case-folded filename.
+`ControllerSnapshot`, `SchedulePublicationBatch`,
 `OccurrenceRevisionSelection`, `ArtifactRevision`, `PublicationJob`, and
 `ActivationEvidence` keep schedule review, Approval 2, delivery, and controller
 acceptance distinct. `ResearchGate` links each disabled capability to external
@@ -62,7 +65,7 @@ when editing an existing event. `ScheduleDeliveryOperation` retains the exact
 candidate, approval hash, known-good local/remote rollback identifiers, and
 durable states through staging, promotion, acknowledgement, observation, and
 rollback. An ambiguous operation blocks another delivery on that target until
-review. Artifact manifests retain byte ranges, the paired NMG/BIN parity report,
+review. Artifact manifests retain exact shared-plan byte ranges, the paired NMG/BIN parity report,
 and introduced resource references so registration qualification is enforced
 only when needed. Coverage is recorded only after independent activation
 observation.

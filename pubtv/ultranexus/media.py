@@ -15,6 +15,11 @@ class Probe:
     audio_codec: str | None
     nominal_frames: int
 
+    @property
+    def duration_units(self) -> int:
+        """Qualified nominal-30 units: ceil(probed duration seconds × 30)."""
+        return self.nominal_frames
+
 def parse_ffprobe_json(data: str | bytes | dict) -> Probe:
     try:
         raw = json.loads(data) if isinstance(data, (str, bytes)) else data

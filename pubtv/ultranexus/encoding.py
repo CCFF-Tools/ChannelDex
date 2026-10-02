@@ -3,6 +3,7 @@ from pathlib import Path
 import hashlib
 import os
 import json
+import re
 from .exceptions import CapabilityError
 
 @dataclass(frozen=True)
@@ -55,13 +56,47 @@ class FFmpegEncoder(Encoder):
 
     def analysis_commands(self, source: str) -> tuple[EncodeCommand, EncodeCommand]:
         """Build explicit post-encode analysis commands for qualification evidence."""
-        video = (self.executable, "-v", "error", "-i", source,
+        video = (self.executable, "-hide_banner", "-nostats", "-loglevel", "info", "-i", source,
                  "-map", f"0:v:{self.video_stream}", "-vf", "signalstats,metadata=print",
                  "-an", "-f", "null", "-")
-        audio = (self.executable, "-v", "error", "-i", source,
+        audio = (self.executable, "-hide_banner", "-nostats", "-loglevel", "info", "-i", source,
                  "-map", f"0:a:{self.audio_stream}", "-af", "ebur128=peak=true",
                  "-vn", "-f", "null", "-")
         return EncodeCommand(video, "-"), EncodeCommand(audio, "-")
+
+    def measure(self, source: str, *, runner) -> dict:
+        """Execute qualification analyzers and retain compact numeric evidence."""
+        video_command, audio_command = self.analysis_commands(source)
+
+        def execute(command):
+            result = runner(command.argv, check=False, capture_output=True, text=True)
+            if getattr(result, "returncode", 1) != 0:
+                raise RuntimeError("FFmpeg qualification analysis failed")
+            return "\n".join((getattr(result, "stdout", "") or "",
+                              getattr(result, "stderr", "") or ""))
+
+        signal_values = {}
+        for name, raw in re.findall(r"lavfi\.signalstats\.([A-Za-z0-9_]+)=(-?[0-9]+(?:\.[0-9]+)?)",
+                                    execute(video_command)):
+            signal_values.setdefault(name, []).append(float(raw))
+        if not signal_values:
+            raise RuntimeError("FFmpeg signalstats output was not measurable")
+        video = {name: {"minimum": min(values), "maximum": max(values),
+                        "last": values[-1], "samples": len(values)}
+                 for name, values in sorted(signal_values.items())}
+
+        audio_text = execute(audio_command)
+        def last_value(pattern):
+            matches = re.findall(pattern, audio_text, flags=re.MULTILINE)
+            return float(matches[-1]) if matches else None
+        audio = {
+            "integrated_lufs": last_value(r"^\s*I:\s*(-?[0-9]+(?:\.[0-9]+)?)\s+LUFS"),
+            "loudness_range_lu": last_value(r"^\s*LRA:\s*([0-9]+(?:\.[0-9]+)?)\s+LU"),
+            "true_peak_dbtp": last_value(r"^\s*Peak:\s*(-?[0-9]+(?:\.[0-9]+)?)\s+dBFS"),
+        }
+        if audio["integrated_lufs"] is None or audio["true_peak_dbtp"] is None:
+            raise RuntimeError("FFmpeg ebur128 output was not measurable")
+        return {"video_signalstats": video, "audio_ebur128": audio}
 
     def post_encode_measurements(self, probe):
         """Return bounded, observable measurements from an ffprobe result.
@@ -73,6 +108,7 @@ class FFmpegEncoder(Encoder):
         audio = probe.audio or {}
         return {
             "duration": str(probe.duration),
+            "duration_units": probe.duration_units,
             "nominal_frames": probe.nominal_frames,
             "width": probe.width, "height": probe.height,
             "video_codec": probe.video_codec,
