@@ -50,14 +50,14 @@ python manage.py migrate
 python manage.py runserver 127.0.0.1:8000
 ```
 
-Open `http://127.0.0.1:8000/`. The SQLite database is `pubtv.sqlite3` in this checkout for development; an operational launcher should set a local Application Support path before startup. Keep the server on loopback. Back up only after quitting the server, copying the complete data folder (including SQLite sidecars when present). No media bytes, credentials, connectors, playout control, or vendor exchange are included.
+Open `http://127.0.0.1:8000/`. The SQLite database is `pubtv.sqlite3` in this checkout for development; an operational launcher should set a local Application Support path before startup. Keep the server on loopback. Back up only after quitting the server, copying the complete data folder (including SQLite sidecars when present). Qualified media preparation and FTP exchange run only through approved local jobs. Credentials remain in macOS Keychain. Schedule delivery and playout control remain disabled until target-specific research gates pass.
 
-The tested environment is Python 3.11.15 with Django 5.2.17, Gunicorn 23.0.0, WhiteNoise 6.9.0, asgiref 3.12.1, packaging 26.3, and sqlparse 0.6.0. The focused validation suite contains 42 deterministic tests across `tests.test_launcher`, `tests.test_quit`, `tests.test_core`, and `tests.test_workflows`.
+The tested environment is Python 3.11.15 with Django 5.2.17, Gunicorn 23.0.0, WhiteNoise 6.9.0, asgiref 3.12.1, packaging 26.3, and sqlparse 0.6.0. The complete validation suite currently contains 165 deterministic tests, including the UltraNEXUS domain, adapter, approval, and workflow tests.
 
 Run the complete focused suite with:
 
 ```sh
-python manage.py test tests.test_launcher tests.test_quit tests.test_core tests.test_workflows
+python manage.py test
 ```
 
 For the loopback-only production-style launcher, install the pinned runtime lockfile. It defaults to the private Application Support directory; set a local data directory explicitly when desired:

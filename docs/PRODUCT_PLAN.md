@@ -72,7 +72,13 @@ The initial runtime, packaging, and testing target is macOS 26.x on Apple Silico
 
 One owner edits authoritative data on a macOS computer and manually backs up the local application data folder or database. Private in-app day/week/agenda views are sufficient for V1. Existing storage has been the historical media location; the approved future home for both source and encoded media is the LAN SMB store. The app stores searchable metadata and references, not media bytes.
 
-The MVP supports manual external media and device work: no app-controlled device exchange/import, schedule push, live monitoring, or transcoding. Leightronix/TelVue integration is future roadmap work.
+The accepted post-MVP UltraNEXUS extension supports qualified local media
+encoding or validated bypass plus verified FTP transfer after Approval 1.
+The 2026-10-01 restricted extension adds local paired NMG/BIN generation and
+an attended delivery workflow after separate Approval 2. Hardware mutation
+remains gated by target-specific BIN, activation, and recovery qualification;
+full-week replacement is deferred.
+Live monitoring and automatic airing evidence remain outside this capability.
 
 Propose a first-class `UploadedScheduleRevision` for each manually uploaded external schedule: immutable internal identity and covered occurrence revision IDs; optional operator-entered external label/reference; exactly one target device; operator/audit actor; upload timestamp; and lifecycle state (`active`, `superseded`, or `invalidated`). Supersession retains prior/newer links, reason, actor, and timestamp. Record-level invalidation voids all coverage and retains reason, actor, and timestamp.
 

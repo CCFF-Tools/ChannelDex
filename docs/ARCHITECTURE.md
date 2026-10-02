@@ -26,6 +26,19 @@ and audit compatibility.
 
 Status: accepted for implementation on 2026-09-09; the initial runtime/testing target is macOS 26.x on Apple Silicon. Unsigned local PyInstaller packaging is implemented and smoke-tested; signing, notarization, distribution, and Intel validation remain open/deferred. Updated 2026-09-09.
 
+## Accepted UltraNEXUS automation boundary (updated 2026-10-02)
+
+ChannelDex separates media preparation from schedule commitment with two
+immutable approval snapshots. A supervised local worker owns encoding, media
+inspection, FTP transfer, remote verification, and future scheduled publication.
+Encoding, inspection, FTP, NMG, BIN compilation, and XPASS activation are
+replaceable adapters. The restricted writer keeps target-specific NMG and BIN
+bases separate; schedule delivery records a known-good local and remote backup
+before one attended LOADSCH. The UI requires separate staging, promotion, and
+activation-evidence actions. Target capabilities remain evidence-gated and fail
+closed until destination qualification passes.
+See [ULTRANEXUS_AUTOMATION.md](ULTRANEXUS_AUTOMATION.md).
+
 ## Recommended shape
 
 Run one small application service on the owner's **Mac**, accessed through a browser on that same computer. Bind to loopback by default and keep the authoritative SQLite database/config on local Mac disk, outside SMB. Media source and encoded files use the confirmed LAN SMB home; the app stores references. The application service must be running while in use. Internet access is unnecessary for ordinary operation once installed; updates can be an explicit maintenance activity. Shared LAN access and public hosting are deferred.

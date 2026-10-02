@@ -1,5 +1,20 @@
 # ChannelDex TODO and usability backlog
 
+## UltraNEXUS automation — accepted 2026-09-29
+
+- [x] Add versioned target settings, immutable evidence records, two approval
+  snapshots, durable local jobs, per-item encode bypass, strict inspection,
+  qualified AME/FFmpeg selection, verified staged FTP, NMG adapters, and the
+  owner-facing Automation workspace.
+- [ ] Qualify AME, FFmpeg equivalence, bypass, the NMG/BIN relationship,
+  target-specific schedule.bin output, XPASS/LOADSCH activation, resource registration,
+  interrupted publication recovery, rollback, DST, and midnight behavior using
+  the evidence matrix in `ULTRANEXUS_AUTOMATION.md`.
+- [x] Implement the restricted 7.0.3.48 BIN parser/writer, selected change
+  manifests, attended FTP staging and XPASS activation, rollback journal, and
+  experimental AME/FFmpeg comparison records. Hardware use stays qualified per
+  target and individually confirmed.
+
 This is a durable implementation backlog. **Accepted** items are confirmed requirements; **proposed** items are design suggestions; **open** items still need an owner decision. A TODO entry is not evidence that the capability is implemented.
 
 ## Accepted usability overhaul — implementation staged 2026-09-17
