@@ -605,6 +605,7 @@ class AuditEvent(models.Model):
 # references, hashes, and operator-entered evidence; they never store raw
 # passwords, tokens, or other credentials.
 class UltraNexusTargetSettings(models.Model):
+    QUALIFICATION_STATUS = [(x, x.replace("_", " ").title()) for x in ("open", "passed", "blocked")]
     target = models.ForeignKey(Device, on_delete=models.PROTECT, related_name="ultranexus_settings")
     version = models.PositiveIntegerField(default=1)
     settings = models.JSONField(default=dict)
@@ -622,6 +623,17 @@ class UltraNexusTargetSettings(models.Model):
     command_port = models.PositiveIntegerField(default=23)
     command_username = models.CharField(max_length=120, blank=True)
     command_secret_reference = models.CharField(max_length=255, blank=True)
+    controller_family = models.CharField(max_length=64, blank=True)
+    firmware_version = models.CharField(max_length=32, blank=True)
+    output_number = models.PositiveIntegerField(null=True, blank=True)
+    media_profile = models.CharField(max_length=64, blank=True)
+    profile_identity_hash = models.CharField(max_length=64, blank=True)
+    ame_preset_sha256 = models.CharField(max_length=64, blank=True)
+    ffmpeg_profile_sha256 = models.CharField(max_length=64, blank=True)
+    nmg_template_sha256 = models.CharField(max_length=64, blank=True)
+    bin_template_sha256 = models.CharField(max_length=64, blank=True)
+    qualification_status = models.CharField(max_length=16, choices=QUALIFICATION_STATUS, default="open")
+    qualification_evidence_hash = models.CharField(max_length=64, blank=True)
     settings_hash = models.CharField(max_length=128, blank=True)
     is_current = models.BooleanField(default=False)
     created_at = models.DateTimeField(default=timezone.now)
@@ -651,6 +663,15 @@ class UltraNexusTargetSettings(models.Model):
             raise ValidationError({"schedule_path": "The qualified schedule path is /internal/schedule/schedule.bin."})
         if self.command_secret_reference and (":" not in self.command_secret_reference or any(ch.isspace() for ch in self.command_secret_reference)):
             raise ValidationError({"command_secret_reference": "Use an opaque Keychain service:account reference."})
+        hash_fields = ("profile_identity_hash", "ame_preset_sha256", "ffmpeg_profile_sha256",
+                       "nmg_template_sha256", "bin_template_sha256",
+                       "qualification_evidence_hash")
+        for field in hash_fields:
+            value = getattr(self, field)
+            if value and (len(value) != 64 or any(ch not in "0123456789abcdefABCDEF" for ch in value)):
+                raise ValidationError({field: "Use an exact SHA-256 hexadecimal digest."})
+        if self.qualification_status == "passed" and not self.qualification_evidence_hash:
+            raise ValidationError({"qualification_evidence_hash": "Passed qualification requires exact evidence SHA-256."})
 
 
 # Alternate spelling retained for callers that render the product name as an

@@ -19,6 +19,13 @@ before hardware mutation. Full-week replacement, scheduled activation, and
 unqualified controller/profile families remain open. Assisted AME/FFmpeg
 comparison records are experimental until owner review and qualification.
 
+**Implemented 2026-10-02:** the restricted path now enforces the exact target
+contract and template identities, Thursday-based NMG weekly seconds, logical
+NMG/BIN parity including Switchbacks and intentional gaps, conditional
+resource-registration gating, and a complete measured FFmpeg qualification
+matrix. These checks do not constitute destination qualification; the private
+AME comparisons and controlled controller observations remain external evidence.
+
 ## Usability and information architecture decision (accepted 2026-09-17)
 
 The owner accepted implementation of the complete usability overhaul from the

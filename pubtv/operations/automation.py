@@ -10,7 +10,6 @@ import re
 import subprocess
 import struct
 import uuid
-from collections import Counter
 from datetime import datetime, timedelta
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -30,7 +29,11 @@ from pubtv.ultranexus.ftp import StdlibFTPAdapter
 from pubtv.ultranexus.secrets import KeychainSecretStore, SecretReference
 from pubtv.ultranexus.nmg import NMGImage, SCHEDULE_BASE, SCHEDULE_STRIDE
 from pubtv.ultranexus.bin import BinImage, SCHEDULE_BASE as BIN_SCHEDULE_BASE, SCHEDULE_STRIDE as BIN_SCHEDULE_STRIDE
-from pubtv.ultranexus.bin import RESOURCE_BASE as BIN_RESOURCE_BASE, RESOURCE_STRIDE as BIN_RESOURCE_STRIDE
+from pubtv.ultranexus.bin import (RESOURCE_BASE as BIN_RESOURCE_BASE,
+                                  RESOURCE_STRIDE as BIN_RESOURCE_STRIDE,
+                                  week_seconds)
+from pubtv.ultranexus.parity import analyze_nmg_timeline, validate_nmg_bin_parity
+from pubtv.ultranexus.qualification import validate_qualification_manifest
 
 
 def canonical_json(value) -> str:
@@ -210,6 +213,17 @@ def settings_record_snapshot(target_settings):
             "command_port": target_settings.command_port,
             "command_username": target_settings.command_username,
             "command_secret_reference": target_settings.command_secret_reference,
+            "controller_family": target_settings.controller_family,
+            "firmware_version": target_settings.firmware_version,
+            "output_number": target_settings.output_number,
+            "media_profile": target_settings.media_profile,
+            "profile_identity_hash": target_settings.profile_identity_hash,
+            "ame_preset_sha256": target_settings.ame_preset_sha256,
+            "ffmpeg_profile_sha256": target_settings.ffmpeg_profile_sha256,
+            "nmg_template_sha256": target_settings.nmg_template_sha256,
+            "bin_template_sha256": target_settings.bin_template_sha256,
+            "qualification_status": target_settings.qualification_status,
+            "qualification_evidence_hash": target_settings.qualification_evidence_hash,
         }
     return settings_snapshot
 
@@ -235,6 +249,31 @@ def _gate_passed(target, key):
     return ResearchGate.objects.filter(target=target, key=key, status="passed").exists()
 
 
+def restricted_target_blockers(target_settings):
+    """Return exact restricted-target contract violations without inferring qualification."""
+    if not target_settings:
+        return ["current UltraNEXUS target settings are unavailable"]
+    expected = {
+        "controller_family": "UltraNEXUS-HD",
+        "firmware_version": "7.0.3.48",
+        "output_number": 1,
+        "media_profile": "Nexus Mono",
+        "qualification_status": "passed",
+        "schedule_path": "/internal/schedule/schedule.bin",
+    }
+    blockers = [f"qualified target {field} must be {value!r}"
+                for field, value in expected.items()
+                if getattr(target_settings, field) != value]
+    for field in ("profile_identity_hash", "nmg_template_sha256", "bin_template_sha256",
+                  "qualification_evidence_hash", "base_nmg_hash", "base_bin_hash"):
+        value = getattr(target_settings, field, "") or ""
+        if len(value) != 64 or any(ch not in "0123456789abcdefABCDEF" for ch in value):
+            blockers.append(f"qualified target {field} must be an exact SHA-256")
+    if not target_settings.media_directory:
+        blockers.append("qualified FTP-visible media directory spelling is required")
+    return blockers
+
+
 def _qualified_ffmpeg(config, target):
     """Bind a passed equivalence gate to the reviewed build and comparisons."""
     if not _gate_passed(target, "ffmpeg_equivalence"):
@@ -252,10 +291,13 @@ def _qualified_ffmpeg(config, target):
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, ValueError) as exc:
         raise RuntimeError("FFmpeg qualification manifest is unreadable") from exc
-    pairs = manifest.get("pairs", [])
-    if not pairs or any(pair.get("owner_review") != "accepted" or
-                        pair.get("ffmpeg_build_identity") != build_hash for pair in pairs):
-        raise RuntimeError("FFmpeg comparisons are not accepted for this exact build")
+    blockers = validate_qualification_manifest(
+        manifest, build_hash=build_hash,
+        preset_hash=(config.get("ame_preset_sha256") or "").lower(),
+        profile_hash=(config.get("ffmpeg_profile_sha256") or "").lower(),
+    )
+    if blockers:
+        raise RuntimeError("FFmpeg comparisons are not accepted: " + "; ".join(blockers))
     return str(executable)
 
 
@@ -315,7 +357,7 @@ def _resource_reference(target, digest):
 def controller_filename(original_name, digest, *, encoded):
     """Return a deterministic, ASCII UltraNEXUS filename with a <=27-byte stem."""
     original = Path(original_name)
-    suffix = ".mp4" if encoded else (original.suffix.lower() or ".mp4")
+    suffix = ".mp4" if encoded else (original.suffix or ".mp4")
     stem = original.stem.encode("ascii", "ignore").decode("ascii")
     stem = re.sub(r"[^A-Za-z0-9_-]+", "-", stem).strip("-_") or "media"
     marker = f"-{digest[:8]}"
@@ -341,6 +383,8 @@ def _target_config(target):
         "command_port": record.command_port,
         "command_username": record.command_username,
         "command_secret_reference": record.command_secret_reference,
+        "ame_preset_sha256": record.ame_preset_sha256,
+        "ffmpeg_profile_sha256": record.ffmpeg_profile_sha256,
     }
 
 
@@ -587,6 +631,9 @@ def generate_nmg_artifact(batch):
     if batch.workflow_mode != "selected_changes":
         raise ValueError("Full-week NMG generation remains disabled pending qualification.")
     target_settings, config = _target_config(batch.target)
+    target_blockers = restricted_target_blockers(target_settings)
+    if target_blockers:
+        raise ValueError("Target qualification is incomplete: " + "; ".join(target_blockers))
     generation_settings = settings_record_snapshot(target_settings)
     base_path = Path(config.get("base_nmg_path") or "")
     if not base_path.is_file() or not config.get("base_nmg_hash"):
@@ -611,6 +658,7 @@ def generate_nmg_artifact(batch):
         raise ValueError("NMG generation blocked: " + "; ".join(preview["blockers"]))
     image = NMGImage.from_file(base_path, expected_sha256=config["base_nmg_hash"])
     image.validate_restricted()
+    base_timeline = analyze_nmg_timeline(image)
     bin_base = None
     if any(item.operation != "add" for item in selections):
         if not config.get("base_bin_path") or not config.get("base_bin_hash"):
@@ -620,6 +668,12 @@ def generate_nmg_artifact(batch):
     template_resource = next((item for item in image.resources() if item.reference == int(template_reference)), None)
     if not template_resource:
         raise ValueError("Qualified Nexus Mono resource template is absent from the base NMG.")
+    nmg_template_hash = hashlib.sha256(
+        image.data[template_resource.base:template_resource.base + BIN_RESOURCE_STRIDE]
+        + schedule_template_record
+    ).hexdigest()
+    if nmg_template_hash != target_settings.nmg_template_sha256.lower():
+        raise ValueError("Qualified NMG template identity changed")
     next_occurrence_id = max((item.occurrence_id for item in image.schedules()), default=0) + 1
     manifest_items = []
     for selection in selections:
@@ -682,7 +736,7 @@ def generate_nmg_artifact(batch):
         zone = ZoneInfo(occurrence.station.timezone)
         local_start = occurrence.starts_at.astimezone(zone)
         day = (local_start.weekday() + 1) % 7
-        start = local_start.hour * 3600 + local_start.minute * 60 + local_start.second
+        start = week_seconds(day, local_start.hour, local_start.minute, local_start.second)
         play_duration = resource.rounded_seconds or ((resource.duration_units + 29) // 30)
         if play_duration <= 0:
             raise ValueError(f"{occurrence.label}: controller resource duration is unavailable")
@@ -714,9 +768,13 @@ def generate_nmg_artifact(batch):
                                "resource_reference": binding.resource_reference_uint32, "play_duration_seconds": play_duration})
         next_occurrence_id += 1
     image.validate_restricted()
+    generated_timeline = analyze_nmg_timeline(image)
+    if generated_timeline["intentional_uncovered_gaps"] != base_timeline["intentional_uncovered_gaps"]:
+        raise ValueError("Selected changes altered qualified intentional virtual-channel gaps")
     output_root = Path(django_settings.DATA_DIR) / "ultranexus" / "schedules"
     output_root.mkdir(parents=True, exist_ok=True, mode=0o700)
     manifest = {**image.manifest(), "base_sha256": config["base_nmg_hash"], "items": manifest_items,
+                "template_sha256": nmg_template_hash, "timeline": generated_timeline,
                 "target_id": batch.target_id, "target_settings": generation_settings,
                 "workflow_mode": batch.workflow_mode, "reconciliation_mode": batch.reconciliation_mode}
     temp_path = None
@@ -763,6 +821,9 @@ def generate_bin_artifact(batch):
     if batch.workflow_mode != "selected_changes" or batch.reconciliation_mode != "preserve":
         raise ValueError("Restricted BIN creation supports selected preserved changes only")
     target_settings, config = _target_config(batch.target)
+    target_blockers = restricted_target_blockers(target_settings)
+    if target_blockers:
+        raise ValueError("Target qualification is incomplete: " + "; ".join(target_blockers))
     settings_snapshot = settings_record_snapshot(target_settings)
     if config.get("schedule_path") != "/internal/schedule/schedule.bin":
         raise ValueError("Qualified controller schedule path must be reviewed and saved")
@@ -799,6 +860,16 @@ def generate_bin_artifact(batch):
     template = next((r for r in image.resources if r.reference == template_ref), None)
     if template is None:
         raise ValueError("Qualified BIN resource template is unavailable")
+    template_slot = target_settings.settings.get("bin_schedule_template_slot")
+    schedule_template = next((s for s in image.schedules if s.slot == template_slot), None)
+    if schedule_template is None or schedule_template.title.startswith("Switchback"):
+        raise ValueError("Qualified BIN schedule template is unavailable")
+    bin_template_hash = hashlib.sha256(
+        image.data[template.offset:template.offset + BIN_RESOURCE_STRIDE]
+        + image.data[schedule_template.offset:schedule_template.offset + BIN_SCHEDULE_STRIDE]
+    ).hexdigest()
+    if bin_template_hash != target_settings.bin_template_sha256.lower():
+        raise ValueError("Qualified BIN template identity changed")
     new_events = []
     for selection, item in zip(selections, items):
         if selection.operation == "delete":
@@ -845,16 +916,7 @@ def generate_bin_artifact(batch):
     tail = BIN_SCHEDULE_BASE + len(all_events) * BIN_SCHEDULE_STRIDE
     data[tail:BIN_SCHEDULE_BASE + 3000 * BIN_SCHEDULE_STRIDE] = b"\0" * (3000 - len(all_events)) * BIN_SCHEDULE_STRIDE
     image, audit = image._schedule_result(data, "selected-changes")
-    nmg_events = Counter(
-        (s.reference, s.day, s.start, s.end, s.duration)
-        for s in nmg.schedules() if not s.title.startswith("Switchback")
-    )
-    bin_events = Counter(
-        (s.reference, s.day, s.start, s.end, s.duration)
-        for s in image.executable_schedules
-    )
-    if bin_events != nmg_events:
-        raise ValueError("NMG/BIN executable events are not logically equivalent")
+    parity = validate_nmg_bin_parity(nmg, image)
     expected = {(s.reference, s.day, s.start, s.in_point, s.out_point) for s in image.executable_schedules}
     for raw in new_events:
         key = (struct.unpack_from("<I", raw, 4)[0], raw[0x1a],
@@ -862,10 +924,14 @@ def generate_bin_artifact(batch):
                struct.unpack_from("<I", raw, 0x3b)[0], struct.unpack_from("<I", raw, 0x3f)[0])
         if key not in expected:
             raise ValueError("Selected NMG event did not survive BIN serialization")
+    introduced_resources = sorted({resource.reference for resource in image.resources}
+                                  - {resource.reference for resource in base.resources})
     manifest = {**image.manifest(), "base_sha256": config["base_bin_hash"],
                 "source_nmg_hash": nmg_artifact.content_hash, "items": items,
                 "target_settings": settings_snapshot, "audit": audit,
-                "removed_source_slots": sorted(removed)}
+                "removed_source_slots": sorted(removed),
+                "introduced_resource_references": introduced_resources,
+                "template_sha256": bin_template_hash, "parity": parity}
     root = Path(django_settings.DATA_DIR) / "ultranexus" / "schedules"
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     temporary = output = None
@@ -889,7 +955,7 @@ def generate_bin_artifact(batch):
                 file_reference=str(output), content_hash=manifest["sha256"], manifest=manifest,
                 validation={"status": "passed", "target_id": batch.target_id,
                             "source_nmg_hash": nmg_artifact.content_hash,
-                            "occurrences": items, "audit": audit},
+                            "occurrences": items, "audit": audit, "parity": parity},
             )
             if locked.approval_2_status == "approved":
                 invalidate_snapshot(locked, approval=2, reason="generated schedule artifact changed")

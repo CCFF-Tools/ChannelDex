@@ -30,13 +30,20 @@ records uploaded-revision coverage.
 
 The restricted release supports selected preserve-controller changes only.
 Gaps appear as Switchbacks in NMG and are separately checked against executable
-BIN events. Full-week replacement and scheduled activation remain disabled.
+BIN events. NMG times use the qualified Thursday-based weekly-seconds epoch; the
+parity report checks event identity, wrap-aware intervals, exact adjacency,
+Switchbacks, and pre-existing intentional uncovered gaps. Full-week replacement
+and scheduled activation remain disabled.
 DST-transition weeks, midnight-crossing items, unresolved media, live items, and
 unassigned episodes block publication.
 
 ## Implemented components
 
 - Versioned target settings with macOS Keychain credential references.
+- An exact restricted-target contract: UltraNEXUS-HD, firmware 7.0.3.48,
+  output 1, Nexus Mono, qualified media-directory spelling, fixed schedule path,
+  base/template/profile hashes, and destination evidence hash. A missing or
+  changed value blocks generation and delivery.
 - Immutable media probes, hashes, rendition lineage, controller bindings,
   transfer attempts, controller snapshots, NMG/BIN artifact revisions, activation
   evidence, and exact occurrence revision selections.
@@ -52,8 +59,13 @@ unassigned episodes block publication.
 - Attended FTP staging, retained local and remote known-good BIN copies, XPASS
   authentication, one fixed LOADSCH command, ambiguous-result handling, explicit
   rollback, and independent activation evidence before upload coverage.
-- An experimental AME/FFmpeg comparison workspace. FFmpeg execution requires a
-  passed research gate, accepted comparisons, and exact build/manifest hashes.
+- An experimental AME/FFmpeg comparison workspace with explicit stream mapping,
+  deterministic profile identity, `signalstats` video-level analysis, and
+  `ebur128` loudness/peak analysis. FFmpeg execution requires a passed research
+  gate and a schema-2 manifest whose geometry, frame-rate, audio, illegal-level,
+  fractional-duration, loudness/limiter, and controller-playback cases have all
+  passed owner review with no differences or unmeasured checks. Exact executable,
+  preset, profile, and manifest identities must match.
 - Permanent target-scoped Media ID/resource-reference reservations, seeded from
   existing bindings and checked against all retained qualified base versions.
 - Owner-facing Automation settings, preparation batches, per-item encode toggles,
@@ -77,7 +89,7 @@ python manage.py record_ultranexus_research DEVICE_ID KEY EVIDENCE_FILE --status
 | `schedule_bin_format` | Accepted restricted 7.0.3.48 output-1 ordinary-video fixtures and destination validation | Restricted BIN generation |
 | `schedule_bin_activation` | XPASS/LOADSCH target qualification, command responses, and independent activation evidence | Attended schedule activation |
 | `ftp_promotion_recovery` | Interrupted staging, rename support, partial discovery, name races, concurrency, and rollback | Automated schedule publication |
-| `resource_registration` | New-resource captures proving library files or registration operations | New controller library resources |
+| `resource_registration` | New-resource captures proving library files or registration operations | Publications whose BIN manifest introduces controller library resources; unchanged existing references do not require this gate |
 | `dst_midnight_activation` | Vendor or controlled evidence for DST, midnight crossing, and activation-period rules | Those schedule cases |
 
 The qualified active path is `/internal/schedule/schedule.bin`. Older target
@@ -87,9 +99,11 @@ exact target qualification and attended actions. Full-week replacement remains
 unsupported.
 
 The owner may record an experimental comparison with
-`python manage.py record_ultranexus_ffmpeg_pair CASE SOURCE AME_OUTPUT FFMPEG_OUTPUT PRESET FFMPEG_EXECUTABLE AME_PROBE_JSON FFMPEG_PROBE_JSON`.
-The private manifest remains experimental until the required geometry, rate,
-audio, limiter, loudness, duration, and controller checks are reviewed.
+`python manage.py record_ultranexus_ffmpeg_pair CASE SOURCE AME_OUTPUT FFMPEG_OUTPUT PRESET FFMPEG_EXECUTABLE AME_PROBE_JSON FFMPEG_PROBE_JSON --case-kind KIND --comparison-report-json REPORT`.
+`KIND` must cover the schema-2 matrix documented above. The report records the
+measured checks, differences, and unmeasured properties; metadata equality alone
+cannot qualify a pair. The private manifest remains experimental until every
+required case is accepted and its exact identities match the target settings.
 
 Run the worker under a local supervisor after configuring target settings and
 Keychain credentials:

@@ -9,6 +9,7 @@ from .models import (
     RecurrenceSlot, Show, Station, UploadedScheduleRevision,
     WeeklyEpisodeAssignment,
     PreparationBatch, SchedulePublicationBatch, MediaInspection, ResearchGate,
+    UltraNexusTargetSettings,
 )
 
 
@@ -175,6 +176,17 @@ class AutomationPublicationForm(forms.Form):
 
 
 class UltraNexusSettingsForm(forms.Form):
+    controller_family = forms.CharField(required=False, initial="UltraNEXUS-HD")
+    firmware_version = forms.CharField(required=False, initial="7.0.3.48")
+    output_number = forms.IntegerField(required=False, min_value=1, initial=1)
+    media_profile = forms.CharField(required=False, initial="Nexus Mono")
+    profile_identity_hash = forms.CharField(required=False, help_text="SHA-256 of the accepted target media-profile evidence.")
+    ame_preset_sha256 = forms.CharField(required=False, help_text="SHA-256 of the exact accepted AME preset.")
+    ffmpeg_profile_sha256 = forms.CharField(required=False, help_text="SHA-256 of the exact FFmpeg argument profile.")
+    nmg_template_sha256 = forms.CharField(required=False, help_text="SHA-256 of the qualified NMG resource+schedule template records.")
+    bin_template_sha256 = forms.CharField(required=False, help_text="SHA-256 of the qualified BIN resource+schedule template records.")
+    qualification_status = forms.ChoiceField(choices=UltraNexusTargetSettings.QUALIFICATION_STATUS, initial="open")
+    qualification_evidence_hash = forms.CharField(required=False, help_text="SHA-256 of the destination qualification evidence.")
     host = forms.CharField(required=False, help_text="Controller FTP host or IP address.")
     port = forms.IntegerField(required=False, min_value=1, max_value=65535, initial=21)
     ftp_username = forms.CharField(required=False)

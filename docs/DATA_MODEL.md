@@ -53,14 +53,19 @@ qualified base versions also reserve their imported IDs. `ControllerSnapshot`, `
 acceptance distinct. `ResearchGate` links each disabled capability to external
 evidence. These facts never create `AiringEvidence` automatically.
 
-The restricted extension adds a versioned, exact-hash BIN base and a separate
-opaque XPASS Keychain reference to target settings. Each occurrence selection
+The restricted extension adds versioned exact-hash NMG/BIN bases, controller
+family, firmware, output, media-profile, template/profile identity hashes,
+qualification status/evidence, and a separate opaque XPASS Keychain reference
+to target settings. Each occurrence selection
 records add, move, replace, or delete plus the source BIN slot and record hash
 when editing an existing event. `ScheduleDeliveryOperation` retains the exact
 candidate, approval hash, known-good local/remote rollback identifiers, and
 durable states through staging, promotion, acknowledgement, observation, and
 rollback. An ambiguous operation blocks another delivery on that target until
-review. Coverage is recorded only after independent activation observation.
+review. Artifact manifests retain byte ranges, the paired NMG/BIN parity report,
+and introduced resource references so registration qualification is enforced
+only when needed. Coverage is recorded only after independent activation
+observation.
 
 | Entity | Responsibility and key relationships |
 | --- | --- |
