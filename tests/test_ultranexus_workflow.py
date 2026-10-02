@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import TestCase
+from unittest.mock import patch
 import hashlib
 import struct
 
@@ -34,7 +35,7 @@ class UltraNexusWorkflowServiceTests(TestCase):
 try:
     from django.test import Client, override_settings
     from pubtv.operations.models import ArtifactRevision, Device, Episode, MediaAsset, MediaBinding, MediaInspection, Occurrence, PreparationBatch, PreparationBatchItem, PreparationJob, ResearchGate, SchedulePublicationBatch, Show, Station, TransferAttempt, UltraNexusTargetSettings, UploadedOccurrenceCoverage
-    from pubtv.operations.automation import approve_preparation_batch, generate_nmg_artifact, invalidate_snapshot, preview_schedule, process_preparation_batch, publication_artifact_blockers, publication_snapshot, schedule_ready_binding
+    from pubtv.operations.automation import approve_preparation_batch, generate_bin_artifact, generate_nmg_artifact, invalidate_snapshot, preview_schedule, process_preparation_batch, publication_artifact_blockers, publication_snapshot, schedule_ready_binding
     from pubtv.ultranexus.ftp import TransferResult
     from pubtv.ultranexus.nmg import MAGIC, RESOURCE_BASE, SCHEDULE_BASE, SCHEDULE_STRIDE, VERSION_OFFSET
 
@@ -100,7 +101,7 @@ try:
             source = Path(directory) / "selected source.mp4"
             source.write_bytes(b"exact selected bytes")
             self.occurrence.asset.smb_reference = str(source)
-            self.occurrence.asset.file_name = "A very long non ascii épisode source filename.mp4"
+            self.occurrence.asset.file_name = "A very long non ascii épisode source filename.MP4"
             self.occurrence.asset.save()
             UltraNexusTargetSettings.objects.create(
                 target=self.device, version=1, is_current=True, host="controller.test",
@@ -147,6 +148,7 @@ try:
                 self.assertTrue(result["complete"])
                 self.assertEqual(captured["bytes"], source.read_bytes())
                 self.assertLessEqual(len(Path(captured["remote"]).stem.encode("ascii")), 27)
+                self.assertEqual(Path(captured["remote"]).suffix, ".MP4")
                 self.assertEqual(item.resulting_inspection.media_hash, __import__("hashlib").sha256(source.read_bytes()).hexdigest())
                 self.assertEqual(TransferAttempt.objects.get(item=item).status, "succeeded")
                 self.assertEqual(UploadedOccurrenceCoverage.objects.count(), 0)
@@ -263,24 +265,31 @@ try:
                 base = bytearray(34_923_624)
                 base[:8] = MAGIC
                 base[VERSION_OFFSET:VERSION_OFFSET + 8] = b"7.0.3.48"
-                struct.pack_into("<II", base, RESOURCE_BASE, 1, 77)
-                base[RESOURCE_BASE + 0x43:RESOURCE_BASE + 0x4c] = b"Template\0"
-                base[RESOURCE_BASE + 0x83:RESOURCE_BASE + 0x88] = b"Vol1\0"
+                from tests.test_ultranexus_bin import fixture as bin_fixture
+                from pubtv.ultranexus.bin import RESOURCE_BASE as BIN_RESOURCE_BASE, SCHEDULE_BASE as BIN_SCHEDULE_BASE
+                bin_bytes = bin_fixture()
+                base[RESOURCE_BASE:RESOURCE_BASE + 518] = bin_bytes[BIN_RESOURCE_BASE:BIN_RESOURCE_BASE + 518]
                 gap, template = SCHEDULE_BASE, SCHEDULE_BASE + SCHEDULE_STRIDE
                 struct.pack_into("<II", base, gap, 0, 0)
                 base[gap + 0x1a] = 4
-                struct.pack_into("<III", base, gap + 0x1b, 25200, 25200, 27000)
+                struct.pack_into("<III", base, gap + 0x1b, 630000, 630000, 631800)
                 struct.pack_into("<I", base, gap + 0x33, 1800)
                 gap_title = b"Switchback 0:30:00\0"
                 base[gap + 0x57:gap + 0x57 + len(gap_title)] = gap_title
-                struct.pack_into("<II", base, template, 2, 77)
-                base[template + 0x1a] = 0
-                struct.pack_into("<III", base, template + 0x1b, 0, 0, 10)
-                struct.pack_into("<I", base, template + 0x33, 10)
-                struct.pack_into("<I", base, template + 0x13e, 10)
-                base[template + 0x57:template + 0x60] = b"Template\0"
+                base[template:template + SCHEDULE_STRIDE] = bin_bytes[
+                    BIN_SCHEDULE_BASE:BIN_SCHEDULE_BASE + SCHEDULE_STRIDE]
                 base_path = Path(directory) / "base.nmg"
                 base_path.write_bytes(base)
+                bin_path = Path(directory) / "base.bin"
+                bin_path.write_bytes(bin_bytes)
+                nmg_template_hash = hashlib.sha256(
+                    base[RESOURCE_BASE:RESOURCE_BASE + 518]
+                    + base[template:template + SCHEDULE_STRIDE]
+                ).hexdigest()
+                bin_template_hash = hashlib.sha256(
+                    bin_bytes[BIN_RESOURCE_BASE:BIN_RESOURCE_BASE + 518]
+                    + bin_bytes[BIN_SCHEDULE_BASE:BIN_SCHEDULE_BASE + SCHEDULE_STRIDE]
+                ).hexdigest()
                 probe = {"streams": [
                     {"codec_type": "video", "codec_name": "h264", "width": 1920, "height": 1080,
                      "duration": "1800", "bit_rate": "6491701", "r_frame_rate": "30000/1001"},
@@ -299,7 +308,16 @@ try:
                 UltraNexusTargetSettings.objects.create(
                     target=self.device, version=1, is_current=True, base_nmg_path=str(base_path),
                     base_nmg_hash=hashlib.sha256(base).hexdigest(),
-                    settings={"nmg_resource_template_reference": 77, "nmg_schedule_template_base": template},
+                    base_bin_path=str(bin_path), base_bin_hash=hashlib.sha256(bin_bytes).hexdigest(),
+                    media_directory="/Vol1/mpeg", schedule_path="/internal/schedule/schedule.bin",
+                    controller_family="UltraNEXUS-HD", firmware_version="7.0.3.48",
+                    output_number=1, media_profile="Nexus Mono", qualification_status="passed",
+                    profile_identity_hash="1" * 64, nmg_template_sha256=nmg_template_hash,
+                    bin_template_sha256=bin_template_hash, qualification_evidence_hash="3" * 64,
+                    settings={"nmg_resource_template_reference": 100,
+                              "nmg_schedule_template_base": template,
+                              "bin_resource_template_reference": 100,
+                              "bin_schedule_template_slot": 0},
                 )
                 batch = SchedulePublicationBatch.objects.create(target=self.device)
                 batch.occurrence_selections.create(occurrence=self.occurrence, occurrence_revision=self.occurrence.revision)
@@ -314,9 +332,27 @@ try:
                 self.assertEqual(artifact.revision, 2)
                 self.assertEqual(artifact.validation["status"], "passed")
                 self.assertEqual(hashlib.sha256(Path(artifact.file_reference).read_bytes()).hexdigest(), artifact.content_hash)
+                generated = Path(artifact.file_reference).read_bytes()
+                program = SCHEDULE_BASE
+                if generated[program + 0x57:program + 0x61].startswith(b"Switchback"):
+                    program += SCHEDULE_STRIDE
+                self.assertEqual(struct.unpack_from("<I", generated, program + 0x1b)[0], 630000)
+                bin_artifact = generate_bin_artifact(batch)
+                self.assertEqual(bin_artifact.validation["parity"]["status"], "passed")
+                self.assertEqual(bin_artifact.manifest["introduced_resource_references"], [88])
                 blockers = publication_artifact_blockers(batch)
                 self.assertNotIn("NMG occurrence revisions do not match the publication batch", blockers)
                 self.assertEqual(publication_snapshot(batch)["artifacts"][0]["revision"], 2)
+                before_files = set((Path(directory) / "ultranexus" / "schedules").iterdir())
+                before_revisions = ArtifactRevision.objects.filter(
+                    publication_batch=batch, artifact_type="bin").count()
+                with patch("pubtv.operations.automation.os.replace", side_effect=OSError("disk failure")):
+                    with self.assertRaisesRegex(OSError, "disk failure"):
+                        generate_bin_artifact(batch)
+                self.assertEqual(ArtifactRevision.objects.filter(
+                    publication_batch=batch, artifact_type="bin").count(), before_revisions)
+                self.assertEqual(set((Path(directory) / "ultranexus" / "schedules").iterdir()), before_files)
+                self.assertEqual(hashlib.sha256(bin_path.read_bytes()).hexdigest(), hashlib.sha256(bin_bytes).hexdigest())
                 with self.assertRaises(Exception):
                     artifact.save()
 except ImportError:

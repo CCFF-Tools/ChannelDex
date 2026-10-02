@@ -15,7 +15,8 @@ from django.utils import timezone
 from .models import (ActivationEvidence, ArtifactRevision, Device, ResearchGate, UploadedScheduleRevision,
                      ScheduleDeliveryOperation, SchedulePublicationBatch)
 from .automation import (canonical_hash, publication_artifact_blockers,
-                         publication_snapshot, settings_record_snapshot, _keychain_password)
+                         publication_snapshot, restricted_target_blockers,
+                         settings_record_snapshot, _keychain_password)
 from .services import create_upload_snapshot
 from pubtv.ultranexus.bin import BinImage
 from pubtv.ultranexus.command import ControllerCommandTransport, CommandError, LOADSCH_PATH
@@ -30,16 +31,13 @@ DELIVERY_GATES = ("nmg_bin_relationship", "schedule_bin_format", "schedule_bin_a
 
 def _preflight(batch: SchedulePublicationBatch):
     current = batch.target.ultranexus_settings.filter(is_current=True).first()
-    if not current or current.schedule_path != LOADSCH_PATH or not current.base_bin_hash:
-        raise ValueError("Qualified target and BIN base settings are required")
+    target_blockers = restricted_target_blockers(current)
+    if target_blockers:
+        raise ValueError("Qualified target contract is incomplete: " + "; ".join(target_blockers))
     if batch.workflow_mode != "selected_changes" or batch.reconciliation_mode != "preserve":
         raise ValueError("Only attended selected preserved changes are qualified")
     if batch.requested_activation_at:
         raise ValueError("Future activation is unavailable in the restricted release")
-    passed = set(ResearchGate.objects.filter(target=batch.target, status="passed").values_list("key", flat=True))
-    missing = sorted(set(DELIVERY_GATES) - passed)
-    if missing:
-        raise ValueError("Target qualification is incomplete: " + ", ".join(missing))
     if batch.approval_2_status != "approved" or batch.approval_2_hash != canonical_hash(batch.approval_2_snapshot):
         raise ValueError("Approval 2 is required")
     if publication_snapshot(batch) != batch.approval_2_snapshot or publication_artifact_blockers(batch):
@@ -48,6 +46,13 @@ def _preflight(batch: SchedulePublicationBatch):
     if not artifact or sha256_file(artifact.file_reference) != artifact.content_hash:
         raise ValueError("Reviewed BIN artifact is missing or changed")
     BinImage.from_file(artifact.file_reference, expected_sha256=artifact.content_hash)
+    passed = set(ResearchGate.objects.filter(target=batch.target, status="passed").values_list("key", flat=True))
+    required = set(DELIVERY_GATES)
+    if artifact.manifest.get("introduced_resource_references"):
+        required.add("resource_registration")
+    missing = sorted(required - passed)
+    if missing:
+        raise ValueError("Target qualification is incomplete: " + ", ".join(missing))
     if not current.host or not current.port or not current.secret_reference:
         raise ValueError("FTP target configuration is incomplete")
     return current, artifact

@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from pathlib import Path
+import hashlib
 import os
 import json
 from .exceptions import CapabilityError
@@ -46,6 +47,21 @@ class FFmpegEncoder(Encoder):
         argv = (self.executable, "-n", "-i", source, "-map", f"0:v:{self.video_stream}",
                 "-map", f"0:a:{self.audio_stream}", "-vf", "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,fps=30000/1001,setsar=1", "-c:v", "libx264", "-profile:v", "main", "-level:v", "4.1", "-pix_fmt", "yuv420p", "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709", "-color_range", "tv", "-b:v", self.video_bitrate, "-c:a", "aac", "-ac", "1", "-ar", "48000", "-b:a", self.audio_bitrate, output)
         return EncodeCommand(argv, output)
+
+    def profile_identity(self) -> str:
+        """Hash the exact qualified argument profile independently of file paths."""
+        argv = self.command("{source}", "{output}").argv[1:]
+        return hashlib.sha256(json.dumps(argv, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+    def analysis_commands(self, source: str) -> tuple[EncodeCommand, EncodeCommand]:
+        """Build explicit post-encode analysis commands for qualification evidence."""
+        video = (self.executable, "-v", "error", "-i", source,
+                 "-map", f"0:v:{self.video_stream}", "-vf", "signalstats,metadata=print",
+                 "-an", "-f", "null", "-")
+        audio = (self.executable, "-v", "error", "-i", source,
+                 "-map", f"0:a:{self.audio_stream}", "-af", "ebur128=peak=true",
+                 "-vn", "-f", "null", "-")
+        return EncodeCommand(video, "-"), EncodeCommand(audio, "-")
 
     def post_encode_measurements(self, probe):
         """Return bounded, observable measurements from an ffprobe result.

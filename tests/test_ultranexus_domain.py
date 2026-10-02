@@ -20,6 +20,7 @@ from pubtv.operations.models import (
     Station,
     UltraNexusTargetSettings,
 )
+from pubtv.operations.automation import restricted_target_blockers
 
 
 class UltraNexusDomainTests(TestCase):
@@ -120,6 +121,24 @@ class UltraNexusDomainTests(TestCase):
         settings.secret_reference = "raw secret"
         with self.assertRaises(ValidationError):
             settings.full_clean()
+
+    def test_passed_target_qualification_requires_evidence_and_exact_contract(self):
+        settings = UltraNexusTargetSettings(
+            target=self.device, settings={"profile": "restricted"}, qualification_status="passed",
+            controller_family="UltraNEXUS-HD", firmware_version="7.0.3.48",
+            output_number=1, media_profile="Nexus Mono",
+            media_directory="/Vol1/mpeg", schedule_path="/internal/schedule/schedule.bin",
+            profile_identity_hash="1" * 64, nmg_template_sha256="2" * 64,
+            bin_template_sha256="3" * 64, base_nmg_hash="4" * 64,
+            base_bin_hash="5" * 64,
+        )
+        with self.assertRaises(ValidationError):
+            settings.full_clean()
+        settings.qualification_evidence_hash = "6" * 64
+        settings.full_clean()
+        self.assertEqual(restricted_target_blockers(settings), [])
+        settings.output_number = 2
+        self.assertTrue(any("output_number" in blocker for blocker in restricted_target_blockers(settings)))
 
     def test_schedule_artifacts_are_immutable_and_publication_jobs_idempotent(self):
         publication = SchedulePublicationBatch.objects.create(target=self.device)

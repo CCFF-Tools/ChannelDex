@@ -14,6 +14,13 @@
   manifests, attended FTP staging and XPASS activation, rollback journal, and
   experimental AME/FFmpeg comparison records. Hardware use stays qualified per
   target and individually confirmed.
+- [x] Enforce the versioned restricted-target contract, exact template/profile
+  identities, NMG/BIN logical parity, conditional new-resource registration,
+  and the complete measured FFmpeg qualification matrix.
+- [ ] Supply and review the private AME matrix outputs, then perform the
+  destination-Mac/controller authentication, replacement, activation,
+  observation, rollback, and representative WinLGX reconstruction run. These
+  external qualification inputs remain the blockers to hardware enablement.
 
 This is a durable implementation backlog. **Accepted** items are confirmed requirements; **proposed** items are design suggestions; **open** items still need an owner decision. A TODO entry is not evidence that the capability is implemented.
 

@@ -81,6 +81,16 @@ class FailedPromotionAdapter(FakeFTPAdapter):
         return FailedPromotionConnection()
 
 
+class FailedUploadConnection(FakeFTPConnection):
+    def storbinary(self, command, source, blocksize):
+        raise OSError("simulated upload failure")
+
+
+class FailedUploadAdapter(FakeFTPAdapter):
+    def _connect(self):
+        return FailedUploadConnection()
+
+
 class FakeSocket:
     def __init__(self):
         self.responses = iter((b"331 User name OK\r\n", b"230 User Logged in\r\n", b"200 Command OK\r\n"))
@@ -104,6 +114,12 @@ class TimeoutAfterLoadSocket(FakeSocket):
         if any(line.startswith(b"LOADSCH ") for line in self.sent):
             raise TimeoutError("simulated lost acknowledgement")
         return super().recv(size)
+
+
+class AuthenticationRejectedSocket(FakeSocket):
+    def __init__(self):
+        self.responses = iter((b"331 User name OK\r\n", b"530 Authentication rejected\r\n"))
+        self.sent = []
 
 
 class AttendedDeliveryTests(TestCase):
@@ -138,12 +154,19 @@ class AttendedDeliveryTests(TestCase):
         )
         self.settings = UltraNexusTargetSettings.objects.create(
             target=self.target, version=1, is_current=True, host="controller.test", port=21,
-            schedule_path="/internal/schedule/schedule.bin", secret_reference="ftp:operator",
+            media_directory="/Vol1/mpeg", schedule_path="/internal/schedule/schedule.bin",
+            secret_reference="ftp:operator",
             command_username="operator", command_secret_reference="command:operator",
+            base_nmg_path=str(self.nmg_path), base_nmg_hash=self.nmg_hash,
             base_bin_path=str(self.base_path), base_bin_hash=self.base_hash,
+            controller_family="UltraNEXUS-HD", firmware_version="7.0.3.48",
+            output_number=1, media_profile="Nexus Mono", qualification_status="passed",
+            profile_identity_hash="1" * 64, nmg_template_sha256="2" * 64,
+            bin_template_sha256="3" * 64, qualification_evidence_hash="4" * 64,
         )
         for gate in DELIVERY_GATES:
             ResearchGate.objects.create(target=self.target, key=gate, status="passed")
+        ResearchGate.objects.create(target=self.target, key="resource_registration", status="passed")
         self.batch = SchedulePublicationBatch.objects.create(target=self.target)
         self.batch.occurrence_selections.create(occurrence=self.occurrence,
                                                  occurrence_revision=self.occurrence.revision)
@@ -160,7 +183,7 @@ class AttendedDeliveryTests(TestCase):
         ArtifactRevision.objects.create(
             publication_batch=self.batch, artifact_type="bin", revision=1,
             file_reference=str(self.candidate_path), content_hash=self.candidate_hash,
-            manifest={"items": [item]},
+            manifest={"items": [item], "introduced_resource_references": [101]},
             validation={"status": "passed", "target_id": self.target.pk,
                         "source_nmg_hash": self.nmg_hash, "occurrences": [item]},
         )
@@ -208,6 +231,36 @@ class AttendedDeliveryTests(TestCase):
         self.assertEqual(UploadedOccurrenceCoverage.objects.filter(upload__state="active").count(), 0)
         self.assertEqual(ActivationEvidence.objects.filter(publication_batch=self.batch,
                                                             status="activation_observed").count(), 1)
+
+    def test_new_resources_require_registration_qualification(self):
+        ResearchGate.objects.filter(target=self.target, key="resource_registration").delete()
+        with self.assertRaisesRegex(ValueError, "resource_registration"):
+            stage_publication(self.batch.pk, expected_hash=self.candidate_hash,
+                              ftp_factory=FakeFTPAdapter, secret_resolver=lambda _: "example")
+
+    def test_upload_failure_keeps_live_schedule_and_requires_reconciliation(self):
+        with self.assertRaises(OSError):
+            stage_publication(self.batch.pk, expected_hash=self.candidate_hash,
+                              ftp_factory=FailedUploadAdapter, secret_resolver=lambda _: "example")
+        operation = self.batch.delivery_operations.get()
+        self.assertEqual(operation.state, "ambiguous")
+        self.assertEqual(FakeFTPConnection.files["/internal/schedule/schedule.bin"], self.base_path.read_bytes())
+        self.assertNotIn("LOADSCH", json.dumps(operation.result))
+
+    def test_authentication_rejection_after_promotion_is_ambiguous_without_loadsch(self):
+        operation = stage_publication(self.batch.pk, expected_hash=self.candidate_hash,
+                                      ftp_factory=FakeFTPAdapter, secret_resolver=lambda _: "example")
+        sockets = []
+        def socket_factory(address, timeout):
+            sock = AuthenticationRejectedSocket(); sockets.append(sock); return sock
+        with self.assertRaises(Exception):
+            activate_publication(operation.pk, expected_hash=self.candidate_hash,
+                                 ftp_factory=FakeFTPAdapter, secret_resolver=lambda _: "example",
+                                 socket_factory=socket_factory)
+        operation.refresh_from_db()
+        self.assertEqual(operation.state, "ambiguous")
+        self.assertEqual(FakeFTPConnection.files["/internal/schedule/schedule.bin"], self.candidate_path.read_bytes())
+        self.assertEqual(sum(line.startswith(b"LOADSCH ") for line in sockets[0].sent), 0)
 
     def test_observation_rejects_unattributed_text(self):
         operation = stage_publication(self.batch.pk, expected_hash=self.candidate_hash,

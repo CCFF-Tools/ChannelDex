@@ -3,9 +3,13 @@ import unittest
 
 from pubtv.ultranexus.bin import (
     BIN_LENGTH, CHECKSUM_OFFSET, MAGIC, VERSION_OFFSET, RESOURCE_BASE,
-    SCHEDULE_BASE, BinFormatError, BinImage, MutationPlan, diff_ranges,
+    RESOURCE_STRIDE, RESOURCE_CAPACITY, SCHEDULE_BASE, SCHEDULE_STRIDE,
+    SCHEDULE_CAPACITY, BinFormatError, BinImage, MutationPlan, diff_ranges,
     plan_patch_resource, stored_checksum, week_seconds,
 )
+from pubtv.ultranexus.nmg import (NMGImage, RESOURCE_BASE as NMG_RESOURCE_BASE,
+                                  SCHEDULE_BASE as NMG_SCHEDULE_BASE)
+from pubtv.ultranexus.parity import ParityError, validate_nmg_bin_parity
 
 
 def fixture():
@@ -47,6 +51,9 @@ class BinTests(unittest.TestCase):
                             RESOURCE_BASE + 0x43 <= start < RESOURCE_BASE + 0x43 + 32
                             for start, _ in diff_ranges(source, result.data)))
         self.assertEqual(audit["ranges"], diff_ranges(source, result.data))
+        unchanged, unchanged_audit = image.apply(MutationPlan(()))
+        self.assertEqual(unchanged.data, source)
+        self.assertEqual(unchanged_audit["ranges"], ())
 
     def test_rejects_sparse_and_duplicate_schedule_fields(self):
         b = bytearray(fixture()); s = SCHEDULE_BASE
@@ -100,6 +107,60 @@ class BinTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             image.append_resource_from_template(image.resources[0], reference=103,
                                                 title="x", filename="CLIP.MP4", media_id=43)
+
+    def test_logical_parity_includes_switchback_adjacency(self):
+        binary = BinImage(fixture())
+        nmg = bytearray(34_923_624)
+        nmg[:8] = MAGIC
+        nmg[VERSION_OFFSET:VERSION_OFFSET + 9] = b"7.0.3.48\0"
+        nmg[NMG_RESOURCE_BASE:NMG_RESOURCE_BASE + RESOURCE_STRIDE] = binary.data[
+            RESOURCE_BASE:RESOURCE_BASE + RESOURCE_STRIDE]
+        nmg[NMG_SCHEDULE_BASE:NMG_SCHEDULE_BASE + SCHEDULE_STRIDE] = binary.data[
+            SCHEDULE_BASE:SCHEDULE_BASE + SCHEDULE_STRIDE]
+        switchback = NMG_SCHEDULE_BASE + SCHEDULE_STRIDE
+        nmg[switchback + 0x1A] = 1
+        for offset, value in ((0x1B, 3661), (0x1F, 3661), (0x23, 3700), (0x33, 39)):
+            struct.pack_into("<I", nmg, switchback + offset, value)
+        title = b"Switchback 0:00:39\0"
+        nmg[switchback + 0x57:switchback + 0x57 + len(title)] = title
+        nmg_image = NMGImage(bytes(nmg))
+        nmg_image.validate_restricted()
+        report = validate_nmg_bin_parity(nmg_image, binary)
+        self.assertEqual(report["event_count"], 1)
+        self.assertEqual(report["timeline"]["exact_adjacencies"], 1)
+        struct.pack_into("<I", nmg, switchback + 0x1B, 3660)
+        struct.pack_into("<I", nmg, switchback + 0x1F, 3660)
+        struct.pack_into("<I", nmg, switchback + 0x33, 40)
+        with self.assertRaises((ParityError, ValueError)):
+            validate_nmg_bin_parity(NMGImage(bytes(nmg)), binary)
+
+    def test_full_tables_are_detected_as_exhausted(self):
+        resources = bytearray(fixture())
+        template = resources[RESOURCE_BASE:RESOURCE_BASE + RESOURCE_STRIDE]
+        for slot in range(1, RESOURCE_CAPACITY):
+            offset = RESOURCE_BASE + slot * RESOURCE_STRIDE
+            resources[offset:offset + RESOURCE_STRIDE] = template
+            struct.pack_into("<I", resources, offset + 4, 100 + slot)
+        struct.pack_into("<I", resources, CHECKSUM_OFFSET, stored_checksum(resources))
+        full_resources = BinImage(bytes(resources))
+        with self.assertRaises(ValueError):
+            full_resources.append_resource_from_template(
+                full_resources.resources[0], reference=7000, title="overflow",
+                filename="overflow.mp4", media_id=42)
+
+        schedules = bytearray(fixture())
+        template = schedules[SCHEDULE_BASE:SCHEDULE_BASE + SCHEDULE_STRIDE]
+        for slot in range(SCHEDULE_CAPACITY):
+            offset = SCHEDULE_BASE + slot * SCHEDULE_STRIDE
+            schedules[offset:offset + SCHEDULE_STRIDE] = template
+            struct.pack_into("<I", schedules, offset, 200 + slot)
+            start = 3600 + slot * 61
+            for field, value in ((0x1B, start), (0x1F, start), (0x23, start + 61)):
+                struct.pack_into("<I", schedules, offset + field, value)
+        struct.pack_into("<I", schedules, CHECKSUM_OFFSET, stored_checksum(schedules))
+        full_schedules = BinImage(bytes(schedules))
+        with self.assertRaises(ValueError):
+            full_schedules.insert_schedule(SCHEDULE_CAPACITY, template)
 
 
 if __name__ == "__main__": unittest.main()

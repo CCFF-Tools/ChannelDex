@@ -36,7 +36,12 @@ replaceable adapters. The restricted writer keeps target-specific NMG and BIN
 bases separate; schedule delivery records a known-good local and remote backup
 before one attended LOADSCH. The UI requires separate staging, promotion, and
 activation-evidence actions. Target capabilities remain evidence-gated and fail
-closed until destination qualification passes.
+closed until destination qualification passes. The restricted compiler shares
+one immutable mutation plan across the format-specific NMG and BIN writers, then
+checks Thursday-epoch event identity, Switchbacks, adjacency, wrap behavior, and
+intentional base gaps before publication. New resource references additionally
+require the target's resource-registration gate; edits using existing references
+do not inherit that unrelated blocker.
 See [ULTRANEXUS_AUTOMATION.md](ULTRANEXUS_AUTOMATION.md).
 
 ## Recommended shape

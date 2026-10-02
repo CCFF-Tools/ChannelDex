@@ -16,6 +16,17 @@ from .media import parse_ffprobe_json
 from .encoding import FFmpegEncoder
 
 
+REQUIRED_CASE_CHECKS = {
+    "geometry": {"geometry"},
+    "frame_rate": {"frame_rate"},
+    "audio": {"audio_layout", "loudness"},
+    "illegal_levels": {"video_levels", "limiter"},
+    "fractional_duration": {"duration"},
+    "loudness_limiter": {"loudness", "limiter"},
+    "controller_playback": {"controller_playback"},
+}
+
+
 def _hash_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -41,11 +52,13 @@ class EvidenceFile:
 @dataclass(frozen=True)
 class QualificationPair:
     case_id: str
+    case_kind: str
     source: EvidenceFile
     ame_output: EvidenceFile
     ffmpeg_output: EvidenceFile
     preset_identity: str
     ffmpeg_build_identity: str
+    ffmpeg_profile_identity: str
     ame_probe: dict[str, Any]
     ffmpeg_probe: dict[str, Any]
     comparison_report: dict[str, Any]
@@ -57,14 +70,20 @@ class QualificationPair:
                ffmpeg_output: str | Path, *, preset_identity: str,
                ffmpeg_build_identity: str, ame_probe: str | bytes | dict,
                ffmpeg_probe: str | bytes | dict,
+               case_kind: str = "",
+               ffmpeg_profile_identity: str = "",
                comparison_report: dict[str, Any] | None = None) -> "QualificationPair":
-        if not case_id.strip() or not preset_identity.strip() or not ffmpeg_build_identity.strip():
-            raise ValueError("case, preset, and FFmpeg build identities are required")
+        if case_kind not in REQUIRED_CASE_CHECKS:
+            raise ValueError("case kind is not part of the required qualification matrix")
+        if not all(value.strip() for value in (case_id, preset_identity, ffmpeg_build_identity,
+                                               ffmpeg_profile_identity)):
+            raise ValueError("case, preset, FFmpeg build, and profile identities are required")
         ame = parse_ffprobe_json(ame_probe)
         ffmpeg = parse_ffprobe_json(ffmpeg_probe)
         report = comparison_report or compare_probes(ame, ffmpeg)
-        return cls(case_id, EvidenceFile.capture(source), EvidenceFile.capture(ame_output),
+        return cls(case_id, case_kind, EvidenceFile.capture(source), EvidenceFile.capture(ame_output),
                    EvidenceFile.capture(ffmpeg_output), preset_identity, ffmpeg_build_identity,
+                   ffmpeg_profile_identity,
                    ame.raw, ffmpeg.raw, report)
 
     def to_dict(self) -> dict[str, Any]:
@@ -82,7 +101,51 @@ def compare_probes(ame_probe, ffmpeg_probe) -> dict[str, Any]:
         "differences": {key: (left[key], right[key]) for key in fields if left[key] != right[key]},
         "unmeasured": ["limiter", "loudness_equivalence", "legalization", "controller_playback"],
         "qualification": "experimental",
+        "checks": {},
     }
+
+
+def pair_acceptance_blockers(pair: dict[str, Any]) -> list[str]:
+    blockers = []
+    kind = pair.get("case_kind")
+    if kind not in REQUIRED_CASE_CHECKS:
+        return ["unknown qualification case kind"]
+    report = pair.get("comparison_report") or {}
+    if report.get("status") != "comparable" or report.get("differences"):
+        blockers.append("AME/FFmpeg observable results differ")
+    if report.get("unmeasured"):
+        blockers.append("comparison retains unmeasured requirements")
+    checks = report.get("checks") or {}
+    missing = sorted(name for name in REQUIRED_CASE_CHECKS[kind] if checks.get(name) != "passed")
+    if missing:
+        blockers.append("required checks are not passed: " + ", ".join(missing))
+    return blockers
+
+
+def validate_qualification_manifest(data: dict[str, Any], *, build_hash: str,
+                                    preset_hash: str, profile_hash: str) -> list[str]:
+    blockers = []
+    if data.get("schema") != 2:
+        blockers.append("qualification manifest schema 2 is required")
+    pairs = data.get("pairs")
+    if not isinstance(pairs, list) or not pairs:
+        return blockers + ["qualification comparisons are required"]
+    kinds = {pair.get("case_kind") for pair in pairs}
+    missing_kinds = sorted(set(REQUIRED_CASE_CHECKS) - kinds)
+    if missing_kinds:
+        blockers.append("required fixture cases are missing: " + ", ".join(missing_kinds))
+    for pair in pairs:
+        case_id = pair.get("case_id") or "unnamed"
+        if pair.get("owner_review") != "accepted":
+            blockers.append(f"{case_id}: owner review is not accepted")
+        if pair.get("ffmpeg_build_identity") != build_hash:
+            blockers.append(f"{case_id}: FFmpeg build identity differs")
+        if pair.get("preset_identity") != preset_hash:
+            blockers.append(f"{case_id}: AME preset identity differs")
+        if pair.get("ffmpeg_profile_identity") != profile_hash:
+            blockers.append(f"{case_id}: FFmpeg argument profile differs")
+        blockers.extend(f"{case_id}: {message}" for message in pair_acceptance_blockers(pair))
+    return blockers
 
 
 class QualificationWorkspace:
@@ -124,7 +187,7 @@ class QualificationWorkspace:
 
     def read(self) -> dict[str, Any]:
         if not self.manifest_path.exists():
-            return {"schema": 1, "status": "experimental", "pairs": []}
+            return {"schema": 2, "status": "experimental", "pairs": []}
         return json.loads(self.manifest_path.read_text(encoding="utf-8"))
 
     def owner_review(self, case_id: str, decision: str, note: str = "") -> Path:
@@ -133,6 +196,10 @@ class QualificationWorkspace:
         data = self.read()
         for pair in data["pairs"]:
             if pair["case_id"] == case_id:
+                if decision == "accepted":
+                    blockers = pair_acceptance_blockers(pair)
+                    if blockers:
+                        raise ValueError("comparison cannot be accepted: " + "; ".join(blockers))
                 pair["owner_review"] = decision
                 pair["owner_note"] = note
                 break
