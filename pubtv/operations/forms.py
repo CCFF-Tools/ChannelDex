@@ -8,6 +8,7 @@ from .models import (
     MediaAsset, Occurrence, OccurrenceProgramming, Producer,
     RecurrenceSlot, Show, Station, UploadedScheduleRevision,
     WeeklyEpisodeAssignment,
+    PreparationBatch, SchedulePublicationBatch, MediaInspection, ResearchGate,
 )
 
 
@@ -138,6 +139,73 @@ class CarryForwardSettingsForm(forms.ModelForm):
                 "an explicit episode or No program choice overrides them, and turning this off does not erase existing plans."
             ),
         }
+
+
+class AutomationPreparationForm(forms.Form):
+    target = forms.ModelChoiceField(queryset=Device.objects.none(), empty_label=None)
+    assets = forms.ModelMultipleChoiceField(queryset=MediaAsset.objects.none(), required=True)
+    encode_before_transfer = forms.BooleanField(required=False, initial=True)
+    label = forms.CharField(required=False, max_length=160)
+
+    def __init__(self, *args, station=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["target"].queryset = Device.objects.all().order_by("name")
+        self.fields["assets"].queryset = MediaAsset.objects.filter(kind__in=("source", "encoded")).order_by("file_name", "pk")
+
+
+class AutomationPublicationForm(forms.Form):
+    target = forms.ModelChoiceField(queryset=Device.objects.none(), empty_label=None)
+    occurrences = forms.ModelMultipleChoiceField(queryset=Occurrence.objects.none(), required=True)
+    reconciliation_mode = forms.ChoiceField(choices=SchedulePublicationBatch.RECONCILIATION_MODES, initial="preserve")
+    workflow_mode = forms.ChoiceField(choices=SchedulePublicationBatch.WORKFLOW_MODES, initial="selected_changes")
+    requested_activation_at = forms.DateTimeField(required=False, widget=forms.HiddenInput())
+
+    def __init__(self, *args, station=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["target"].queryset = Device.objects.all().order_by("name")
+        self.fields["occurrences"].queryset = Occurrence.objects.filter(status="planned").select_related("show", "episode").order_by("starts_at")
+
+    def clean(self):
+        data = super().clean()
+        if data.get("workflow_mode") == "full_week" and data.get("reconciliation_mode") != "authoritative":
+            self.add_error("reconciliation_mode", "A full week requires ChannelDex-owned authoritative reconciliation.")
+        if data.get("requested_activation_at"):
+            self.add_error("requested_activation_at", "Scheduled activation is unavailable; activation requires an attended confirmation.")
+        return data
+
+
+class UltraNexusSettingsForm(forms.Form):
+    host = forms.CharField(required=False, help_text="Controller FTP host or IP address.")
+    port = forms.IntegerField(required=False, min_value=1, max_value=65535, initial=21)
+    ftp_username = forms.CharField(required=False)
+    media_directory = forms.CharField(required=False, initial="/Vol1/mpeg")
+    schedule_path = forms.CharField(required=False, initial="/internal/schedule/schedule.bin")
+    secret_reference = forms.CharField(required=False, help_text="macOS Keychain service:account reference only; never enter a password or token.")
+    reconciliation_mode = forms.ChoiceField(choices=SchedulePublicationBatch.RECONCILIATION_MODES, initial="preserve")
+    base_nmg_path = forms.CharField(required=False)
+    base_nmg_hash = forms.CharField(required=False)
+    base_bin_path = forms.CharField(required=False, help_text="Private local copy of the qualified controller schedule.bin.")
+    base_bin_hash = forms.CharField(required=False, help_text="Approved SHA-256 of that exact BIN.")
+    command_port = forms.IntegerField(required=False, min_value=1, max_value=65535, initial=23)
+    command_username = forms.CharField(required=False)
+    command_secret_reference = forms.CharField(required=False, help_text="Separate macOS Keychain service:account reference for XPASS.")
+    bin_resource_template_reference = forms.IntegerField(required=False, min_value=1)
+    bin_schedule_template_slot = forms.IntegerField(required=False, min_value=0, max_value=2999)
+    ame_executable = forms.CharField(required=False)
+    ame_preset = forms.CharField(required=False, help_text="Path to the reviewed Nexus Mono .epr preset.")
+    ffmpeg_executable = forms.CharField(required=False, help_text="Exact qualified FFmpeg executable path.")
+    ffmpeg_build_sha256 = forms.CharField(required=False, help_text="SHA-256 of that executable.")
+    ffmpeg_qualification_manifest = forms.CharField(required=False, help_text="Private AME/FFmpeg comparison manifest path.")
+    ffmpeg_qualification_sha256 = forms.CharField(required=False, help_text="SHA-256 of the reviewed comparison manifest.")
+    nmg_resource_template_reference = forms.IntegerField(required=False, min_value=1, help_text="Qualified Nexus Mono resource reference to clone.")
+    nmg_schedule_template_base = forms.IntegerField(required=False, min_value=46586, help_text="Qualified aligned schedule record byte offset to clone.")
+    capability_flags = forms.CharField(required=False, help_text="Comma-separated qualified capability names.")
+
+    def clean_schedule_path(self):
+        path = self.cleaned_data["schedule_path"]
+        if path and path != "/internal/schedule/schedule.bin":
+            raise forms.ValidationError("Use the qualified /internal/schedule/schedule.bin path. Review and resave legacy settings.")
+        return path
 
 
 class DeviceForm(forms.ModelForm):

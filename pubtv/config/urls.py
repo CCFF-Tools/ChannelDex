@@ -26,6 +26,7 @@ urlpatterns = [
     path("slots/new/", views.slot_create, name="slot-create"), path("slots/<int:pk>/edit/", views.slot_edit, name="slot-edit"), path("assignments/new/", views.assignment_create, name="assignment-create"),
     path("day/", views.day_view, name="day-view"), path("week/", views.week_view, name="week-view"), path("agenda/", views.agenda_view, name="agenda"), path("history/", views.history_view, name="history"),
     path("settings/", views.settings_view, name="settings"), path("settings/devices/", views.device_list, name="device-list"),
+    path("automation/", views.automation_dashboard, name="automation"),
     path("occurrences/<int:pk>/", views.occurrence_workbench, name="occurrence-workbench"),
     path("occurrences/<int:pk>/preparation/", views.preparation_edit, name="preparation-edit"), path("occurrences/<int:pk>/programming/", views.programming_create, name="programming-create"),
     path("assets/<int:asset_id>/transfers/new/", views.transfer_create, name="transfer-create"),

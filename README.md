@@ -119,11 +119,18 @@ The calendar distinguishes:
 
 A plan is only intent. It does not mean that the day was uploaded or aired.
 
-### 4. Record preparation and scheduling work
+### 4. Prepare media and scheduling work
 
 Open **Schedule → What needs scheduling today** for planned items that do not yet
 have an active upload record covering their exact current revision. For each item,
 record preparation and device-programming facts as the real work is completed.
+
+The **Automation** workspace provides the accepted two-step UltraNEXUS flow.
+Approval 1 authorizes qualified encoding or byte-identical bypass, validation,
+FTP transfer, and readback verification. Approval 2 separately authorizes only
+the exact reviewed schedule artifact and occurrence revisions. Research-dependent
+schedule delivery remains disabled until controller evidence qualifies it. See
+the [automation contract](docs/ULTRANEXUS_AUTOMATION.md).
 
 When the external schedule has actually been uploaded, use **Record schedule
 upload** and identify the device and every occurrence revision it covers. Editing
@@ -170,8 +177,12 @@ untouched backup before attempting a manual restore.
 ## Important limitations
 
 - One owner/editor on one computer; there are no user accounts or shared-LAN mode.
-- No automatic file download, network mount, transcoding, or media validation.
-- No Leightronix or TelVue schedule exchange and no broadcast-device control.
+- Source delivery links and SMB paths remain private references; ChannelDex does
+  not fetch connector content or mount network shares.
+- UltraNEXUS media preparation, verified FTP transfer, restricted NMG/BIN
+  generation, and attended schedule activation are implemented behind
+  target-specific qualification gates. Hardware delivery and rollback require
+  recorded destination qualification and separate operator confirmation.
 - No public calendar or calendar export.
 - No automatic proof of airing.
 - No signed/notarized installer or validated Intel Mac build.

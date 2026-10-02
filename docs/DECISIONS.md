@@ -1,5 +1,24 @@
 # Decisions and owner review
 
+## UltraNEXUS automation decision (accepted 2026-09-29)
+
+The owner accepted two approvals: media preparation and verified transfer first,
+then commitment of the exact reviewed schedule. Encoding is selected per item and
+defaults on; bypass preserves bytes but still requires the qualified Nexus Mono
+checks. Preserve-controller reconciliation is the default, while full-week
+ownership requires authoritative mode. NMG and BIN are separate formats. Unknown
+BIN, activation, resource-registration, concurrency, DST, midnight, and rollback
+behavior remains disabled until evidence in the research register passes.
+
+**Accepted 2026-10-01 restricted extension:** implement target-specific
+WinLGX 7.0.3.48 NMG/BIN selected changes, qualified Nexus Mono output-1
+ordinary video, exact-case FTP media and schedule staging, attended XPASS
+`LOADSCH /internal/schedule/schedule.bin`, and explicit known-good rollback.
+Each target still requires destination qualification and operator confirmation
+before hardware mutation. Full-week replacement, scheduled activation, and
+unqualified controller/profile families remain open. Assisted AME/FFmpeg
+comparison records are experimental until owner review and qualification.
+
 ## Usability and information architecture decision (accepted 2026-09-17)
 
 The owner accepted implementation of the complete usability overhaul from the
@@ -43,7 +62,7 @@ Status: approved for V1 implementation on 2026-09-09; packaging and operational 
 - Provide an easy-to-understand private schedule calendar for staff.
 - Account for the current Leightronix Ultra-Nexus HD and a possible replacement in about six months; TelVue is only a possibility.
 - The owner can provide Leightronix material for schedule seeding or later historical reconciliation. The available file formats and evidence types are not yet known.
-- The initial release tracks playlist preparation and media management notes manually. Leightronix file/schedule exchange and machine ingestion are future roadmap work, not prerequisites for the first release.
+- The original release tracked playlist preparation and media management notes manually. The accepted 2026-09-29 extension adds qualified UltraNEXUS media preparation and verified FTP after Approval 1; schedule exchange and activation remain evidence-gated behind Approval 2.
 - Use cost-conscious sub-agents and task-appropriate reasoning. Write guidance and proposals now; confirm plan details before implementing the application.
 
 ## Accepted V1 defaults

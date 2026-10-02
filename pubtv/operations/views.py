@@ -13,9 +13,12 @@ import threading
 from django.core.exceptions import ValidationError
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
-from .forms import OccurrenceForm, StationForm, CarryForwardSettingsForm, DeviceForm, ShowForm, ShowSlotDurationForm, EpisodeForm, ProducerForm, EpisodeMilestoneForm, AssetForm, DeliveryForm, SlotForm, AssignmentForm, AssetPreparationForm, AssetTargetTransferForm, ProgrammingForm, UploadForm, AiringForm
-from .models import Episode, EpisodeWorkflowMilestone, Occurrence, Show, Station, Device, Producer, MediaAsset, Delivery, RecurrenceSlot, WeeklyEpisodeAssignment, Preparation, AssetPreparation, AssetTargetTransfer, OccurrenceProgramming, UploadedOccurrenceCoverage, UploadedScheduleRevision, AiringEvidence, AuditEvent
+from .forms import OccurrenceForm, StationForm, CarryForwardSettingsForm, DeviceForm, ShowForm, ShowSlotDurationForm, EpisodeForm, ProducerForm, EpisodeMilestoneForm, AssetForm, DeliveryForm, SlotForm, AssignmentForm, AssetPreparationForm, AssetTargetTransferForm, ProgrammingForm, UploadForm, AiringForm, AutomationPreparationForm, AutomationPublicationForm, UltraNexusSettingsForm
+from .models import Episode, EpisodeWorkflowMilestone, Occurrence, Show, Station, Device, Producer, MediaAsset, Delivery, RecurrenceSlot, WeeklyEpisodeAssignment, Preparation, AssetPreparation, AssetTargetTransfer, OccurrenceProgramming, UploadedOccurrenceCoverage, UploadedScheduleRevision, AiringEvidence, AuditEvent, UltraNexusTargetSettings, PreparationBatch, PreparationBatchItem, PreparationJob, SchedulePublicationBatch, OccurrenceRevisionSelection, ResearchGate, TransferAttempt
 from .services import schedule_alerts, audit, materialize_assignment, ensure_carry_forward_week, next_premiere_date, suggested_pending_episode, confirm_preparation_fact, create_upload_snapshot, revise_airing, sign_upload_preview, load_upload_preview, commit_upload_preview, preparation_readiness, calendar_capacity
+from .automation import approve_snapshot, canonical_hash, invalidate_snapshot, preparation_batch_snapshot, publication_snapshot, preview_schedule, approve_preparation_batch, schedule_ready_binding, generate_nmg_artifact, generate_bin_artifact, publication_artifact_blockers
+from .publication_delivery import stage_publication, activate_publication, observe_activation, rollback_publication
+from pubtv.ultranexus.exceptions import UltraNexusError
 
 
 @require_POST
@@ -166,6 +169,302 @@ def settings_view(request):
         messages.success(request, "Schedule carry-forward setting updated.")
         return redirect("settings")
     return render(request, "settings.html", {"station": station, "devices": Device.objects.all().order_by("name"), "carry_forward_form": carry_forward_form})
+
+
+def _automation_context(request, *, form_p=None, form_s=None, message=""):
+    target_id = request.GET.get("target") or request.POST.get("target")
+    target = Device.objects.filter(pk=target_id).first() if target_id else Device.objects.order_by("name").first()
+    gates = list(ResearchGate.objects.filter(target=target).order_by("key")) if target else []
+    preview = None
+    if target:
+        selected = list(Occurrence.objects.filter(status="planned").select_related("show", "episode", "asset").order_by("starts_at"))
+        preview = preview_schedule(selected, target=target)
+    current_settings = UltraNexusTargetSettings.objects.filter(target=target, is_current=True).first() if target else None
+    settings_initial = None
+    if current_settings:
+        settings_initial = {
+            "host": current_settings.host,
+            "port": current_settings.port,
+            "media_directory": current_settings.media_directory,
+            "schedule_path": current_settings.schedule_path,
+            "secret_reference": current_settings.secret_reference,
+            "reconciliation_mode": current_settings.reconciliation_mode,
+            "base_nmg_path": current_settings.base_nmg_path,
+            "base_nmg_hash": current_settings.base_nmg_hash,
+            "base_bin_path": current_settings.base_bin_path,
+            "base_bin_hash": current_settings.base_bin_hash,
+            "command_port": current_settings.command_port,
+            "command_username": current_settings.command_username,
+            "command_secret_reference": current_settings.command_secret_reference,
+            "bin_resource_template_reference": current_settings.settings.get("bin_resource_template_reference"),
+            "bin_schedule_template_slot": current_settings.settings.get("bin_schedule_template_slot"),
+            "ftp_username": current_settings.settings.get("ftp_username", ""),
+            "ame_executable": current_settings.settings.get("ame_executable", ""),
+            "ame_preset": current_settings.settings.get("ame_preset", ""),
+            "ffmpeg_executable": current_settings.settings.get("ffmpeg_executable", ""),
+            "ffmpeg_build_sha256": current_settings.settings.get("ffmpeg_build_sha256", ""),
+            "ffmpeg_qualification_manifest": current_settings.settings.get("ffmpeg_qualification_manifest", ""),
+            "ffmpeg_qualification_sha256": current_settings.settings.get("ffmpeg_qualification_sha256", ""),
+            "nmg_resource_template_reference": current_settings.settings.get("nmg_resource_template_reference"),
+            "nmg_schedule_template_base": current_settings.settings.get("nmg_schedule_template_base"),
+            "capability_flags": ",".join(current_settings.capability_flags or []),
+        }
+    publication_batches = list(SchedulePublicationBatch.objects.select_related("target").prefetch_related(
+        "occurrence_selections__occurrence", "artifact_revisions", "delivery_operations"
+    ).order_by("-created_at")[:12])
+    publication_cards = []
+    for batch in publication_batches:
+        bins = [item for item in batch.artifact_revisions.all() if item.artifact_type == "bin"]
+        operations = list(batch.delivery_operations.all())
+        operation = max(operations, key=lambda item: item.pk) if operations else None
+        publication_cards.append({"batch": batch,
+                                  "bin_artifact": max(bins, key=lambda item: item.revision) if bins else None,
+                                  "operation": operation,
+                                  "can_rollback": bool(operation and operation.remote_backup_path and operation.state in {
+                                      "schedule_transferred", "activation_requested", "activation_acknowledged",
+                                      "activation_observed", "ambiguous",
+                                  })})
+    return {"station": Station.objects.first(), "targets": Device.objects.order_by("name"), "target": target,
+            "research_gates": gates, "preparation_batches": PreparationBatch.objects.select_related("target").prefetch_related("items__asset").order_by("-created_at")[:12],
+            "publication_batches": publication_batches, "publication_cards": publication_cards,
+            "preparation_form": form_p or AutomationPreparationForm(), "publication_form": form_s or AutomationPublicationForm(),
+            "settings_form": UltraNexusSettingsForm(initial=settings_initial),
+            "schedule_preview": preview, "automation_message": message}
+
+
+def automation_dashboard(request):
+    """Owner-facing two approval workflow; all external work remains gated."""
+    if request.method == "POST":
+        action = request.POST.get("action", "")
+        if action == "save_target_settings":
+            target = get_object_or_404(Device, pk=request.POST.get("target")); form = UltraNexusSettingsForm(request.POST)
+            if form.is_valid():
+                values = form.cleaned_data
+                capabilities = [x.strip() for x in values.get("capability_flags", "").split(",") if x.strip()]
+                settings = {
+                    "ftp_username": values.get("ftp_username", ""),
+                    "ame_executable": values.get("ame_executable", ""),
+                    "ame_preset": values.get("ame_preset", ""),
+                    "ffmpeg_executable": values.get("ffmpeg_executable", ""),
+                    "ffmpeg_build_sha256": values.get("ffmpeg_build_sha256", ""),
+                    "ffmpeg_qualification_manifest": values.get("ffmpeg_qualification_manifest", ""),
+                    "ffmpeg_qualification_sha256": values.get("ffmpeg_qualification_sha256", ""),
+                    "nmg_resource_template_reference": values.get("nmg_resource_template_reference"),
+                    "nmg_schedule_template_base": values.get("nmg_schedule_template_base"),
+                    "bin_resource_template_reference": values.get("bin_resource_template_reference"),
+                    "bin_schedule_template_slot": values.get("bin_schedule_template_slot"),
+                }
+                record = UltraNexusTargetSettings(
+                    target=target,
+                    version=1,
+                    settings=settings,
+                    host=values.get("host", ""),
+                    port=values.get("port"),
+                    media_directory=values.get("media_directory", ""),
+                    schedule_path=values.get("schedule_path", ""),
+                    secret_reference=values.get("secret_reference", ""),
+                    reconciliation_mode=values.get("reconciliation_mode", "preserve"),
+                    capability_flags=capabilities,
+                    base_nmg_path=values.get("base_nmg_path", ""),
+                    base_nmg_hash=values.get("base_nmg_hash", ""),
+                    base_bin_path=values.get("base_bin_path", ""),
+                    base_bin_hash=values.get("base_bin_hash", ""),
+                    command_port=values.get("command_port") or 23,
+                    command_username=values.get("command_username", ""),
+                    command_secret_reference=values.get("command_secret_reference", ""),
+                    settings_hash=canonical_hash({**settings, **{key: str(values.get(key, "")) for key in ("host", "port", "media_directory", "schedule_path", "secret_reference", "reconciliation_mode", "base_nmg_path", "base_nmg_hash", "base_bin_path", "base_bin_hash", "command_port", "command_username", "command_secret_reference")}, "capability_flags": capabilities}),
+                    is_current=False,
+                )
+                record.full_clean(validate_constraints=False)
+                with transaction.atomic():
+                    target = Device.objects.select_for_update().get(pk=target.pk)
+                    current = UltraNexusTargetSettings.objects.select_for_update().filter(target=target).order_by("-version").first()
+                    record.target = target
+                    record.version = current.version + 1 if current else 1
+                    UltraNexusTargetSettings.objects.filter(target=target, is_current=True).update(is_current=False)
+                    record.is_current = True
+                    record.full_clean()
+                    record.save()
+                messages.success(request, "Target settings saved without credentials.")
+            return redirect("automation")
+        if action == "create_preparation":
+            form = AutomationPreparationForm(request.POST)
+            if form.is_valid():
+                batch = PreparationBatch.objects.create(target=form.cleaned_data["target"], label=form.cleaned_data["label"] or "Preparation batch")
+                for position, asset in enumerate(form.cleaned_data["assets"]):
+                    PreparationBatchItem.objects.create(batch=batch, asset=asset, encode_before_transfer=form.cleaned_data["encode_before_transfer"], position=position)
+                messages.success(request, f"Preparation batch {batch.pk} created. Review and approve each item before execution.")
+                return redirect("automation")
+            return render(request, "ultranexus_automation.html", _automation_context(request, form_p=form))
+        if action == "toggle_preparation_item":
+            item = get_object_or_404(PreparationBatchItem.objects.select_related("batch"), pk=request.POST.get("item"))
+            if item.batch.approval_1_status == "approved":
+                messages.error(request, "The encoding choice is frozen by Approval 1. Create a new batch to change it.")
+            else:
+                item.encode_before_transfer = request.POST.get("encode_before_transfer") == "on"
+                item.save(update_fields=["encode_before_transfer"])
+                messages.success(request, "Media preparation choice updated.")
+            return redirect("automation")
+        if action == "approve_preparation":
+            batch = get_object_or_404(PreparationBatch, pk=request.POST.get("batch"))
+            try:
+                approve_preparation_batch(batch)
+                batch.status = "approved"; batch.save(update_fields=["status"])
+                PreparationJob.objects.get_or_create(
+                    idempotency_key=f"preparation:{batch.pk}:{batch.approval_1_hash}",
+                    defaults={"batch": batch},
+                )
+                messages.success(request, "Approval 1 recorded. Media preparation and verified transfer are queued for the local worker.")
+            except ValueError as exc:
+                messages.error(request, str(exc))
+            return redirect("automation")
+        if action == "execute_preparation":
+            batch = get_object_or_404(PreparationBatch, pk=request.POST.get("batch"))
+            if batch.approval_1_status != "approved":
+                messages.error(request, "Approval 1 is required before retrying preparation.")
+            else:
+                sequence = batch.jobs.count() + 1
+                PreparationJob.objects.create(batch=batch, idempotency_key=f"preparation:{batch.pk}:{batch.approval_1_hash}:retry:{sequence}")
+                messages.success(request, "Preparation retry queued for the local worker.")
+            return redirect("automation")
+        if action == "create_publication":
+            form = AutomationPublicationForm(request.POST)
+            if form.is_valid():
+                batch = SchedulePublicationBatch(
+                    target=form.cleaned_data["target"],
+                    reconciliation_mode=form.cleaned_data["reconciliation_mode"],
+                    workflow_mode=form.cleaned_data["workflow_mode"],
+                    requested_activation_at=form.cleaned_data["requested_activation_at"],
+                )
+                batch.full_clean()
+                batch.save()
+                for occurrence in form.cleaned_data["occurrences"]:
+                    OccurrenceRevisionSelection.objects.create(publication_batch=batch, occurrence=occurrence, occurrence_revision=occurrence.revision)
+                messages.success(request, f"Publication batch {batch.pk} created. Preview it before Approval 2.")
+                return redirect("automation")
+            return render(request, "ultranexus_automation.html", _automation_context(request, form_s=form))
+        if action == "set_publication_change":
+            selection = get_object_or_404(OccurrenceRevisionSelection.objects.select_related("publication_batch"),
+                                          pk=request.POST.get("selection"))
+            operation = request.POST.get("operation", "")
+            slot_text = request.POST.get("source_bin_slot", "").strip()
+            selection.operation = operation
+            try:
+                selection.source_bin_slot = int(slot_text) if slot_text else None
+            except ValueError:
+                messages.error(request, "BIN slot must be an integer.")
+                return redirect("automation")
+            selection.source_bin_record_hash = request.POST.get("source_bin_record_hash", "").strip().lower()
+            try:
+                selection.full_clean()
+                selection.save(update_fields=["operation", "source_bin_slot", "source_bin_record_hash"])
+                if selection.publication_batch.approval_2_status == "approved":
+                    invalidate_snapshot(selection.publication_batch, approval=2, reason="selected controller change revised")
+                messages.success(request, "Selected controller change saved. Generate new artifacts before approval.")
+            except ValidationError as exc:
+                messages.error(request, "; ".join(exc.messages))
+            return redirect("automation")
+        if action == "approve_publication":
+            batch_id = request.POST.get("batch")
+            with transaction.atomic():
+                initial = get_object_or_404(SchedulePublicationBatch, pk=batch_id)
+                Device.objects.select_for_update().get(pk=initial.target_id)
+                batch = SchedulePublicationBatch.objects.select_for_update().select_related("target").get(pk=batch_id)
+                selection_ids = list(batch.occurrence_selections.values_list("occurrence_id", flat=True))
+                list(Occurrence.objects.select_for_update().filter(pk__in=selection_ids))
+                selections = list(batch.occurrence_selections.select_related(
+                    "occurrence", "occurrence__station", "occurrence__show",
+                    "occurrence__episode", "occurrence__asset",
+                ).order_by("occurrence__starts_at", "pk"))
+                snapshot = publication_snapshot(batch)
+                result = preview_schedule([selection.occurrence for selection in selections if selection.operation != "delete"],
+                                          target=batch.target, workflow_mode=batch.workflow_mode)
+                for selection in selections:
+                    if selection.occurrence_revision != selection.occurrence.revision:
+                        result["blockers"].append(f"{selection.occurrence.label}: occurrence revision changed")
+                    asset = selection.occurrence.asset
+                    if selection.operation != "delete" and asset and not schedule_ready_binding(asset, batch.target):
+                        result["blockers"].append(f"{selection.occurrence.label}: Approval 1 media preparation is not verified")
+                result["blockers"].extend(publication_artifact_blockers(batch))
+                if not snapshot["controller_snapshot_hash"]:
+                    result["blockers"].append("controller snapshot hash is required")
+                if result["blockers"]:
+                    if batch.approval_2_status == "approved":
+                        batch.approval_2_status = "stale"
+                        batch.save(update_fields=["approval_2_status"])
+                else:
+                    approve_snapshot(batch, snapshot, approval=2)
+            if result["blockers"]:
+                messages.error(request, "Approval 2 blocked: " + "; ".join(result["blockers"]))
+            else:
+                messages.success(request, "Approval 2 recorded. No schedule coverage is created by approval.")
+            return redirect("automation")
+        if action == "generate_nmg":
+            batch = get_object_or_404(SchedulePublicationBatch, pk=request.POST.get("batch"))
+            try:
+                artifact = generate_nmg_artifact(batch)
+                messages.success(request, f"Generated and validated NMG revision {artifact.revision}: {artifact.content_hash}")
+            except (ValueError, ValidationError) as exc:
+                messages.error(request, str(exc))
+            return redirect("automation")
+        if action == "generate_bin":
+            batch = get_object_or_404(SchedulePublicationBatch, pk=request.POST.get("batch"))
+            try:
+                artifact = generate_bin_artifact(batch)
+                messages.success(request, f"Generated and validated BIN revision {artifact.revision}: {artifact.content_hash}")
+            except (ValueError, ValidationError) as exc:
+                messages.error(request, str(exc))
+            return redirect("automation")
+        if action == "stage_publication":
+            batch = get_object_or_404(SchedulePublicationBatch, pk=request.POST.get("batch"))
+            if request.POST.get("confirm_stage") != "on":
+                messages.error(request, "Confirm the reviewed BIN hash before staging.")
+            else:
+                try:
+                    operation = stage_publication(batch.pk, expected_hash=request.POST.get("expected_hash", ""))
+                    messages.success(request, f"Candidate staged; current remote BIN retained as operation {operation.pk} rollback artifact.")
+                except (ValueError, ValidationError, UltraNexusError, OSError):
+                    messages.error(request, "Staging failed; review the operation and remote schedule before retrying.")
+            return redirect("automation")
+        if action == "activate_publication":
+            batch = get_object_or_404(SchedulePublicationBatch, pk=request.POST.get("batch"))
+            operation = batch.delivery_operations.order_by("-pk").first()
+            if request.POST.get("confirm_activate") != "on" or not operation:
+                messages.error(request, "A staged operation and final confirmation are required.")
+            else:
+                try:
+                    activate_publication(operation.pk, expected_hash=request.POST.get("expected_hash", ""))
+                    messages.success(request, "LOADSCH acknowledged. Attach independent controller evidence before recording coverage.")
+                except (ValueError, ValidationError, UltraNexusError, OSError):
+                    messages.error(request, "Activation is uncertain or blocked; review the operation and controller evidence.")
+            return redirect("automation")
+        if action == "observe_publication":
+            batch = get_object_or_404(SchedulePublicationBatch, pk=request.POST.get("batch"))
+            operation = batch.delivery_operations.order_by("-pk").first()
+            if not operation or request.POST.get("confirm_observation") != "on":
+                messages.error(request, "Confirm independent activation evidence for a specific operation.")
+            elif request.POST.get("expected_hash", "").lower() != operation.artifact.content_hash:
+                messages.error(request, "Observed candidate hash does not match the activation.")
+            else:
+                try:
+                    observe_activation(operation.pk, evidence_file=request.POST.get("evidence_file", ""))
+                    messages.success(request, "Independent activation observation and uploaded coverage recorded.")
+                except (ValueError, ValidationError, UltraNexusError, OSError):
+                    messages.error(request, "Activation evidence was not accepted; review the operation.")
+            return redirect("automation")
+        if action == "rollback_publication":
+            batch = get_object_or_404(SchedulePublicationBatch, pk=request.POST.get("batch"))
+            operation = batch.delivery_operations.order_by("-pk").first()
+            if not operation or request.POST.get("confirm_rollback") != "on":
+                messages.error(request, "Confirm a specific known-good rollback before restoring it.")
+            else:
+                try:
+                    rollback_publication(operation.pk, expected_rollback_hash=request.POST.get("rollback_hash", ""))
+                    messages.success(request, "Known-good BIN restored and LOADSCH acknowledged; observe controller state separately.")
+                except (ValueError, ValidationError, UltraNexusError, OSError):
+                    messages.error(request, "Rollback is uncertain or blocked; inspect remote and controller state.")
+            return redirect("automation")
+    return render(request, "ultranexus_automation.html", _automation_context(request))
 
 
 def device_list(request):

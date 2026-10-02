@@ -2,6 +2,7 @@ from datetime import date, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from django.core.exceptions import ValidationError
 from django.db import models
+from django.db.models import Q
 from django.utils import timezone
 from django.utils.functional import cached_property
 import uuid
@@ -598,3 +599,453 @@ class AuditEvent(models.Model):
     entity_id = models.PositiveIntegerField(null=True, blank=True)
     revision = models.PositiveIntegerField(null=True, blank=True)
     summary = models.TextField()
+
+
+# Durable UltraNEXUS integration records.  These models deliberately store
+# references, hashes, and operator-entered evidence; they never store raw
+# passwords, tokens, or other credentials.
+class UltraNexusTargetSettings(models.Model):
+    target = models.ForeignKey(Device, on_delete=models.PROTECT, related_name="ultranexus_settings")
+    version = models.PositiveIntegerField(default=1)
+    settings = models.JSONField(default=dict)
+    host = models.CharField(max_length=255, blank=True)
+    port = models.PositiveIntegerField(null=True, blank=True)
+    media_directory = models.CharField(max_length=500, blank=True)
+    schedule_path = models.CharField(max_length=500, blank=True)
+    secret_reference = models.CharField(max_length=255, blank=True)
+    reconciliation_mode = models.CharField(max_length=16, choices=[("preserve", "Preserve"), ("authoritative", "Authoritative")], default="preserve")
+    capability_flags = models.JSONField(default=dict, blank=True)
+    base_nmg_path = models.CharField(max_length=500, blank=True)
+    base_nmg_hash = models.CharField(max_length=128, blank=True)
+    base_bin_path = models.CharField(max_length=500, blank=True)
+    base_bin_hash = models.CharField(max_length=64, blank=True)
+    command_port = models.PositiveIntegerField(default=23)
+    command_username = models.CharField(max_length=120, blank=True)
+    command_secret_reference = models.CharField(max_length=255, blank=True)
+    settings_hash = models.CharField(max_length=128, blank=True)
+    is_current = models.BooleanField(default=False)
+    created_at = models.DateTimeField(default=timezone.now)
+    created_by = models.CharField(max_length=120, default="owner")
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["target", "version"], name="unique_ultranexus_target_settings_version"),
+            models.UniqueConstraint(fields=["target"], condition=Q(is_current=True), name="unique_current_ultranexus_target_settings"),
+        ]
+
+    def clean(self):
+        super().clean()
+        if any(word in str(self.settings).lower() for word in ("password", "passwd", "token", "secret", "credential")):
+            raise ValidationError("Target settings must not contain raw credentials.")
+        if self.port is not None and not 1 <= self.port <= 65535:
+            raise ValidationError({"port": "Port must be between 1 and 65535."})
+        if self.secret_reference and (":" not in self.secret_reference or any(ch.isspace() for ch in self.secret_reference)):
+            raise ValidationError({"secret_reference": "Secret reference must be an opaque service:account reference."})
+        if self.base_nmg_hash and (len(self.base_nmg_hash) not in (32, 40, 64, 96, 128) or any(ch not in "0123456789abcdefABCDEF" for ch in self.base_nmg_hash)):
+            raise ValidationError({"base_nmg_hash": "Base NMG hash must be a standard hexadecimal digest length."})
+        if self.base_bin_hash and (len(self.base_bin_hash) != 64 or any(ch not in "0123456789abcdefABCDEF" for ch in self.base_bin_hash)):
+            raise ValidationError({"base_bin_hash": "Base BIN hash must be SHA-256."})
+        if not 1 <= self.command_port <= 65535:
+            raise ValidationError({"command_port": "Command port must be between 1 and 65535."})
+        if self.schedule_path and self.schedule_path != "/internal/schedule/schedule.bin":
+            raise ValidationError({"schedule_path": "The qualified schedule path is /internal/schedule/schedule.bin."})
+        if self.command_secret_reference and (":" not in self.command_secret_reference or any(ch.isspace() for ch in self.command_secret_reference)):
+            raise ValidationError({"command_secret_reference": "Use an opaque Keychain service:account reference."})
+
+
+# Alternate spelling retained for callers that render the product name as an
+# all-caps acronym.
+UltraNEXUSTargetSettings = UltraNexusTargetSettings
+
+
+class MediaInspection(models.Model):
+    STATUS = [(x, x.replace("_", " ").title()) for x in ("passed", "failed", "needs_review")]
+    asset = models.ForeignKey(MediaAsset, on_delete=models.PROTECT, related_name="ultranexus_inspections")
+    target = models.ForeignKey(Device, on_delete=models.PROTECT, related_name="media_inspections")
+    local_path = models.CharField(max_length=500)
+    file_size = models.PositiveBigIntegerField(default=0)
+    probe_json = models.JSONField(default=dict, blank=True)
+    tool = models.CharField(max_length=120, blank=True)
+    tool_version = models.CharField(max_length=80, blank=True)
+    profile = models.CharField(max_length=120, blank=True)
+    inspected_at = models.DateTimeField(default=timezone.now)
+    inspector = models.CharField(max_length=120, default="owner")
+    status = models.CharField(max_length=20, choices=STATUS)
+    media_hash = models.CharField(max_length=128, blank=True)
+    details = models.JSONField(default=dict, blank=True)
+    notes = models.TextField(blank=True)
+
+    def clean(self):
+        super().clean()
+        if self.status == "passed" and not self.media_hash:
+            raise ValidationError({"media_hash": "A passed inspection requires a media hash."})
+
+    def save(self, *args, **kwargs):
+        if self.pk:
+            raise ValidationError("Media inspections are immutable; record a new inspection.")
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValidationError("Media inspections are immutable.")
+
+
+class MediaIdAllocation(models.Model):
+    """Permanent target-scoped reservation, retained after a binding changes."""
+    target = models.ForeignKey(Device, on_delete=models.PROTECT, related_name="media_id_allocations")
+    media_id_uint16 = models.PositiveIntegerField(null=True, blank=True)
+    resource_reference_uint32 = models.PositiveBigIntegerField(null=True, blank=True)
+    casefold_key = models.CharField(max_length=255)
+    media_hash = models.CharField(max_length=64, blank=True)
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["target", "media_id_uint16"], condition=Q(media_id_uint16__isnull=False), name="unique_target_allocated_media_id"),
+            models.UniqueConstraint(fields=["target", "resource_reference_uint32"], condition=Q(resource_reference_uint32__isnull=False), name="unique_target_allocated_resource_ref"),
+            models.UniqueConstraint(fields=["target", "casefold_key"], name="unique_target_allocated_media_name"),
+        ]
+
+    def clean(self):
+        super().clean()
+        if self.media_id_uint16 is not None and not 1 <= self.media_id_uint16 <= 65535:
+            raise ValidationError("Allocated Media ID must be nonzero uint16.")
+        if self.resource_reference_uint32 is not None and not 1 <= self.resource_reference_uint32 <= 4294967295:
+            raise ValidationError("Allocated resource reference must be nonzero uint32.")
+        if not self.casefold_key:
+            raise ValidationError("Allocated filename key is required.")
+
+
+class MediaBinding(models.Model):
+    BINDING_TYPES = [(x, x.title()) for x in ("source", "encoded", "controller")]
+    asset = models.ForeignKey(MediaAsset, on_delete=models.PROTECT, related_name="ultranexus_bindings")
+    target = models.ForeignKey(Device, on_delete=models.PROTECT, related_name="media_bindings")
+    binding_type = models.CharField(max_length=16, choices=BINDING_TYPES, default="encoded")
+    media_id_uint16 = models.PositiveIntegerField(null=True, blank=True)
+    resource_reference_uint32 = models.PositiveBigIntegerField(null=True, blank=True)
+    bare_filename = models.CharField(max_length=255, blank=True)
+    casefold_key = models.CharField(max_length=255, blank=True)
+    profile = models.CharField(max_length=120, blank=True)
+    verification_basis = models.CharField(max_length=20, choices=[("legacy", "Legacy"), ("locally_verified", "Locally verified")], default="legacy")
+    local_inspection = models.ForeignKey(MediaInspection, null=True, blank=True, on_delete=models.PROTECT, related_name="bindings")
+    external_reference = models.CharField(max_length=240, blank=True)
+    legacy_attestation_hash = models.CharField(max_length=128, blank=True)
+    legacy_attested_at = models.DateTimeField(null=True, blank=True)
+    legacy_attested_by = models.CharField(max_length=120, blank=True)
+    created_at = models.DateTimeField(default=timezone.now)
+    notes = models.TextField(blank=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["asset", "target", "binding_type"], name="unique_ultranexus_media_binding"),
+            models.UniqueConstraint(fields=["target", "media_id_uint16"], condition=Q(media_id_uint16__isnull=False), name="unique_target_media_id_uint16"),
+            models.UniqueConstraint(fields=["target", "resource_reference_uint32"], condition=Q(resource_reference_uint32__isnull=False), name="unique_target_resource_reference_uint32"),
+            models.UniqueConstraint(fields=["target", "casefold_key"], condition=~Q(casefold_key=""), name="unique_target_casefold_key"),
+        ]
+
+    def clean(self):
+        super().clean()
+        if self.media_id_uint16 is not None and self.media_id_uint16 > 65535:
+            raise ValidationError({"media_id_uint16": "Media ID must fit uint16."})
+        if self.resource_reference_uint32 is not None and self.resource_reference_uint32 > 4294967295:
+            raise ValidationError({"resource_reference_uint32": "Resource reference must fit uint32."})
+        if self.verification_basis == "locally_verified" and not self.local_inspection_id:
+            raise ValidationError("Locally verified bindings require a local inspection.")
+        if self.bare_filename and not self.casefold_key:
+            self.casefold_key = self.bare_filename.casefold()
+        if self.verification_basis == "locally_verified":
+            inspection = self.local_inspection
+            if not inspection or inspection.asset_id != self.asset_id or inspection.target_id != self.target_id or inspection.status != "passed":
+                raise ValidationError("Locally verified bindings require a passed inspection for the same asset and target.")
+        if self.verification_basis == "legacy" and any((self.legacy_attestation_hash, self.legacy_attested_at, self.legacy_attested_by)):
+            if not all((self.legacy_attestation_hash, self.legacy_attested_at, self.legacy_attested_by, self.external_reference)):
+                raise ValidationError("Legacy attestation requires its evidence hash, time, actor, and controller reference.")
+
+    @property
+    def is_schedule_ready(self):
+        if self.verification_basis == "locally_verified":
+            return bool(self.local_inspection_id and self.local_inspection.status == "passed")
+        return bool(self.legacy_attestation_hash and self.legacy_attested_at and self.legacy_attested_by and self.external_reference)
+
+    def save(self, *args, **kwargs):
+        if self.bare_filename and not self.casefold_key:
+            self.casefold_key = self.bare_filename.casefold()
+        return super().save(*args, **kwargs)
+
+
+class PreparationBatch(models.Model):
+    STATUS = [(x, x.replace("_", " ").title()) for x in ("draft", "approved", "in_progress", "complete", "blocked", "failed", "cancelled")]
+    target = models.ForeignKey(Device, on_delete=models.PROTECT, related_name="preparation_batches")
+    label = models.CharField(max_length=160, blank=True)
+    status = models.CharField(max_length=20, choices=STATUS, default="draft")
+    approval_1_snapshot = models.JSONField(default=dict, blank=True)
+    approval_1_hash = models.CharField(max_length=128, blank=True)
+    approval_1_status = models.CharField(max_length=16, choices=[("pending", "Pending"), ("approved", "Approved"), ("stale", "Stale")], default="pending")
+    approval_1_at = models.DateTimeField(null=True, blank=True)
+    approval_1_actor = models.CharField(max_length=120, blank=True)
+    created_at = models.DateTimeField(default=timezone.now)
+    created_by = models.CharField(max_length=120, default="owner")
+    notes = models.TextField(blank=True)
+
+    def clean(self):
+        super().clean()
+        if self.approval_1_status == "approved" and not (self.approval_1_snapshot and self.approval_1_hash and self.approval_1_at):
+            raise ValidationError("Approval 1 requires a snapshot, hash, and approval time.")
+
+
+class PreparationBatchItem(models.Model):
+    APPROVAL_STATUS = [(x, x.replace("_", " ").title()) for x in ("pending", "approved", "rejected", "stale")]
+    batch = models.ForeignKey(PreparationBatch, on_delete=models.CASCADE, related_name="items")
+    asset = models.ForeignKey(MediaAsset, on_delete=models.PROTECT, related_name="preparation_batch_items")
+    occurrence = models.ForeignKey(Occurrence, null=True, blank=True, on_delete=models.PROTECT, related_name="preparation_batch_items")
+    selected_input_path = models.CharField(max_length=500, blank=True)
+    selected_input_hash = models.CharField(max_length=128, blank=True)
+    resulting_inspection = models.ForeignKey(MediaInspection, null=True, blank=True, on_delete=models.PROTECT, related_name="resulting_batch_items")
+    resulting_binding = models.ForeignKey(MediaBinding, null=True, blank=True, on_delete=models.PROTECT, related_name="resulting_batch_items")
+    execution_status = models.CharField(max_length=20, choices=[("pending", "Pending"), ("encoding", "Encoding"), ("ready", "Ready"), ("blocked", "Blocked"), ("failed", "Failed")], default="pending")
+    blocker = models.TextField(blank=True)
+    encode_before_transfer = models.BooleanField(default=True)
+    approval_1_snapshot = models.JSONField(default=dict, blank=True)
+    approval_1_hash = models.CharField(max_length=128, blank=True)
+    approval_1_status = models.CharField(max_length=16, choices=APPROVAL_STATUS, default="pending")
+    approval_1_at = models.DateTimeField(null=True, blank=True)
+    approval_1_actor = models.CharField(max_length=120, blank=True)
+    position = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["batch", "asset"], name="unique_preparation_batch_asset")]
+        ordering = ["position", "pk"]
+
+    @property
+    def approval_1_snapshot_stale(self):
+        return self.approval_1_status == "stale"
+
+    @property
+    def is_approval_1_stale(self):
+        return self.approval_1_snapshot_stale
+
+    def clean(self):
+        super().clean()
+        if self.approval_1_status == "approved" and not (self.approval_1_snapshot and self.approval_1_hash and self.approval_1_at):
+            raise ValidationError("Approval 1 requires a snapshot, hash, and approval time.")
+
+
+class TransferAttempt(models.Model):
+    STATUS = [(x, x.replace("_", " ").title()) for x in ("planned", "started", "succeeded", "failed", "cancelled")]
+    item = models.ForeignKey(PreparationBatchItem, on_delete=models.PROTECT, related_name="transfer_attempts")
+    target = models.ForeignKey(Device, on_delete=models.PROTECT, related_name="transfer_attempts")
+    attempted_at = models.DateTimeField(default=timezone.now)
+    status = models.CharField(max_length=16, choices=STATUS, default="planned")
+    external_reference = models.CharField(max_length=240, blank=True)
+    artifact_hash = models.CharField(max_length=128, blank=True)
+    operator = models.CharField(max_length=120, default="owner")
+    evidence = models.JSONField(default=dict, blank=True)
+    notes = models.TextField(blank=True)
+
+
+class PreparationJob(models.Model):
+    STATUS = [(x, x.replace("_", " ").title()) for x in ("queued", "running", "succeeded", "failed", "cancelled")]
+    batch = models.ForeignKey(PreparationBatch, on_delete=models.CASCADE, related_name="jobs")
+    status = models.CharField(max_length=16, choices=STATUS, default="queued")
+    idempotency_key = models.CharField(max_length=160, unique=True)
+    queued_at = models.DateTimeField(default=timezone.now)
+    started_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+    error = models.TextField(blank=True)
+    result = models.JSONField(default=dict, blank=True)
+
+
+class ControllerSnapshot(models.Model):
+    target = models.ForeignKey(Device, on_delete=models.PROTECT, related_name="controller_snapshots")
+    captured_at = models.DateTimeField(default=timezone.now)
+    revision = models.PositiveIntegerField(default=1)
+    snapshot_hash = models.CharField(max_length=128)
+    payload = models.JSONField(default=dict)
+    source_reference = models.CharField(max_length=240, blank=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["target", "revision"], name="unique_controller_snapshot_revision")]
+
+    def save(self, *args, **kwargs):
+        if self.pk:
+            raise ValidationError("Controller snapshots are immutable.")
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValidationError("Controller snapshots are immutable.")
+
+
+class SchedulePublicationBatch(models.Model):
+    RECONCILIATION_MODES = [("preserve", "Preserve"), ("authoritative", "Authoritative")]
+    WORKFLOW_MODES = [("selected_changes", "Selected changes"), ("full_week", "Full week")]
+    STATUS = [(x, x.replace("_", " ").title()) for x in ("previewed", "approved", "awaiting_activation", "delivering", "verified", "blocked", "failed", "cancelled")]
+    target = models.ForeignKey(Device, on_delete=models.PROTECT, related_name="schedule_publication_batches")
+    workflow_mode = models.CharField(max_length=20, choices=WORKFLOW_MODES, default="selected_changes")
+    reconciliation_mode = models.CharField(max_length=16, choices=RECONCILIATION_MODES, default="preserve")
+    status = models.CharField(max_length=24, choices=STATUS, default="previewed")
+    approval_2_snapshot = models.JSONField(default=dict, blank=True)
+    approval_2_hash = models.CharField(max_length=128, blank=True)
+    approval_2_status = models.CharField(max_length=16, choices=[("pending", "Pending"), ("approved", "Approved"), ("stale", "Stale")], default="pending")
+    approval_2_at = models.DateTimeField(null=True, blank=True)
+    approval_2_actor = models.CharField(max_length=120, blank=True)
+    activated_at = models.DateTimeField(null=True, blank=True)
+    requested_activation_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(default=timezone.now)
+    created_by = models.CharField(max_length=120, default="owner")
+    notes = models.TextField(blank=True)
+
+    def clean(self):
+        super().clean()
+        if self.workflow_mode == "full_week" and self.reconciliation_mode != "authoritative":
+            raise ValidationError("Full-week publication requires authoritative reconciliation because ChannelDex owns the week.")
+        if self.approval_2_status == "approved" and not (self.approval_2_snapshot and self.approval_2_hash and self.approval_2_at):
+            raise ValidationError("Approval 2 requires a snapshot, hash, and approval time.")
+        if self.status == "verified" and not self.activated_at:
+            raise ValidationError("A verified publication requires activation time.")
+        if self.activated_at and self.pk and not self.activation_evidence.filter(status="activation_observed").exists():
+            raise ValidationError("Activation time requires independent activation observation.")
+
+    @property
+    def approval_2_snapshot_stale(self):
+        return self.approval_2_status == "stale"
+
+    @property
+    def is_approval_2_stale(self):
+        return self.approval_2_snapshot_stale
+
+    @property
+    def activation_time(self):
+        return self.activated_at
+
+
+class OccurrenceRevisionSelection(models.Model):
+    OPERATIONS = [("add", "Add"), ("move", "Move"), ("replace", "Replace"), ("delete", "Delete")]
+    publication_batch = models.ForeignKey(SchedulePublicationBatch, on_delete=models.CASCADE, related_name="occurrence_selections")
+    occurrence = models.ForeignKey(Occurrence, on_delete=models.PROTECT, related_name="publication_selections")
+    occurrence_revision = models.PositiveIntegerField()
+    operation = models.CharField(max_length=12, choices=OPERATIONS, default="add")
+    source_bin_slot = models.PositiveIntegerField(null=True, blank=True)
+    source_bin_record_hash = models.CharField(max_length=64, blank=True)
+    selected_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["publication_batch", "occurrence"], name="unique_publication_occurrence_selection")]
+
+    def clean(self):
+        super().clean()
+        if self.occurrence_id and self.occurrence_revision != self.occurrence.revision:
+            raise ValidationError("Selected occurrence revision is stale.")
+        if self.operation != "add" and (self.source_bin_slot is None or not self.source_bin_record_hash):
+            raise ValidationError("Changing an existing controller event requires its exact BIN slot and record SHA-256.")
+        if self.operation == "add" and (self.source_bin_slot is not None or self.source_bin_record_hash):
+            raise ValidationError("An added event must not claim an existing controller record.")
+        if self.source_bin_slot is not None and self.source_bin_slot >= 3000:
+            raise ValidationError("BIN schedule slot is outside the qualified table.")
+        if self.source_bin_record_hash and (len(self.source_bin_record_hash) != 64 or any(ch not in "0123456789abcdefABCDEF" for ch in self.source_bin_record_hash)):
+            raise ValidationError("Source BIN record hash must be SHA-256.")
+
+
+class ArtifactRevision(models.Model):
+    ARTIFACT_TYPES = [("nmg", "NMG"), ("bin", "BIN")]
+    publication_batch = models.ForeignKey(SchedulePublicationBatch, on_delete=models.PROTECT, related_name="artifact_revisions")
+    artifact_type = models.CharField(max_length=8, choices=ARTIFACT_TYPES)
+    revision = models.PositiveIntegerField(default=1)
+    file_reference = models.CharField(max_length=300)
+    content_hash = models.CharField(max_length=128)
+    manifest = models.JSONField(default=dict, blank=True)
+    validation = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["publication_batch", "artifact_type", "revision"], name="unique_artifact_revision")]
+
+    def save(self, *args, **kwargs):
+        if self.pk:
+            raise ValidationError("Artifact revisions are immutable.")
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValidationError("Artifact revisions are immutable.")
+
+
+class ActivationEvidence(models.Model):
+    publication_batch = models.ForeignKey(SchedulePublicationBatch, on_delete=models.PROTECT, related_name="activation_evidence")
+    target = models.ForeignKey(Device, on_delete=models.PROTECT, related_name="activation_evidence")
+    recorded_at = models.DateTimeField(default=timezone.now)
+    status = models.CharField(max_length=32, choices=[(x, x.replace("_", " ").title()) for x in (
+        "schedule_transferred", "activation_requested", "activation_acknowledged", "activation_observed",
+        "winlgx_reconstructed", "airing_observed", "rolled_back", "ambiguous", "failed", "confirmed", "observed")])
+    evidence_hash = models.CharField(max_length=128, blank=True)
+    external_reference = models.CharField(max_length=240, blank=True)
+    details = models.JSONField(default=dict, blank=True)
+    actor = models.CharField(max_length=120, default="owner")
+
+    def save(self, *args, **kwargs):
+        if self.pk:
+            raise ValidationError("Activation evidence is immutable.")
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValidationError("Activation evidence is immutable.")
+
+
+class ScheduleDeliveryOperation(models.Model):
+    """Durable attended delivery journal; recovery never replays LOADSCH."""
+    STATES = [(x, x.replace("_", " ").title()) for x in (
+        "prepared", "staged", "promotion_started", "schedule_transferred",
+        "activation_requested", "activation_acknowledged", "activation_observed",
+        "ambiguous", "rollback_started", "rollback_ambiguous", "failed", "rolled_back")]
+    ACTIVE = ("prepared", "staged", "promotion_started", "schedule_transferred",
+              "activation_requested", "activation_acknowledged", "ambiguous",
+              "rollback_started", "rollback_ambiguous")
+    publication_batch = models.ForeignKey(SchedulePublicationBatch, on_delete=models.PROTECT, related_name="delivery_operations")
+    target = models.ForeignKey(Device, on_delete=models.PROTECT, related_name="schedule_delivery_operations")
+    artifact = models.ForeignKey(ArtifactRevision, on_delete=models.PROTECT, related_name="delivery_operations")
+    state = models.CharField(max_length=32, choices=STATES, default="prepared")
+    approval_hash = models.CharField(max_length=64)
+    base_hash = models.CharField(max_length=64)
+    rollback_path = models.CharField(max_length=500, blank=True)
+    rollback_hash = models.CharField(max_length=64, blank=True)
+    staging_path = models.CharField(max_length=500, blank=True)
+    remote_backup_path = models.CharField(max_length=500, blank=True)
+    result = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(default=timezone.now)
+    updated_at = models.DateTimeField(auto_now=True)
+    actor = models.CharField(max_length=120, default="owner")
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["target"], condition=Q(state__in=(
+            "prepared", "staged", "promotion_started", "schedule_transferred",
+            "activation_requested", "activation_acknowledged", "ambiguous",
+            "rollback_started", "rollback_ambiguous"
+        )), name="unique_active_schedule_delivery_target")]
+
+
+class ResearchGate(models.Model):
+    STATUS = [(x, x.replace("_", " ").title()) for x in ("open", "passed", "blocked")]
+    target = models.ForeignKey(Device, on_delete=models.PROTECT, related_name="research_gates")
+    key = models.CharField(max_length=80)
+    status = models.CharField(max_length=16, choices=STATUS, default="open")
+    evidence = models.TextField(blank=True)
+    resolved_at = models.DateTimeField(null=True, blank=True)
+    resolved_by = models.CharField(max_length=120, blank=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["target", "key"], name="unique_research_gate_per_target")]
+
+
+class PublicationJob(models.Model):
+    KINDS = [(x, x.replace("_", " ").title()) for x in ("preview", "deliver", "verify", "reconcile")]
+    STATUS = [(x, x.replace("_", " ").title()) for x in ("queued", "running", "succeeded", "failed", "cancelled")]
+    publication_batch = models.ForeignKey(SchedulePublicationBatch, on_delete=models.CASCADE, related_name="jobs")
+    kind = models.CharField(max_length=16, choices=KINDS)
+    status = models.CharField(max_length=16, choices=STATUS, default="queued")
+    idempotency_key = models.CharField(max_length=160, unique=True)
+    queued_at = models.DateTimeField(default=timezone.now)
+    started_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+    error = models.TextField(blank=True)
+    result = models.JSONField(default=dict, blank=True)

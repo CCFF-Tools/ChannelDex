@@ -39,6 +39,29 @@ This is a conceptual model for the single-owner MVP, not a database migration or
 
 ## Core entities
 
+### UltraNEXUS automation records
+
+`UltraNexusTargetSettings` versions connection and qualification settings while
+storing only a Keychain reference. `PreparationBatch` and `PreparationJob` retain
+Approval 1 and its execution. `MediaInspection`, `MediaBinding`, `MediaIdAllocation`, and
+`TransferAttempt` preserve exact bytes, probe evidence, controller identifiers,
+permanent target-scoped ID reservations, and remote verification. Historical
+bindings are backfilled into the allocation ledger during migration; prior
+qualified base versions also reserve their imported IDs. `ControllerSnapshot`, `SchedulePublicationBatch`,
+`OccurrenceRevisionSelection`, `ArtifactRevision`, `PublicationJob`, and
+`ActivationEvidence` keep schedule review, Approval 2, delivery, and controller
+acceptance distinct. `ResearchGate` links each disabled capability to external
+evidence. These facts never create `AiringEvidence` automatically.
+
+The restricted extension adds a versioned, exact-hash BIN base and a separate
+opaque XPASS Keychain reference to target settings. Each occurrence selection
+records add, move, replace, or delete plus the source BIN slot and record hash
+when editing an existing event. `ScheduleDeliveryOperation` retains the exact
+candidate, approval hash, known-good local/remote rollback identifiers, and
+durable states through staging, promotion, acknowledgement, observation, and
+rollback. An ambiguous operation blocks another delivery on that target until
+review. Coverage is recorded only after independent activation observation.
+
 | Entity | Responsibility and key relationships |
 | --- | --- |
 | **Station** | Internal identity, confirmed Eastern Time, Monday 00:00 Eastern week start, proposed `America/Detroit` station-timezone mapping, and the off-by-default global episode carry-forward setting; owns shows, targets, calendars, and station-scoped identifiers. This is independent of the macOS system timezone. |
