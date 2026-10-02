@@ -331,6 +331,8 @@ try:
                 artifact = generate_nmg_artifact(batch)
                 self.assertEqual(artifact.revision, 2)
                 self.assertEqual(artifact.validation["status"], "passed")
+                self.assertEqual(artifact.validation["audit"], artifact.manifest["audit"])
+                self.assertTrue(artifact.manifest["audit"]["ranges"])
                 self.assertEqual(hashlib.sha256(Path(artifact.file_reference).read_bytes()).hexdigest(), artifact.content_hash)
                 generated = Path(artifact.file_reference).read_bytes()
                 program = SCHEDULE_BASE

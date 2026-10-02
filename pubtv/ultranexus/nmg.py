@@ -4,6 +4,7 @@ from pathlib import Path
 import struct
 from .exceptions import CompatibilityError, ValidationError
 from .utils import sha256_bytes, validate_ascii, validate_filename
+from .mutation import MutationError, MutationPlan, apply_mutation_plan
 
 MAGIC = b"WinLGX 7"
 VERSION_OFFSET = 0x80
@@ -44,6 +45,14 @@ class NMGImage:
     @classmethod
     def from_file(cls, path, **kwargs): return cls(Path(path).read_bytes(), **kwargs)
     def manifest(self): return {"sha256": sha256_bytes(self.data), "size": len(self.data), "magic": self.header.magic, "version": self.header.version}
+    def apply(self, plan: MutationPlan, *, expected_changes=None):
+        try:
+            data, audit = apply_mutation_plan(self.data, plan, expected_ranges=expected_changes)
+        except MutationError as exc:
+            raise ValidationError(str(exc)) from exc
+        result = NMGImage(data, expected_version=self.header.version)
+        result.validate_restricted()
+        return result, audit
     def _resource_bases(self):
         end = min(len(self.data), RESOURCE_BASE + RESOURCE_STRIDE * RESOURCE_CAPACITY)
         return range(RESOURCE_BASE, end, RESOURCE_STRIDE) if len(self.data) > RESOURCE_BASE else ()

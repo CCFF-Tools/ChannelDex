@@ -8,6 +8,7 @@ from pubtv.ultranexus.media import parse_ffprobe_json, validate_nexus_mono
 from pubtv.ultranexus.utils import sha256_bytes, validate_filename
 from pubtv.ultranexus.encoding import FFmpegEncoder, AdobeMediaEncoder
 from pubtv.ultranexus.nmg import NMGImage, MAGIC, VERSION_OFFSET, SCHEDULE_BASE, SCHEDULE_STRIDE, RESOURCE_BASE, Resource
+from pubtv.ultranexus.mutation import MutationPlan
 from pubtv.ultranexus.secrets import KeychainSecretStore, SecretReference
 
 class UltraNexusAdapterTests(unittest.TestCase):
@@ -18,8 +19,14 @@ class UltraNexusAdapterTests(unittest.TestCase):
         with self.assertRaises(ValidationError): validate_filename("é.mp4")
 
     def test_probe_decimal_ceiling_and_reject_profile(self):
-        p = parse_ffprobe_json(json.dumps({"streams":[{"codec_type":"video","codec_name":"h264","width":1920,"height":1080,"duration":"1.0001","r_frame_rate":"30000/1001"},{"codec_type":"audio","codec_name":"aac"}]}))
-        self.assertEqual(p.nominal_frames, 31); validate_nexus_mono(p)
+        def probe(duration):
+            return parse_ffprobe_json(json.dumps({"streams":[{"codec_type":"video","codec_name":"h264","width":1920,"height":1080,"duration":duration,"r_frame_rate":"30000/1001"},{"codec_type":"audio","codec_name":"aac"}]}))
+        self.assertEqual(probe("0.0001").duration_units, 1)
+        self.assertEqual(probe("1").duration_units, 30)
+        p = probe("1.0001")
+        self.assertEqual(p.nominal_frames, 31)
+        self.assertEqual(p.duration_units, 31)
+        validate_nexus_mono(p)
         bad = parse_ffprobe_json({"streams":[{"codec_type":"video","codec_name":"mpeg2video","width":720,"height":480,"duration":"1"}]})
         with self.assertRaises(CompatibilityError): validate_nexus_mono(bad)
 
@@ -71,5 +78,18 @@ class UltraNexusAdapterTests(unittest.TestCase):
         self.assertTrue(inside.data[tb+0x57:tb+0x57+10].startswith(b"Switchback"))
         self.assertEqual(struct.unpack_from("<I", inside.data, later+4)[0], 77)
         self.assertEqual(struct.unpack_from("<I", inside.data, later+2*SCHEDULE_STRIDE+4)[0], 88)
+
+    def test_nmg_uses_shared_immutable_mutation_plan_and_audit(self):
+        data = bytearray(34_923_624)
+        data[:8] = MAGIC
+        data[VERSION_OFFSET:VERSION_OFFSET + 8] = b"7.0.3.48"
+        image = NMGImage(bytes(data))
+        changed = bytearray(data)
+        changed[200:204] = b"test"
+        plan = MutationPlan.between(image.data, bytes(changed), "header-evidence")
+        result, audit = image.apply(plan)
+        self.assertEqual(image.data[200:204], b"\0" * 4)
+        self.assertEqual(result.data[200:204], b"test")
+        self.assertEqual(audit["ranges"], ((200, 204),))
 
 if __name__ == "__main__": unittest.main()

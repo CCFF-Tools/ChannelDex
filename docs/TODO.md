@@ -17,6 +17,10 @@
 - [x] Enforce the versioned restricted-target contract, exact template/profile
   identities, NMG/BIN logical parity, conditional new-resource registration,
   and the complete measured FFmpeg qualification matrix.
+- [x] Complete the software-only hardening: shared immutable NMG/BIN mutation
+  plans, NMG disk reparse and byte-range audits, explicit nominal-30 duration
+  units, executable `signalstats`/`ebur128` capture, collision-retrying permanent
+  identifier reservation, and FTP/Telnet/concurrent-publication boundary tests.
 - [ ] Supply and review the private AME matrix outputs, then perform the
   destination-Mac/controller authentication, replacement, activation,
   observation, rollback, and representative WinLGX reconstruction run. These

@@ -16,7 +16,7 @@ from tempfile import NamedTemporaryFile
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from django.conf import settings as django_settings
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import Q
 from django.utils import timezone
 
@@ -34,6 +34,7 @@ from pubtv.ultranexus.bin import (RESOURCE_BASE as BIN_RESOURCE_BASE,
                                   week_seconds)
 from pubtv.ultranexus.parity import analyze_nmg_timeline, validate_nmg_bin_parity
 from pubtv.ultranexus.qualification import validate_qualification_manifest
+from pubtv.ultranexus.mutation import MutationPlan
 
 
 def canonical_json(value) -> str:
@@ -354,6 +355,35 @@ def _resource_reference(target, digest):
     return value
 
 
+def _reserve_media_identifiers(target, digest, casefold_key):
+    """Permanently reserve a target-scoped ID pair with collision retries."""
+    existing = MediaIdAllocation.objects.filter(target=target, casefold_key=casefold_key).first()
+    if existing:
+        if existing.media_hash != digest:
+            raise RuntimeError("controller filename is already reserved for different media")
+        return existing
+    for _ in range(65535):
+        try:
+            with transaction.atomic():
+                Device.objects.select_for_update().get(pk=target.pk)
+                media_id = _next_media_id(target)
+                if media_id is None:
+                    raise RuntimeError("target Media ID space is exhausted")
+                return MediaIdAllocation.objects.create(
+                    target=target, media_id_uint16=media_id,
+                    resource_reference_uint32=_resource_reference(target, digest),
+                    casefold_key=casefold_key, media_hash=digest,
+                )
+        except IntegrityError:
+            existing = MediaIdAllocation.objects.filter(
+                target=target, casefold_key=casefold_key).first()
+            if existing:
+                if existing.media_hash != digest:
+                    raise RuntimeError("controller filename is already reserved for different media")
+                return existing
+    raise RuntimeError("unable to reserve collision-free controller identifiers")
+
+
 def controller_filename(original_name, digest, *, encoded):
     """Return a deterministic, ASCII UltraNEXUS filename with a <=27-byte stem."""
     original = Path(original_name)
@@ -541,9 +571,11 @@ def process_preparation_batch(batch, *, runner=subprocess.run, credential_resolv
                 profile="Nexus Mono",
                 status="passed",
                 media_hash=digest,
-                details={"nominal_frames": probe.nominal_frames, "duration": str(probe.duration),
+                details={"duration_units": probe.duration_units,
+                         "nominal_frames": probe.nominal_frames, "duration": str(probe.duration),
                          "encoder_backend": encoder_backend, "encoder_command": list(command)},
             )
+            allocation = _reserve_media_identifiers(batch.target, digest, remote_filename.casefold())
             retain_input = not item.encode_before_transfer
             resolver = credential_resolver or _keychain_password
             secret = resolver(secret_ref)
@@ -563,21 +595,12 @@ def process_preparation_batch(batch, *, runner=subprocess.run, credential_resolv
                 raise RuntimeError("remote transfer verification hash does not match the approved local bytes")
             with transaction.atomic():
                 Device.objects.select_for_update().get(pk=batch.target_id)
-                media_id = _next_media_id(batch.target)
-                if media_id is None:
-                    raise RuntimeError("target Media ID space is exhausted")
-                reference = _resource_reference(batch.target, digest)
-                MediaIdAllocation.objects.create(
-                    target=batch.target, media_id_uint16=media_id,
-                    resource_reference_uint32=reference,
-                    casefold_key=remote_filename.casefold(), media_hash=digest,
-                )
                 binding = MediaBinding(
                     asset=item.asset,
                     target=batch.target,
                     binding_type="encoded",
-                    media_id_uint16=media_id,
-                    resource_reference_uint32=reference,
+                    media_id_uint16=allocation.media_id_uint16,
+                    resource_reference_uint32=allocation.resource_reference_uint32,
                     bare_filename=remote_filename,
                     profile="Nexus Mono",
                     verification_basis="locally_verified",
@@ -658,6 +681,7 @@ def generate_nmg_artifact(batch):
         raise ValueError("NMG generation blocked: " + "; ".join(preview["blockers"]))
     image = NMGImage.from_file(base_path, expected_sha256=config["base_nmg_hash"])
     image.validate_restricted()
+    base_image = image
     base_timeline = analyze_nmg_timeline(image)
     bin_base = None
     if any(item.operation != "add" for item in selections):
@@ -726,8 +750,8 @@ def generate_nmg_artifact(batch):
                 comment="ChannelDex",
                 reference=binding.resource_reference_uint32,
                 media_id=binding.media_id_uint16,
-                duration_units=probe.nominal_frames,
-                rounded_seconds=(probe.nominal_frames + 29) // 30,
+                duration_units=probe.duration_units,
+                rounded_seconds=(probe.duration_units + 29) // 30,
                 video_bitrate=int(bitrate) if bitrate else None,
                 width=probe.width,
                 height=probe.height,
@@ -768,13 +792,15 @@ def generate_nmg_artifact(batch):
                                "resource_reference": binding.resource_reference_uint32, "play_duration_seconds": play_duration})
         next_occurrence_id += 1
     image.validate_restricted()
+    mutation_plan = MutationPlan.between(base_image.data, image.data, "selected-changes")
+    image, audit = base_image.apply(mutation_plan)
     generated_timeline = analyze_nmg_timeline(image)
     if generated_timeline["intentional_uncovered_gaps"] != base_timeline["intentional_uncovered_gaps"]:
         raise ValueError("Selected changes altered qualified intentional virtual-channel gaps")
     output_root = Path(django_settings.DATA_DIR) / "ultranexus" / "schedules"
     output_root.mkdir(parents=True, exist_ok=True, mode=0o700)
     manifest = {**image.manifest(), "base_sha256": config["base_nmg_hash"], "items": manifest_items,
-                "template_sha256": nmg_template_hash, "timeline": generated_timeline,
+                "template_sha256": nmg_template_hash, "timeline": generated_timeline, "audit": audit,
                 "target_id": batch.target_id, "target_settings": generation_settings,
                 "workflow_mode": batch.workflow_mode, "reconciliation_mode": batch.reconciliation_mode}
     temp_path = None
@@ -785,6 +811,10 @@ def generate_nmg_artifact(batch):
             handle.flush()
             os.fsync(handle.fileno())
             temp_path = Path(handle.name)
+        reparsed = NMGImage.from_file(temp_path, expected_sha256=manifest["sha256"])
+        reparsed.validate_restricted()
+        if reparsed.manifest() != image.manifest():
+            raise ValueError("NMG disk reparse differs from the reviewed artifact")
         with transaction.atomic():
             Device.objects.select_for_update().get(pk=batch.target_id)
             locked = SchedulePublicationBatch.objects.select_for_update().get(pk=batch.pk)
@@ -803,7 +833,7 @@ def generate_nmg_artifact(batch):
             artifact = ArtifactRevision.objects.create(
                 publication_batch=locked, artifact_type="nmg", revision=revision,
                 file_reference=str(output), content_hash=manifest["sha256"], manifest=manifest,
-                validation={"status": "passed", "layout": image.header.version},
+                validation={"status": "passed", "layout": image.header.version, "audit": audit},
             )
             if locked.approval_2_status == "approved":
                 invalidate_snapshot(locked, approval=2, reason="generated schedule artifact changed")

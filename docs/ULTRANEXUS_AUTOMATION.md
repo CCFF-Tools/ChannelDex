@@ -53,9 +53,13 @@ unassigned episodes block publication.
   27-character controller filename allocation.
 - A hash-qualified Python NMG parser/writer for the reviewed 7.0.3.48 layout,
   including full-table blank/record validation, resource append, and Switchback
-  replacement while preserving unknown bytes.
+  replacement while preserving unknown bytes. NMG and BIN both serialize a
+  shared immutable byte-mutation plan and retain exact changed-byte ranges.
 - A separate fixed-layout BIN parser/writer with complemented CRC-32, exact
   target-base hash, selected changes, complete reparse, and byte-range manifest.
+- Atomic NMG and BIN publication reparses the temporary on-disk artifact before
+  creating an immutable revision; a failed write leaves the approved base and
+  prior artifacts unchanged.
 - Attended FTP staging, retained local and remote known-good BIN copies, XPASS
   authentication, one fixed LOADSCH command, ambiguous-result handling, explicit
   rollback, and independent activation evidence before upload coverage.
@@ -66,6 +70,9 @@ unassigned episodes block publication.
   fractional-duration, loudness/limiter, and controller-playback cases have all
   passed owner review with no differences or unmeasured checks. Exact executable,
   preset, profile, and manifest identities must match.
+- Target-scoped Media IDs and resource references are permanently reserved
+  before transfer with database uniqueness and collision retry. A failed
+  transfer does not recycle its reservation, while an exact retry reuses it.
 - Permanent target-scoped Media ID/resource-reference reservations, seeded from
   existing bindings and checked against all retained qualified base versions.
 - Owner-facing Automation settings, preparation batches, per-item encode toggles,
@@ -99,11 +106,19 @@ exact target qualification and attended actions. Full-week replacement remains
 unsupported.
 
 The owner may record an experimental comparison with
-`python manage.py record_ultranexus_ffmpeg_pair CASE SOURCE AME_OUTPUT FFMPEG_OUTPUT PRESET FFMPEG_EXECUTABLE AME_PROBE_JSON FFMPEG_PROBE_JSON --case-kind KIND --comparison-report-json REPORT`.
+`python manage.py record_ultranexus_ffmpeg_pair CASE SOURCE AME_OUTPUT FFMPEG_OUTPUT PRESET FFMPEG_EXECUTABLE AME_PROBE_JSON FFMPEG_PROBE_JSON --case-kind KIND --comparison-report-json REPORT --run-analysis`.
 `KIND` must cover the schema-2 matrix documented above. The report records the
 measured checks, differences, and unmeasured properties; metadata equality alone
-cannot qualify a pair. The private manifest remains experimental until every
+cannot qualify a pair. `--run-analysis` executes `signalstats` and `ebur128` on
+both outputs and retains compact numeric measurements without retaining raw tool
+logs. Illegal-level, audio, and loudness cases cannot be accepted without those
+paired measurements. The private manifest remains experimental until every
 required case is accepted and its exact identities match the target settings.
+
+For Nexus Mono, `duration_units` is exactly
+`ceil(probed_duration_seconds × 30)` using decimal arithmetic. The compatibility
+name `nominal_frames` remains in older probe evidence, but decoded frame count is
+never substituted for this controller value.
 
 Run the worker under a local supervisor after configuring target settings and
 Keychain credentials:

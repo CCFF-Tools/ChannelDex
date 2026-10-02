@@ -5,6 +5,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from django.test import TestCase, override_settings
+from django.db import IntegrityError, transaction
 
 from pubtv.operations.automation import canonical_hash, publication_snapshot, settings_record_snapshot
 from pubtv.operations.models import (ActivationEvidence, ArtifactRevision, Device, Occurrence,
@@ -237,6 +238,20 @@ class AttendedDeliveryTests(TestCase):
         with self.assertRaisesRegex(ValueError, "resource_registration"):
             stage_publication(self.batch.pk, expected_hash=self.candidate_hash,
                               ftp_factory=FakeFTPAdapter, secret_resolver=lambda _: "example")
+
+    def test_database_rejects_second_active_operation_for_target(self):
+        artifact = self.batch.artifact_revisions.get(artifact_type="bin")
+        ScheduleDeliveryOperation.objects.create(
+            publication_batch=self.batch, target=self.target, artifact=artifact,
+            approval_hash=self.batch.approval_2_hash, base_hash=self.base_hash,
+            state="staged",
+        )
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            ScheduleDeliveryOperation.objects.create(
+                publication_batch=self.batch, target=self.target, artifact=artifact,
+                approval_hash=self.batch.approval_2_hash, base_hash=self.base_hash,
+                state="prepared",
+            )
 
     def test_upload_failure_keeps_live_schedule_and_requires_reconciliation(self):
         with self.assertRaises(OSError):
