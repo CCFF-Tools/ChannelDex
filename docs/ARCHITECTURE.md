@@ -153,3 +153,6 @@ Names and exact module boundaries may be simplified at implementation. Runtime d
 Future import acceptance must define source namespace plus stable row identity/fingerprint, duplicate file/row no-op behavior, and explicit conflict review when the same identity changes. Retain private originals, mappings, parser versions, and row provenance; commit accepted rows transactionally. Schedule files cannot establish actual airings. Do not promise a format or API before examining representative samples.
 
 All phases after phase 1 are proposals. The project's test scope should follow affected behaviors; documentation changes require structural review, not application tests. Runtime-dependent promises need evidence from the pilot.
+# Prepare & Deliver boundary
+
+The station workflow keeps private source intake, preparation, schedule publication, attended activation, and independent observation as separate durable facts. The operator view is a server-rendered stepper over those facts; it does not imply that transfer or airing occurred merely because a batch was queued.

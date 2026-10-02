@@ -147,3 +147,8 @@ controller reference and private evidence are reviewed, record the attestation:
 ```sh
 python manage.py attest_ultranexus_legacy_binding BINDING_ID EVIDENCE_FILE
 ```
+# Station-centered Prepare & Deliver
+
+The owner-facing entry point is `/automation/` (also labelled Prepare & Deliver). Source videos are submitted through Station Prepare, stored privately below `DATA_DIR/imports`, attached to a planned occurrence, and queued as a versioned preparation batch. The page derives five states—encode, media transfer, schedule insertion, schedule upload, and confirmation—from durable preparation, publication, delivery, and observation records. Creating a selected-change publication is idempotent and remains reviewable before attended activation.
+
+UltraNEXUS device connection settings live in Station Settings. A device has one username and one opaque macOS Keychain reference shared by FTP and command delivery. Qualification hashes, template offsets, and recovery controls remain advanced records and are never treated as proof of airing.

@@ -4,6 +4,8 @@ import hashlib
 import os
 import json
 import re
+import shutil
+import glob
 from .exceptions import CapabilityError
 
 @dataclass(frozen=True)
@@ -32,8 +34,26 @@ class AdobeMediaEncoder(Encoder):
         return (self.executable, "--console", "es.processFile", script_path)
 
 def discover_ame(candidates=()):
-    paths = tuple(candidates) or ("/Applications/Adobe Media Encoder.app/Contents/MacOS/Adobe Media Encoder",)
-    return next((p for p in paths if Path(p).exists()), None)
+    paths = tuple(candidates) or tuple(
+        sorted(glob.glob("/Applications/Adobe Media Encoder*.app/Contents/MacOS/Adobe Media Encoder"), reverse=True)
+    )
+    return next((str(p) for p in paths if Path(p).is_file()), None)
+
+
+def discover_ffmpeg(candidates=()):
+    """Find FFmpeg in PATH and common macOS package locations."""
+    paths = []
+    if candidates:
+        paths.extend(str(p) for p in candidates)
+    found = shutil.which("ffmpeg")
+    if found:
+        paths.append(found)
+    paths.extend(("/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/usr/bin/ffmpeg"))
+    return next((str(p) for p in paths if Path(p).is_file()), None)
+
+
+def discover_executables(*, ame_candidates=(), ffmpeg_candidates=()):
+    return {"ame": discover_ame(ame_candidates), "ffmpeg": discover_ffmpeg(ffmpeg_candidates)}
 
 class FFmpegEncoder(Encoder):
     def __init__(self, executable="ffmpeg", *, video_bitrate="6500000", audio_bitrate="256000",

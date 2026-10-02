@@ -1,10 +1,9 @@
 from datetime import datetime, timedelta, date
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from django.contrib import messages
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import Count, F, Max, Q, Prefetch
-from django.http import HttpResponseBadRequest
-from django.http import HttpResponse
+from django.http import HttpResponse, HttpResponseBadRequest, JsonResponse
 from django.views.decorators.clickjacking import xframe_options_sameorigin
 from django.views.decorators.http import require_POST
 import os
@@ -13,12 +12,19 @@ import threading
 from django.core.exceptions import ValidationError
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
-from .forms import OccurrenceForm, StationForm, CarryForwardSettingsForm, DeviceForm, ShowForm, ShowSlotDurationForm, EpisodeForm, ProducerForm, EpisodeMilestoneForm, AssetForm, DeliveryForm, SlotForm, AssignmentForm, AssetPreparationForm, AssetTargetTransferForm, ProgrammingForm, UploadForm, AiringForm, AutomationPreparationForm, AutomationPublicationForm, UltraNexusSettingsForm
+from .forms import OccurrenceForm, StationForm, CarryForwardSettingsForm, DeviceForm, ShowForm, ShowSlotDurationForm, EpisodeForm, ProducerForm, EpisodeMilestoneForm, AssetForm, DeliveryForm, SlotForm, AssignmentForm, AssetPreparationForm, AssetTargetTransferForm, ProgrammingForm, UploadForm, AiringForm, AutomationPreparationForm, AutomationPublicationForm, UltraNexusSettingsForm, StationPreparationForm
 from .models import Episode, EpisodeWorkflowMilestone, Occurrence, Show, Station, Device, Producer, MediaAsset, Delivery, RecurrenceSlot, WeeklyEpisodeAssignment, Preparation, AssetPreparation, AssetTargetTransfer, OccurrenceProgramming, UploadedOccurrenceCoverage, UploadedScheduleRevision, AiringEvidence, AuditEvent, UltraNexusTargetSettings, PreparationBatch, PreparationBatchItem, PreparationJob, SchedulePublicationBatch, OccurrenceRevisionSelection, ResearchGate, TransferAttempt
 from .services import schedule_alerts, audit, materialize_assignment, ensure_carry_forward_week, next_premiere_date, suggested_pending_episode, confirm_preparation_fact, create_upload_snapshot, revise_airing, sign_upload_preview, load_upload_preview, commit_upload_preview, preparation_readiness, calendar_capacity
 from .automation import approve_snapshot, canonical_hash, invalidate_snapshot, preparation_batch_snapshot, publication_snapshot, preview_schedule, approve_preparation_batch, schedule_ready_binding, generate_nmg_artifact, generate_bin_artifact, publication_artifact_blockers
 from .publication_delivery import stage_publication, activate_publication, observe_activation, rollback_publication
-from pubtv.ultranexus.exceptions import UltraNexusError
+from pubtv.ultranexus.exceptions import UltraNexusError, CapabilityError
+from pubtv.ultranexus.secrets import device_secret_reference, new_device_secret_reference, KeychainSecretStore
+from pubtv.ultranexus.encoding import discover_executables
+from pathlib import Path
+import re
+import subprocess
+import uuid
+from django.conf import settings as django_settings
 
 
 @require_POST
@@ -171,6 +177,243 @@ def settings_view(request):
     return render(request, "settings.html", {"station": station, "devices": Device.objects.all().order_by("name"), "carry_forward_form": carry_forward_form})
 
 
+def device_settings(request, pk):
+    target = get_object_or_404(Device, pk=pk)
+    current = UltraNexusTargetSettings.objects.filter(target=target, is_current=True).first()
+    initial = {}
+    if current:
+        initial = {field: getattr(current, field, "") for field in (
+            "host", "port", "media_directory", "schedule_path", "reconciliation_mode",
+            "base_nmg_path", "base_nmg_hash", "base_bin_path", "base_bin_hash", "command_port",
+            "command_username", "controller_family", "firmware_version", "output_number",
+            "media_profile", "profile_identity_hash", "ame_preset_sha256", "ffmpeg_profile_sha256",
+            "nmg_template_sha256", "bin_template_sha256", "qualification_status", "qualification_evidence_hash")}
+        initial.update({key: current.settings.get(key, "") for key in (
+            "ftp_username", "ame_executable", "ame_preset", "ffmpeg_executable", "ffmpeg_build_sha256",
+            "ffmpeg_qualification_manifest", "ffmpeg_qualification_sha256", "nmg_resource_template_reference",
+            "nmg_schedule_template_base", "bin_resource_template_reference", "bin_schedule_template_slot",
+            "capability_flags")})
+        initial["settings_version"] = current.version
+        initial["capability_flags"] = ",".join(current.capability_flags if isinstance(current.capability_flags, list) else [])
+        initial["username"] = current.settings.get("ftp_username") or current.command_username
+    else:
+        initial["settings_version"] = 0
+    detected = discover_executables()
+    if not initial.get("ame_executable"):
+        initial["ame_executable"] = detected.get("ame") or ""
+    if not initial.get("ffmpeg_executable"):
+        initial["ffmpeg_executable"] = detected.get("ffmpeg") or ""
+    if request.method == "POST":
+        form = UltraNexusSettingsForm(request.POST)
+        if form.is_valid():
+            values = form.cleaned_data
+            expected_version = values.get("settings_version")
+            displayed_version = current.version if current else 0
+            if expected_version is None:
+                form.add_error(None, "Reload these device settings before saving.")
+                return render(request, "device_settings.html", {"target": target, "form": form, "current": current})
+            if expected_version != displayed_version:
+                form.add_error(None, "These device settings changed in another window. Reload and review them before saving.")
+                return render(request, "device_settings.html", {"target": target, "form": form, "current": current})
+            values["reconciliation_mode"] = values.get("reconciliation_mode") or (
+                current.reconciliation_mode if current else "preserve"
+            )
+            values["qualification_status"] = values.get("qualification_status") or (
+                current.qualification_status if current else "open"
+            )
+            values["command_port"] = values.get("command_port") or (
+                current.command_port if current else 23
+            )
+            username = values.get("username", "")
+            previous_reference = None
+            if current:
+                reference_text = current.secret_reference or current.command_secret_reference
+                previous_reference = reference_text
+                reference = device_secret_reference(target.pk)
+                if reference_text and ":" in reference_text:
+                    service, account = reference_text.split(":", 1)
+                    reference = type(reference)(service, account)
+            else:
+                reference = device_secret_reference(target.pk)
+            if not current and not values.get("password"):
+                form.add_error("password", "Enter a password for the first device setup.")
+                return render(request, "device_settings.html", {"target": target, "form": form, "current": current})
+            if values.get("password"):
+                reference = new_device_secret_reference(target.pk)
+            settings_data = dict(current.settings) if current else {}
+            for key in ("ftp_username", "ame_executable", "ame_preset", "ffmpeg_executable", "ffmpeg_build_sha256", "ffmpeg_qualification_manifest", "ffmpeg_qualification_sha256", "nmg_resource_template_reference", "nmg_schedule_template_base", "bin_resource_template_reference", "bin_schedule_template_slot", "capability_flags"):
+                if key in request.POST:
+                    settings_data[key] = values.get(key, "")
+                elif not current:
+                    settings_data.setdefault(key, "")
+            settings_data["ftp_username"] = username or settings_data.get("ftp_username", "")
+            settings_data["command_username"] = username or settings_data.get("command_username", "")
+            model_values = {field.name: getattr(current, field.name, "") for field in UltraNexusTargetSettings._meta.fields if field.name not in {"id", "target", "version", "settings", "is_current", "created_at", "created_by", "settings_hash"}} if current else {}
+            for name in model_values:
+                if name in request.POST or name in {"command_port", "reconciliation_mode", "qualification_status"}:
+                    model_values[name] = values[name]
+            model_values.update({"secret_reference": reference.service + ":" + reference.account, "command_secret_reference": reference.service + ":" + reference.account, "command_username": username or model_values.get("command_username", "")})
+            capability_value = (
+                values.get("capability_flags", "")
+                if "capability_flags" in request.POST
+                else (current.capability_flags if current else [])
+            )
+            if isinstance(capability_value, str):
+                capability_value = [x.strip() for x in capability_value.split(",") if x.strip()]
+            model_values["capability_flags"] = list(capability_value or [])
+            settings_data["capability_flags"] = model_values.get("capability_flags", [])
+            hash_payload = {**settings_data, **{key: str(model_values.get(key, "")) for key in ("host", "port", "media_directory", "schedule_path", "secret_reference", "reconciliation_mode", "base_nmg_path", "base_nmg_hash", "base_bin_path", "base_bin_hash", "command_port", "command_username", "command_secret_reference", "controller_family", "firmware_version", "output_number", "media_profile", "profile_identity_hash", "ame_preset_sha256", "ffmpeg_profile_sha256", "nmg_template_sha256", "bin_template_sha256", "qualification_status", "qualification_evidence_hash")}, "capability_flags": model_values.get("capability_flags", [])}
+            store = KeychainSecretStore()
+            if values.get("password"):
+                try:
+                    store.set(reference, values["password"])
+                except (CapabilityError, OSError, subprocess.CalledProcessError):
+                    messages.error(request, "The Keychain password could not be saved.")
+                    return render(request, "device_settings.html", {"target": target, "form": form, "current": current})
+            try:
+                with transaction.atomic():
+                    locked = UltraNexusTargetSettings.objects.select_for_update().filter(target=target, is_current=True).first()
+                    locked_version = locked.version if locked else 0
+                    if locked_version != expected_version:
+                        raise ValidationError("These device settings changed in another window. Reload and review them before saving.")
+                    record = UltraNexusTargetSettings(
+                    target=target, version=(locked.version + 1 if locked else 1), is_current=True,
+                    host=values.get("host") or model_values.get("host", ""), port=values.get("port") or model_values.get("port"), media_directory=values.get("media_directory") or model_values.get("media_directory", ""),
+                    schedule_path=values.get("schedule_path") or model_values.get("schedule_path", ""), secret_reference=reference.service + ":" + reference.account,
+                    reconciliation_mode=values.get("reconciliation_mode") or model_values.get("reconciliation_mode", "preserve"), command_port=values.get("command_port") or model_values.get("command_port") or 23,
+                    command_username=username or model_values.get("command_username", ""), command_secret_reference=reference.service + ":" + reference.account,
+                    controller_family=values.get("controller_family") or model_values.get("controller_family", ""), firmware_version=values.get("firmware_version") or model_values.get("firmware_version", ""),
+                    output_number=values.get("output_number") or model_values.get("output_number"), media_profile=values.get("media_profile") or model_values.get("media_profile", ""),
+                    profile_identity_hash=values.get("profile_identity_hash") or model_values.get("profile_identity_hash", ""), ame_preset_sha256=values.get("ame_preset_sha256") or model_values.get("ame_preset_sha256", ""), ffmpeg_profile_sha256=values.get("ffmpeg_profile_sha256") or model_values.get("ffmpeg_profile_sha256", ""), nmg_template_sha256=values.get("nmg_template_sha256") or model_values.get("nmg_template_sha256", ""), bin_template_sha256=values.get("bin_template_sha256") or model_values.get("bin_template_sha256", ""),
+                    base_nmg_path=values.get("base_nmg_path") or model_values.get("base_nmg_path", ""), base_nmg_hash=values.get("base_nmg_hash") or model_values.get("base_nmg_hash", ""), base_bin_path=values.get("base_bin_path") or model_values.get("base_bin_path", ""), base_bin_hash=values.get("base_bin_hash") or model_values.get("base_bin_hash", ""),
+                    qualification_status=values.get("qualification_status") or model_values.get("qualification_status", "open"), qualification_evidence_hash=values.get("qualification_evidence_hash") or model_values.get("qualification_evidence_hash", ""),
+                    settings=settings_data, settings_hash=canonical_hash(hash_payload),
+                )
+                    for field_name, field_value in model_values.items():
+                        if field_name not in {"secret_reference", "command_secret_reference", "command_username"} and hasattr(record, field_name):
+                            setattr(record, field_name, field_value)
+                    record.secret_reference = reference.service + ":" + reference.account
+                    record.command_secret_reference = record.secret_reference
+                    record.command_username = username or model_values.get("command_username", "")
+                    record.settings_hash = canonical_hash({**settings_data, **{field.name: str(getattr(record, field.name, "")) for field in UltraNexusTargetSettings._meta.fields if field.name in hash_payload}})
+                    record.full_clean(validate_constraints=False)
+                    UltraNexusTargetSettings.objects.filter(target=target, is_current=True).update(is_current=False)
+                    record.save()
+            except ValidationError as exc:
+                if values.get("password"):
+                    try:
+                        store.delete(reference)
+                    except (CapabilityError, OSError, subprocess.CalledProcessError):
+                        pass
+                form.add_error(None, "; ".join(exc.messages))
+                return render(request, "device_settings.html", {"target": target, "form": form, "current": current})
+            except Exception:
+                if values.get("password"):
+                    try:
+                        store.delete(reference)
+                    except (CapabilityError, OSError, subprocess.CalledProcessError):
+                        pass
+                raise
+            if values.get("password") and previous_reference and previous_reference != record.secret_reference:
+                try:
+                    previous_service, previous_account = previous_reference.split(":", 1)
+                    store.delete(type(reference)(previous_service, previous_account))
+                except (ValueError, CapabilityError, OSError, subprocess.CalledProcessError):
+                    pass
+            messages.success(request, "Station device settings saved. Qualification remains explicit and versioned.")
+            return redirect("device-settings", pk=target.pk)
+    else:
+        form = UltraNexusSettingsForm(initial=initial)
+    return render(request, "device_settings.html", {"target": target, "form": form, "current": current})
+
+
+def browse_path(request):
+    """Open a local Finder chooser; safe JSON response and editable fallback."""
+    if request.method != "POST":
+        return JsonResponse({"error": "POST required"}, status=405)
+    kind = request.POST.get("kind", "file")
+    if kind not in {"file", "application"}:
+        return JsonResponse({"error": "Unsupported chooser kind"}, status=400)
+    script = 'POSIX path of (choose application)' if kind == "application" else 'POSIX path of (choose file)'
+    try:
+        result = subprocess.run(("osascript", "-e", script), check=False, capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.TimeoutExpired):
+        return JsonResponse({"path": "", "available": False})
+    if result.returncode != 0:
+        return JsonResponse({"path": "", "available": True, "cancelled": True})
+    selected = result.stdout.strip()
+    if kind == "application" and selected.endswith(".app"):
+        selected = str(Path(selected) / "Contents/MacOS" / Path(selected).stem)
+    return JsonResponse({"path": selected if selected and Path(selected).exists() else "", "available": True})
+
+
+def station_prepare(request):
+    station = Station.objects.first()
+    if request.method == "POST":
+        form = StationPreparationForm(request.POST, request.FILES, station=station)
+        if form.is_valid():
+            uploaded = form.cleaned_data["source_video"]
+            safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", Path(uploaded.name).name)[:180] or "source-video"
+            root = Path(getattr(django_settings, "DATA_DIR", django_settings.BASE_DIR)) / "imports"
+            root.mkdir(parents=True, exist_ok=True, mode=0o700)
+            os.chmod(root, 0o700)
+            destination = root / f"{uuid.uuid4().hex[:12]}-{safe_name}"
+            descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            try:
+                with os.fdopen(descriptor, "wb") as stream:
+                    descriptor = None
+                    for chunk in uploaded.chunks():
+                        stream.write(chunk)
+                os.chmod(destination, 0o600)
+            finally:
+                if descriptor is not None:
+                    os.close(descriptor)
+            try:
+                with transaction.atomic():
+                    occurrence = form.cleaned_data["occurrence"]
+                    asset = MediaAsset.objects.create(episode=occurrence.episode, file_name=safe_name, kind="source", smb_reference=str(destination))
+                    occurrence.asset = asset
+                    occurrence.save(update_fields=["asset", "revision"])
+                    occurrence.refresh_from_db(fields=["revision"])
+                    audit("update", "Occurrence", occurrence, f"Private source uploaded and attached: {safe_name}")
+                    batch = PreparationBatch.objects.create(target=form.cleaned_data["target"], label=f"Upload {safe_name}")
+                    PreparationBatchItem.objects.create(batch=batch, asset=asset, occurrence=occurrence, selected_input_path=str(destination), encode_before_transfer=form.cleaned_data["encode_before_transfer"], position=0)
+                    approve_preparation_batch(batch)
+                    batch.status = "approved"; batch.save(update_fields=["status"])
+                    PreparationJob.objects.create(batch=batch, idempotency_key=f"preparation:{batch.pk}:{batch.approval_1_hash}")
+            except (ValueError, ValidationError, OSError):
+                destination.unlink(missing_ok=True)
+                messages.error(request, "The source could not be queued. No preparation records were retained.")
+                return render(request, "station_prepare.html", {"form": form})
+            messages.success(request, "Source uploaded privately and queued for preparation.")
+            return redirect("automation")
+    else:
+        form = StationPreparationForm(station=station)
+    return render(request, "station_prepare.html", {"form": form})
+
+
+def _delivery_cards():
+    cards = []
+    items = PreparationBatchItem.objects.select_related("batch__target", "asset", "occurrence").prefetch_related("transfer_attempts").order_by("-batch__created_at", "position")[:24]
+    for item in items:
+        occurrence = item.occurrence
+        if not occurrence:
+            continue
+        transfer = item.transfer_attempts.order_by("-attempted_at").first()
+        publication = SchedulePublicationBatch.objects.filter(target=item.batch.target, occurrence_selections__occurrence=occurrence).prefetch_related("artifact_revisions", "delivery_operations").order_by("-created_at").first()
+        selection = publication.occurrence_selections.filter(occurrence=occurrence).first() if publication else None
+        encode = "complete" if item.execution_status in {"ready"} or item.resulting_binding_id else ("active" if item.execution_status == "encoding" else "pending")
+        transfer_state = "complete" if transfer and transfer.status == "succeeded" else ("active" if transfer and transfer.status == "started" else "pending")
+        artifact_types = {artifact.artifact_type for artifact in publication.artifact_revisions.all()} if publication else set()
+        schedule_state = "complete" if selection and {"nmg", "bin"}.issubset(artifact_types) else ("active" if selection else "pending")
+        operation_state = publication.delivery_operations.order_by("-updated_at").first() if publication else None
+        upload_state = "complete" if operation_state and operation_state.state in {"activation_requested", "activation_acknowledged", "activation_observed"} else ("active" if operation_state and operation_state.state in {"staged", "schedule_transferred"} else "pending")
+        confirmation_state = "complete" if operation_state and operation_state.state == "activation_observed" else ("active" if operation_state and operation_state.state == "activation_acknowledged" else "pending")
+        next_action = "Encode and transfer" if encode != "complete" else ("Create schedule publication" if transfer_state == "complete" and not selection else ("Generate paired NMG and BIN" if schedule_state != "complete" else ("Stage and request attended activation" if upload_state != "complete" else "Record independent confirmation")))
+        cards.append({"item": item, "occurrence": occurrence, "target": item.batch.target, "publication": publication, "states": [("Encode", encode), ("Media transfer", transfer_state), ("Schedule insertion", schedule_state), ("Schedule upload", upload_state), ("Confirmation", confirmation_state)], "next_action": next_action, "can_publish": bool(item.resulting_binding_id or item.execution_status == "ready")})
+    return cards
+
+
 def _automation_context(request, *, form_p=None, form_s=None, message=""):
     target_id = request.GET.get("target") or request.POST.get("target")
     target = Device.objects.filter(pk=target_id).first() if target_id else Device.objects.order_by("name").first()
@@ -240,83 +483,34 @@ def _automation_context(request, *, form_p=None, form_s=None, message=""):
             "publication_batches": publication_batches, "publication_cards": publication_cards,
             "preparation_form": form_p or AutomationPreparationForm(), "publication_form": form_s or AutomationPublicationForm(),
             "settings_form": UltraNexusSettingsForm(initial=settings_initial),
-            "schedule_preview": preview, "automation_message": message}
+            "schedule_preview": preview, "automation_message": message, "delivery_cards": _delivery_cards()}
 
 
 def automation_dashboard(request):
     """Owner-facing two approval workflow; all external work remains gated."""
     if request.method == "POST":
         action = request.POST.get("action", "")
-        if action == "save_target_settings":
-            target = get_object_or_404(Device, pk=request.POST.get("target")); form = UltraNexusSettingsForm(request.POST)
-            if form.is_valid():
-                values = form.cleaned_data
-                capabilities = [x.strip() for x in values.get("capability_flags", "").split(",") if x.strip()]
-                settings = {
-                    "ftp_username": values.get("ftp_username", ""),
-                    "ame_executable": values.get("ame_executable", ""),
-                    "ame_preset": values.get("ame_preset", ""),
-                    "ffmpeg_executable": values.get("ffmpeg_executable", ""),
-                    "ffmpeg_build_sha256": values.get("ffmpeg_build_sha256", ""),
-                    "ffmpeg_qualification_manifest": values.get("ffmpeg_qualification_manifest", ""),
-                    "ffmpeg_qualification_sha256": values.get("ffmpeg_qualification_sha256", ""),
-                    "nmg_resource_template_reference": values.get("nmg_resource_template_reference"),
-                    "nmg_schedule_template_base": values.get("nmg_schedule_template_base"),
-                    "bin_resource_template_reference": values.get("bin_resource_template_reference"),
-                    "bin_schedule_template_slot": values.get("bin_schedule_template_slot"),
-                }
-                record = UltraNexusTargetSettings(
-                    target=target,
-                    version=1,
-                    settings=settings,
-                    host=values.get("host", ""),
-                    port=values.get("port"),
-                    media_directory=values.get("media_directory", ""),
-                    schedule_path=values.get("schedule_path", ""),
-                    secret_reference=values.get("secret_reference", ""),
-                    reconciliation_mode=values.get("reconciliation_mode", "preserve"),
-                    capability_flags=capabilities,
-                    base_nmg_path=values.get("base_nmg_path", ""),
-                    base_nmg_hash=values.get("base_nmg_hash", ""),
-                    base_bin_path=values.get("base_bin_path", ""),
-                    base_bin_hash=values.get("base_bin_hash", ""),
-                    command_port=values.get("command_port") or 23,
-                    command_username=values.get("command_username", ""),
-                    command_secret_reference=values.get("command_secret_reference", ""),
-                    controller_family=values.get("controller_family", ""),
-                    firmware_version=values.get("firmware_version", ""),
-                    output_number=values.get("output_number"),
-                    media_profile=values.get("media_profile", ""),
-                    profile_identity_hash=values.get("profile_identity_hash", ""),
-                    ame_preset_sha256=values.get("ame_preset_sha256", ""),
-                    ffmpeg_profile_sha256=values.get("ffmpeg_profile_sha256", ""),
-                    nmg_template_sha256=values.get("nmg_template_sha256", ""),
-                    bin_template_sha256=values.get("bin_template_sha256", ""),
-                    qualification_status=values.get("qualification_status", "open"),
-                    qualification_evidence_hash=values.get("qualification_evidence_hash", ""),
-                    settings_hash=canonical_hash({**settings, **{key: str(values.get(key, "")) for key in (
-                        "host", "port", "media_directory", "schedule_path", "secret_reference",
-                        "reconciliation_mode", "base_nmg_path", "base_nmg_hash", "base_bin_path",
-                        "base_bin_hash", "command_port", "command_username", "command_secret_reference",
-                        "controller_family", "firmware_version", "output_number", "media_profile",
-                        "profile_identity_hash", "ame_preset_sha256", "ffmpeg_profile_sha256",
-                        "nmg_template_sha256", "bin_template_sha256",
-                        "qualification_status", "qualification_evidence_hash")},
-                        "capability_flags": capabilities}),
-                    is_current=False,
-                )
-                record.full_clean(validate_constraints=False)
-                with transaction.atomic():
-                    target = Device.objects.select_for_update().get(pk=target.pk)
-                    current = UltraNexusTargetSettings.objects.select_for_update().filter(target=target).order_by("-version").first()
-                    record.target = target
-                    record.version = current.version + 1 if current else 1
-                    UltraNexusTargetSettings.objects.filter(target=target, is_current=True).update(is_current=False)
-                    record.is_current = True
-                    record.full_clean()
-                    record.save()
-                messages.success(request, "Target settings saved without credentials.")
+        if action == "create_delivery_publication":
+            item = get_object_or_404(PreparationBatchItem.objects.select_related("batch", "occurrence"), pk=request.POST.get("item"))
+            if not (item.resulting_binding_id or item.execution_status == "ready"):
+                messages.error(request, "Media preparation must be ready before creating a schedule publication.")
+                return redirect("automation")
+            batch = SchedulePublicationBatch.objects.filter(preparation_item=item).first()
+            if not batch:
+                try:
+                    with transaction.atomic():
+                        batch = SchedulePublicationBatch.objects.create(preparation_item=item, target=item.batch.target, workflow_mode="selected_changes", reconciliation_mode="preserve")
+                except IntegrityError:
+                    batch = SchedulePublicationBatch.objects.get(preparation_item=item)
+            OccurrenceRevisionSelection.objects.get_or_create(
+                publication_batch=batch,
+                occurrence=item.occurrence,
+                defaults={"occurrence_revision": item.occurrence.revision, "operation": "add"},
+            )
+            messages.success(request, "Selected schedule publication is ready for review.")
             return redirect("automation")
+        if action == "save_target_settings":
+            return redirect("device-settings", pk=request.POST.get("target"))
         if action == "create_preparation":
             form = AutomationPreparationForm(request.POST)
             if form.is_valid():
