@@ -23,7 +23,10 @@ clean_generated_dir() {
     mv "$target" "$stale"
   fi
   mkdir -p "$target"
-  rm -rf "$stale"
+  # Finder can recreate metadata inside an app bundle while it is being
+  # removed. The active output path is already clean, so stale cleanup must
+  # not abort an otherwise valid build.
+  rm -rf "$stale" || echo "Warning: could not fully remove generated $stale" >&2
 }
 
 # Move old output out of the active path before deleting it. This avoids

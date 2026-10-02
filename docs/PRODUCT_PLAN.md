@@ -1,5 +1,48 @@
 # ChannelDex scheduling and media-tracking plan
 
+## Usability overhaul — accepted for implementation (2026-09-17)
+
+The owner accepted the complete usability and information-architecture overhaul
+identified in the 2026-09-17 review. This is an implementation contract, not a
+claim that the runtime already provides these workflows. The target owner-facing
+navigation is **Today**, **Schedule** (Day, Week, Agenda, Recurring Times),
+**Shows**, **History**, and **Settings**. Contextual actions replace duplicate
+global commands; compatibility redirects preserve existing bookmarked routes.
+
+Today is the operational start page: selected-date timeline, readiness, warnings,
+and remaining work. Schedule views share one date/filter/action surface. A
+schedule-item workbench combines plan, episode/media, preparation, device
+programming, uploaded-schedule coverage, airing evidence, and activity without
+merging their underlying records. A Show workspace combines show metadata,
+primary producer, episodes/queue, weekly times, premiere selection, and upcoming
+occurrences. History is principally read-only; current work starts from the
+affected item and returns to that context after save.
+
+The accepted simplifications include one derived status presentation, one
+derived preparation/activity timeline, inline creation of supporting records,
+progressive/contextual forms, human-readable labels, and removal of duplicate
+owner-facing fields. Legacy values remain migration-only metadata and are not
+shown as parallel editable facts.
+
+The preparation/replay question is resolved: source availability and encoding
+belong to the exact reusable asset version; transfer belongs to asset version +
+target device; library registration is part of that asset/device handoff;
+playback programming belongs to occurrence + target device; and uploaded
+schedule coverage belongs to an immutable upload and its exact occurrence
+revision IDs. Replays reuse the prepared asset facts, while occurrence-specific
+programming and upload coverage are never copied silently. Show-level slot
+length is the current setting; each occurrence snapshots its planned length.
+Episode schedule labels are derived; free-text labels remain for standalone IDs,
+PSAs, filler, and live entries.
+
+The following distinctions remain accepted and must not be merged: plan versus
+aired evidence; recurring reservation versus concrete occurrence; delivery
+notice versus actual receipt; source versus encoded rendition; fixed slot versus
+media runtime; preparation versus programming versus uploaded-schedule coverage;
+premiere queue classification versus media readiness; and reported observation
+versus log-verified evidence. The UI presents these together where useful but
+keeps their provenance and state independent.
+
 ## Purpose and scope
 
 ChannelDex needs a self-contained browser application on one computer to coordinate recurring programming, playlist preparation notes, media management notes, and manual air history. It is designed for PUB-TV first and may later support GOV-TV. Its first release is an operational record-keeping tool, not a playout controller or transcoding system.
@@ -8,7 +51,7 @@ ChannelDex needs a self-contained browser application on one computer to coordin
 
 - Track recurring weekly shows, producer-supplied descriptions, private producer phone and email, upcoming episode slates, prior confirmed air dates, and a complete 24-hour station schedule.
 - Represent a weekly episode's premiere and its replays.
-- Replays always use the episode selected for that week's premiere. When there is no new premiere, the owner selects any older episode case by case; the app must not automatically cycle or silently reuse one.
+- Replays always use the episode selected for that premiere cycle. By default, the owner selects any older episode case by case. The owner may instead enable a global, off-by-default standing authorization that carries the most recent explicitly planned episode into otherwise unassigned current/future weeks. Generated cycles are visibly labeled and audited; an explicit episode or No program plan overrides them, No program stops subsequent carry-forward, disabling the setting stops future generation without erasing existing plans, and the behavior never advances the pending-new queue.
 - Episode backlog order follows producer direction, usually FIFO. Unaired episodes carry intended air order and optional intended premiere dates; producer-directed ordering wins. Date, order, and fixed-slot conflicts are flagged, never silently rescheduled or advanced. Reruns leave the pending-new queue intact.
 - Record submission channel separately from receipt and storage: Dropbox folder/link, email sender/message/download URL, or local SMB path. Link arrival is not receipt; no credentials, automatic fetching, network mounts, or V1 connectors are assumed.
 - Track six separate manual preparation facts: source available; AME preset/version/machine/output; exact FTP output/device; WinLGX library registration; slot assignment; and uploaded schedule revision. These retain owner confirmation and provenance; transfer is per exact asset version/target and slot assignment per occurrence/target.
@@ -39,9 +82,9 @@ The owner uses a saved Adobe Media Encoder preset based on Leightronix's documen
 
 The confirmed shared layout is `PUB-TV/<Show-Code>/source/` for all source episode files and `PUB-TV/<Show-Code>/encoded/` for all encoded episode files, using exact lowercase folder names and no per-episode directories. `generic existing filename.ext` illustrates a file reference only; it does not prescribe a codec or container. Track source and derived encoded files independently even when names differ. The SMB root, show-code/ID format, and all further naming questions remain deferred.
 
-## Proposed screens
+## Target screens (accepted for implementation)
 
-Calendar is primary: full-day/week grid plus agenda, with item type, premiere/replay label, and visible gap/overlap warnings. A separate upcoming-shows view expands recurring reservations at their full configured length and shows only show names and times, without episode names, Available intervals, preparation state, or virtual-channel filler rows. Show detail holds the producer-supplied description, private producer phone and email, this week's selected episode, and a distinct next-on-slate field. The episode library shows prior actual air dates. A preparation queue displays the six separate preparation facts: source availability, Adobe Media Encoder preset/version/machine/output, exact FTP output/device, WinLGX library registration, WinLGX playback slot, and uploaded schedule revision, with notes and N/A where applicable. Existing preparation provenance remains preserved but hidden from the owner-facing form while preparation fact ownership and replay reuse are resolved. A chronological day log shows item, time, planned duration, readiness, and actual evidence. “Next scheduled” is derived from occurrences; “next on slate” is editorial planning and is never treated as the same value.
+Calendar is primary: full-day/week grid plus agenda, with item type, premiere/replay label, and visible gap/overlap warnings. Week offers two non-redundant modes: a continuous Available/Reserved capacity map, or individual scheduled items plus consecutive Available blocks. It does not repeat a Reserved capacity block behind the scheduled item representing that reservation. A separate recurring-times view expands reservations at their full configured length and shows only show names and times, without episode names, Available intervals, preparation state, or virtual-channel filler rows. Show detail holds the producer-supplied description, private producer phone and email, this week's selected episode, and a distinct next-on-slate field. The episode library shows prior actual air dates. The schedule-item workbench shows preparation, programming, and upload coverage using the canonical ownership split above; legacy provenance remains preserved but hidden from owner-facing forms. A chronological day log shows item, time, planned duration, readiness, and actual evidence. “Next scheduled” is derived from occurrences; “next on slate” is editorial planning and is never treated as the same value.
 
 ## Primary workflows
 

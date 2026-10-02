@@ -1,0 +1,8 @@
+<!doctype html>
+<html lang="en">
+{% load static %}<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Producer added · ChannelDex</title><link rel="stylesheet" href="{% static 'pubtv.css' %}"></head>
+<body>
+  <main class="popup-main"><p>Producer <strong>{{ producer }}</strong> was added. This window can close.</p></main>
+  <script>window.parent.postMessage({type:'channeldex:producer-created',id:'{{ producer.pk }}',label:'{{ producer|escapejs }}'},window.location.origin);</script>
+</body>
+</html>

@@ -1,0 +1,5 @@
+<div class="duration-input" role="group" aria-label="Duration">
+  <label class="duration-part">{% include widget.subwidgets.0.template_name with widget=widget.subwidgets.0 %}<span>Hours</span></label>
+  <label class="duration-part">{% include widget.subwidgets.1.template_name with widget=widget.subwidgets.1 %}<span>Minutes</span></label>
+  {% if widget.show_seconds %}<label class="duration-part">{% include widget.subwidgets.2.template_name with widget=widget.subwidgets.2 %}<span>Seconds</span></label>{% else %}{% include widget.subwidgets.2.template_name with widget=widget.subwidgets.2 %}{% endif %}
+</div>

@@ -1,5 +1,29 @@
 # Architecture and scaffolding proposal
 
+## Accepted interaction architecture (2026-09-17)
+
+The application remains one loopback Django service, but its owner-facing
+composition is accepted as: Today; unified Schedule views (Day, Week, Agenda,
+Recurring Times); Shows; History; and Settings. The schedule-item workbench is
+the composition root for contextual plan/media/preparation/programming/upload/
+airing/activity views. The Show workspace composes show, Producer, episode queue,
+weekly times, premiere selection, and upcoming occurrences. Legacy endpoints may
+redirect to their new contextual destinations during migration; this does not
+create duplicate workflows.
+
+The UI should derive statuses and one activity timeline from authoritative facts.
+It must not create a second status store or duplicate event facts merely to make
+the workbench convenient. Technical provenance, immutable IDs, and migration
+values remain expandable history details rather than primary form fields.
+
+The accepted ownership split is asset version for source/encoding, asset version
++ Device for transfer and library registration, Occurrence + Device for playback
+programming, and exact Occurrence revision coverage for uploaded schedules.
+Replays reuse asset preparation but never silently reuse occurrence programming or
+upload coverage. Show-level slot length is materialized as an occurrence snapshot
+when a plan is created or revised. Legacy fields are retained only for migration
+and audit compatibility.
+
 Status: accepted for implementation on 2026-09-09; the initial runtime/testing target is macOS 26.x on Apple Silicon. Unsigned local PyInstaller packaging is implemented and smoke-tested; signing, notarization, distribution, and Intel validation remain open/deferred. Updated 2026-09-09.
 
 ## Recommended shape
@@ -48,7 +72,7 @@ These are modules in one application, not separate services. PUB-TV is the initi
 - Give each scheduled item an immutable identity and retain planned revisions. Generated items also have a stable generation token independent of later episode/time edits. Regeneration matches existing tokens and previews changes; it cannot resurrect cancelled or superseded items. Rescheduling retains an explicit original/replacement relationship. Coverage calculations use only current effective items, while historical plans remain queryable.
 - Account for the entire local broadcast day, including filler, IDs, PSAs, and planned live-event durations. Display all gaps and overlaps; never fabricate filler to make a day appear complete. A cross-midnight item has one identity and is clipped visually into day views. A DST transition day covers its full local day even when elapsed duration is 23 or 25 hours.
 - Keep program starts fixed to their slots. Distinguish slot end, selected asset runtime, and expected content end; derive reserved virtual-channel filler after shorter content. Missing runtime leaves only the filler amount not determined, never available. Treat 60 seconds as a proposed advisory threshold, flag over-slot episodes, and perform no automatic shifting, trimming, filler insertion, or playout control.
-- Use one owner-confirmed episode for each premiere-to-premiere cycle. The app suggests the next pending episode and next active premiere slot; if no new episode arrives, the owner can explicitly choose an older one. Replays after that premiere retain its episode until the next premiere, so a Monday replay before a Wednesday premiere belongs to the prior cycle rather than resetting at the calendar boundary. After a premiere passes with a recorded, valid uploaded schedule revision matching the premiere, an idempotent operational transition marks the episode previously scheduled and exposes the next pending item for planning. This never proves airing, silently confirms a suggestion, reorders or substitutes episodes, or consumes replay assignments. Future premieres and those lacking a valid exact match remain pending; cancelled or known failed premieres require owner review.
+- Use one owner-confirmed episode for each premiere-to-premiere cycle. The app suggests the next pending episode and next active premiere slot; if no new episode arrives, the owner can explicitly choose an older one. An off-by-default station setting is a standing owner authorization to create a visibly labeled, audited fallback cycle from the most recent explicit episode for an otherwise unassigned current/future week. Explicit episode and No program plans win, No program stops later carry-forward, disabling the setting affects only future generation, and the fallback never advances the pending queue. Replays after a premiere retain its episode until the next premiere, so a Monday replay before a Wednesday premiere belongs to the prior cycle rather than resetting at the calendar boundary. After a premiere passes with a recorded, valid uploaded schedule revision matching the premiere, an idempotent operational transition marks the episode previously scheduled and exposes the next pending item for planning. This never proves airing, silently confirms a suggestion, reorders or substitutes episodes, or consumes replay assignments. Future premieres and those lacking a valid exact match remain pending; cancelled or known failed premieres require owner review.
 - Pin programming confirmation to the exact item, asset version if applicable, target and scheduled time. Changes invalidate affected readiness/confirmation while preserving audit history. Time passing, being fully prepared, and calendar export never count as evidence of an actual airing.
 - Keep the app's desired schedule distinct from the manually edited/uploaded WinLGX schedule revision. The proposed `UploadedScheduleRevision` record has an immutable internal ID, optional operator-entered external label/reference, exactly one target device, operator/audit actor, upload timestamp, and an immutable explicit set of covered occurrence revision IDs. Its lifecycle is `active`, `superseded`, or `invalidated`; supersession links prior/newer records with reason, actor, and timestamp, while record-level invalidation voids all coverage and records reason, actor, and timestamp. The operator confirms the match and associates the external revision with covered occurrences; upload never proves airing.
 - Keep six manual preparation stages separately recorded: source available; encoded with Adobe Media Encoder preset/version/machine/output; exact FTP transfer/device; WinLGX library registration; slot assignment; and schedule revision upload. Record owner, time, and references for each. Live events may mark file-based steps N/A, and configured-owner confirmations keep stages consistent. Readiness remains distinct and device-specific; upload never proves airing. An upload is an exact match only when its device matches, it is `active`, and its explicit coverage contains the exact effective occurrence revision ID. Missing, stale, superseded, invalidated, or predecessor-linked coverage fails. A newer upload must explicitly cover every occurrence revision it intends to certify; coverage is never inherited. An episode/asset version, start, duration, status, target, reschedule, cancellation, preemption, or other effective occurrence change leaves the historical upload intact but makes its prior occurrence-revision link stale for current readiness and queue transitions. These rules support the idempotent queue transition after a passed premiere, but never establish that it aired.
@@ -91,6 +115,19 @@ Names and exact module boundaries may be simplified at implementation. Runtime d
 3. **Make the daily workflow usable:** add producer records, next-on-slate visibility, preparation checklists, media notes, weekly/day/agenda views, manual history lookup, and audit behavior. Calendar export follows as a near-term roadmap item.
 4. **Pilot and package:** the unsigned Apple Silicon macOS 26.x `.app` build is implemented in `packaging/`; validate the actual Mac, offline operation, stale edits from multiple tabs, privacy, backup/restore, and the owner's real full-day workflow before operational adoption. Intel requires a separate build and later validation.
 5. **Later expansion:** consider Leightronix file/schedule exchange and historical imports, GOV-TV, TelVue integration, shared access, and public distribution as separately reviewed increments.
+
+## Accepted usability delivery sequence (implemented and verified)
+
+1. Build the navigation shell, Today, unified Schedule views, contextual actions,
+   compatibility redirects, and return-to-context behavior.
+2. Build the schedule-item workbench and derived readiness/activity presentation.
+3. Build the Show workspace, canonical Producer/episode/queue/time-slot flows,
+   and migration-only handling for redundant fields.
+4. Reconcile data ownership and add migrations without deleting historical
+   provenance; preserve all accepted separation rules.
+5. Run focused tests, then pilot the complete daily workflow with synthetic and
+   owner-sanitized data. Runtime usability and behavioral verification remain
+   pending until those checks occur.
 
 Future import acceptance must define source namespace plus stable row identity/fingerprint, duplicate file/row no-op behavior, and explicit conflict review when the same identity changes. Retain private originals, mappings, parser versions, and row provenance; commit accepted rows transactionally. Schedule files cannot establish actual airings. Do not promise a format or API before examining representative samples.
 

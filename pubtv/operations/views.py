@@ -2,9 +2,10 @@ from datetime import datetime, timedelta, date
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from django.contrib import messages
 from django.db import transaction
-from django.db.models import Count, F, Max, Q
+from django.db.models import Count, F, Max, Q, Prefetch
 from django.http import HttpResponseBadRequest
 from django.http import HttpResponse
+from django.views.decorators.clickjacking import xframe_options_sameorigin
 from django.views.decorators.http import require_POST
 import os
 import signal
@@ -12,9 +13,9 @@ import threading
 from django.core.exceptions import ValidationError
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
-from .forms import OccurrenceForm, StationForm, DeviceForm, ShowForm, ShowSlotDurationForm, EpisodeForm, ProducerForm, EpisodeMilestoneForm, AssetForm, DeliveryForm, SlotForm, AssignmentForm, PreparationForm, ProgrammingForm, UploadForm, AiringForm
-from .models import Episode, EpisodeWorkflowMilestone, Occurrence, Show, Station, Device, Producer, MediaAsset, Delivery, RecurrenceSlot, WeeklyEpisodeAssignment, Preparation, OccurrenceProgramming, UploadedOccurrenceCoverage, UploadedScheduleRevision, AiringEvidence, AuditEvent
-from .services import schedule_alerts, audit, materialize_assignment, next_premiere_date, suggested_pending_episode, confirm_preparation_fact, create_upload_snapshot, revise_airing, sign_upload_preview, load_upload_preview, commit_upload_preview, preparation_readiness, calendar_capacity
+from .forms import OccurrenceForm, StationForm, CarryForwardSettingsForm, DeviceForm, ShowForm, ShowSlotDurationForm, EpisodeForm, ProducerForm, EpisodeMilestoneForm, AssetForm, DeliveryForm, SlotForm, AssignmentForm, AssetPreparationForm, AssetTargetTransferForm, ProgrammingForm, UploadForm, AiringForm
+from .models import Episode, EpisodeWorkflowMilestone, Occurrence, Show, Station, Device, Producer, MediaAsset, Delivery, RecurrenceSlot, WeeklyEpisodeAssignment, Preparation, AssetPreparation, AssetTargetTransfer, OccurrenceProgramming, UploadedOccurrenceCoverage, UploadedScheduleRevision, AiringEvidence, AuditEvent
+from .services import schedule_alerts, audit, materialize_assignment, ensure_carry_forward_week, next_premiere_date, suggested_pending_episode, confirm_preparation_fact, create_upload_snapshot, revise_airing, sign_upload_preview, load_upload_preview, commit_upload_preview, preparation_readiness, calendar_capacity
 
 
 @require_POST
@@ -51,9 +52,64 @@ def _human_duration(total_seconds):
     if seconds: parts.append(f"{seconds} second{'s' if seconds != 1 else ''}")
     return ", ".join(parts) or "0 minutes"
 
+
+def _coarse_capacity_blocks(day_capacity):
+    """Collapse detailed capacity into consecutive Available/Reserved blocks."""
+    blocks = []
+    for interval in day_capacity.get("intervals", []):
+        status = "available" if interval["status"] == "available" else "reserved"
+        show_label = interval.get("show_label")
+        same_reservation = not blocks or status == "available" or blocks[-1].get("show_label") == show_label
+        if blocks and blocks[-1]["status"] == status and blocks[-1]["end"] == interval["start"] and same_reservation:
+            blocks[-1]["end"] = interval["end"]
+            continue
+        blocks.append({
+            "kind": "capacity",
+            "start": interval["start"],
+            "end": interval["end"],
+            "status": status,
+            "label": "Available" if status == "available" else "Reserved",
+            "show_label": show_label,
+        })
+    return blocks
+
+
+def _apply_carry_forward(request, station, week_start):
+    created = ensure_carry_forward_week(station, week_start)
+    if created:
+        show_names = ", ".join(item.show.title for item in created)
+        week_label = week_start.strftime("%b %d").replace(" 0", " ")
+        messages.info(
+            request,
+            f"Carried the most recent episode into the week of {week_label}: {show_names}. "
+            "Each item is labeled as an automatic carry-forward replay and can be replaced by an explicit plan.",
+        )
+    return created
+
+
+def _pending_queue(show):
+    """Return the premiere queue using only stored fields; receipt is derived."""
+    episodes = list(show.episodes.filter(status="pending").prefetch_related("deliveries"))
+    missing_receipt = datetime.max.replace(tzinfo=ZoneInfo("UTC"))
+    return sorted(episodes, key=lambda item: (item.intended_air_order is None, item.intended_air_order or 0, item.received_at or missing_receipt, item.pk))
+
 def dashboard(request):
     station = Station.objects.first()
-    occurrences = list(Occurrence.objects.filter(station=station).select_related("episode", "show", "asset", "weekly_assignment", "recurrence_slot")) if station else []
+    try:
+        selected = date.fromisoformat(request.GET.get("date", "")) if request.GET.get("date") else timezone.localdate()
+    except ValueError:
+        return HttpResponseBadRequest("Invalid date")
+    if station:
+        _apply_carry_forward(request, station, selected - timedelta(days=selected.weekday()))
+    occurrences = []
+    if station:
+        try:
+            station_tz = ZoneInfo(station.timezone)
+        except ZoneInfoNotFoundError:
+            station_tz = ZoneInfo("America/Detroit")
+        start = timezone.make_aware(datetime.combine(selected, datetime.min.time()), station_tz)
+        end = timezone.make_aware(datetime.combine(selected + timedelta(days=1), datetime.min.time()), station_tz)
+        occurrences = [item for item in Occurrence.objects.filter(station=station, starts_at__lt=end).select_related("episode", "show", "asset", "weekly_assignment", "recurrence_slot", "preparation").order_by("starts_at") if item.ends_at > start]
     if station:
         try:
             station_tz = ZoneInfo(station.timezone)
@@ -75,7 +131,58 @@ def dashboard(request):
         for item in occurrences:
             if item.status != "planned":
                 item.gap_to_next_label = "Not applicable"
-    return render(request, "dashboard.html", {"station": station, "occurrences": occurrences, "alerts": _alerts(occurrences)})
+    covered_ids = set(UploadedOccurrenceCoverage.objects.filter(upload__state="active", occurrence__in=occurrences, occurrence_revision=F("occurrence__revision")).values_list("occurrence_id", flat=True)) if occurrences else set()
+    for item in occurrences:
+        item.readiness = preparation_readiness(item)
+        item.covered = item.pk in covered_ids
+    return render(request, "dashboard.html", {"station": station, "occurrences": occurrences, "selected_date": selected, "previous_date": selected - timedelta(days=1), "next_date": selected + timedelta(days=1), "covered_count": len(covered_ids), "remaining_count": len(occurrences) - len(covered_ids), "alerts": _alerts(occurrences)})
+
+
+def occurrence_workbench(request, pk):
+    occurrence = get_object_or_404(Occurrence.objects.select_related("station", "show", "episode", "asset", "weekly_assignment", "recurrence_slot", "preparation"), pk=pk)
+    preparation = getattr(occurrence, "preparation", None)
+    asset_preparation = getattr(occurrence.asset, "preparation_record", None) if occurrence.asset_id else None
+    transfers = list(occurrence.asset.target_transfers.select_related("device").order_by("device__name", "pk")) if occurrence.asset_id else []
+    legacy_preparation = preparation if preparation and not asset_preparation else None
+    programming = OccurrenceProgramming.objects.filter(occurrence=occurrence).order_by("-pk")
+    coverage = UploadedOccurrenceCoverage.objects.filter(occurrence=occurrence).select_related("upload").order_by("-upload__uploaded_at")
+    uploads = [item for item in coverage if item.upload.state == "active" and item.occurrence_revision == occurrence.revision]
+    stale_uploads = [item for item in coverage if item not in uploads]
+    evidence = AiringEvidence.objects.filter(occurrence=occurrence).order_by("-aired_at", "-pk")
+    activity = AuditEvent.objects.filter(entity="Occurrence", entity_id=occurrence.pk).order_by("-occurred_at")
+    return render(request, "occurrence_workbench.html", {"occurrence": occurrence, "preparation": preparation, "asset_preparation": asset_preparation, "transfers": transfers, "legacy_preparation": legacy_preparation, "programming": programming, "uploads": uploads, "stale_uploads": stale_uploads, "evidence": evidence, "activity": activity, "readiness": preparation_readiness(occurrence), "selected_date": occurrence.starts_at.date()})
+
+
+def settings_view(request):
+    station = Station.objects.first()
+    form_data = request.POST if request.method == "POST" else None
+    carry_forward_form = CarryForwardSettingsForm(form_data, instance=station) if station else None
+    if request.method == "POST" and carry_forward_form and carry_forward_form.is_valid():
+        station = carry_forward_form.save()
+        audit(
+            "update", "Station", station,
+            "Automatic episode carry-forward enabled" if station.carry_forward_unassigned_episodes else "Automatic episode carry-forward disabled",
+        )
+        messages.success(request, "Schedule carry-forward setting updated.")
+        return redirect("settings")
+    return render(request, "settings.html", {"station": station, "devices": Device.objects.all().order_by("name"), "carry_forward_form": carry_forward_form})
+
+
+def device_list(request):
+    return render(request, "device_list.html", {"devices": Device.objects.all().order_by("name")})
+
+
+def schedule_view(request):
+    mode = request.GET.get("mode", "day")
+    if mode not in {"day", "week", "agenda", "recurring"}:
+        mode = "day"
+    if mode == "week":
+        return week_view(request)
+    if mode == "agenda":
+        return agenda_view(request)
+    if mode == "recurring":
+        return reserved_schedule(request)
+    return day_view(request)
 
 def scheduling_today(request):
     station = Station.objects.first()
@@ -156,20 +263,62 @@ def reserved_schedule(request):
 def show_list(request):
     station = Station.objects.first()
     show_type = request.GET.get("show_type", "")
-    shows = station.shows.annotate(episode_count=Count("episodes")) if station else Show.objects.none()
+    sort = request.GET.get("sort", "title")
+    valid_sorts = {"title", "code", "show_type", "episodes", "weekly_time"}
+    if sort not in valid_sorts:
+        sort = "title"
+    today = timezone.localdate()
+    active_slots = RecurrenceSlot.objects.filter(
+        Q(active_from__isnull=True) | Q(active_from__lte=today),
+        Q(active_until__isnull=True) | Q(active_until__gte=today),
+    ).order_by("weekday", "start_time", "pk")
+    shows = list(
+        station.shows.annotate(episode_count=Count("episodes")).prefetch_related(
+            Prefetch("slots", queryset=active_slots, to_attr="weekly_slots")
+        ) if station else Show.objects.none()
+    )
     if show_type in dict(Show.SHOW_TYPES):
-        shows = shows.filter(show_type=show_type)
-    return render(request, "show_list.html", {"shows": shows, "show_types": Show.SHOW_TYPES, "show_type_filter": show_type})
+        shows = [show for show in shows if show.show_type == show_type]
+
+    def sort_key(show):
+        slots = getattr(show, "weekly_slots", [])
+        first_slot = (slots[0].weekday, slots[0].start_time, slots[0].pk) if slots else (99, datetime.max.time(), 0)
+        if sort == "code":
+            return (show.code.casefold(), show.title.casefold())
+        if sort == "show_type":
+            return ((show.get_show_type_display() or "Unclassified").casefold(), show.title.casefold())
+        if sort == "episodes":
+            return (show.episode_count, show.title.casefold())
+        if sort == "weekly_time":
+            return (*first_slot, show.title.casefold())
+        return (show.title.casefold(), show.pk)
+
+    shows.sort(key=sort_key)
+    return render(request, "show_list.html", {
+        "shows": shows,
+        "show_types": Show.SHOW_TYPES,
+        "show_type_filter": show_type,
+        "show_sort": sort,
+    })
 
 def show_detail(request, show_id):
     show = get_object_or_404(
         Show.objects.prefetch_related(
-            "episodes__workflow_milestones", "occurrences__episode", "slots"
+            "occurrences__episode", "occurrences__programming",
+            "occurrences__airing_evidence", "slots"
         ),
         pk=show_id,
     )
-    pending = show.episodes.filter(status="pending").order_by(F("intended_air_order").asc(nulls_last=True), F("received_at").asc(nulls_last=True), "pk")
-    return render(request, "show_detail.html", {"show": show, "pending": pending, "episodes": show.episodes.order_by(F("intended_air_order").asc(nulls_last=True), "pk")})
+    pending = _pending_queue(show)
+    episodes = sorted(
+        list(show.episodes.prefetch_related(
+            "deliveries", "workflow_milestones", "assets__preparation_record",
+            "assets__target_transfers", "occurrences__programming",
+            "occurrences__airing_evidence",
+        )),
+        key=lambda item: (item.intended_air_order is None, item.intended_air_order or 0, item.pk),
+    )
+    return render(request, "show_detail.html", {"show": show, "pending": pending, "episodes": episodes})
 
 def episode_queue_reorder(request, show_id):
     station = Station.objects.first()
@@ -177,7 +326,16 @@ def episode_queue_reorder(request, show_id):
     if request.method != "POST":
         return HttpResponseBadRequest("Queue changes must be submitted with POST.")
     try:
-        ordered_ids = [int(value) for value in request.POST.get("episode_ids", "").split(",") if value.strip()]
+        raw_ids = request.POST.getlist("episode_ids")
+        if len(raw_ids) == 1 and "," in raw_ids[0]:
+            raw_ids = raw_ids[0].split(",")
+        ordered_ids = [int(value) for value in raw_ids if str(value).strip()]
+        positions = request.POST.getlist("queue_positions")
+        if positions and len(positions) == len(ordered_ids):
+            try:
+                ordered_ids = [episode_id for _, episode_id in sorted(zip((int(pos) for pos in positions), ordered_ids), key=lambda pair: (pair[0], pair[1]))]
+            except ValueError:
+                return HttpResponseBadRequest("Queue positions must be whole numbers.")
     except ValueError:
         return HttpResponseBadRequest("Queue order contains an invalid episode.")
     if len(ordered_ids) != len(set(ordered_ids)):
@@ -198,12 +356,23 @@ def episode_queue_reorder(request, show_id):
     return redirect("show-detail", show_id=show.pk)
 
 def episode_detail(request, pk):
-    episode = get_object_or_404(Episode.objects.select_related("show", "producer").prefetch_related("assets", "deliveries", "occurrences", "workflow_milestones"), pk=pk)
+    episode = get_object_or_404(
+        Episode.objects.select_related("show", "producer").prefetch_related(
+            "assets__preparation_record", "assets__target_transfers", "deliveries",
+            "occurrences__programming", "occurrences__airing_evidence",
+            "workflow_milestones",
+        ),
+        pk=pk,
+    )
     return render(request, "episode_detail.html", {"episode": episode})
 
 def episode_list(request):
     station = Station.objects.first()
-    episodes = Episode.objects.filter(show__station=station).select_related("show").prefetch_related("workflow_milestones").order_by("show__title", F("intended_air_order").asc(nulls_last=True), "pk") if station else Episode.objects.none()
+    episodes = Episode.objects.filter(show__station=station).select_related("show").prefetch_related(
+        "deliveries", "workflow_milestones", "assets__preparation_record",
+        "assets__target_transfers", "occurrences__programming",
+        "occurrences__airing_evidence",
+    ).order_by("show__title", F("intended_air_order").asc(nulls_last=True), "pk") if station else Episode.objects.none()
     return render(request, "episode_list.html", {"episodes": episodes})
 
 def occurrence_create(request):
@@ -215,7 +384,7 @@ def occurrence_create(request):
         occurrence = form.save(commit=False); occurrence.station = station
         occurrence.full_clean(); occurrence.save(skip_revision=True)
         audit("create", "Occurrence", occurrence, "Schedule plan created")
-        messages.success(request, "Occurrence created."); return redirect("dashboard")
+        messages.success(request, "Occurrence created."); return redirect("occurrence-workbench", pk=occurrence.pk)
     return render(request, "occurrence_form.html", {"form": form, "title": "Add schedule item"})
 
 def occurrence_edit(request, pk):
@@ -232,16 +401,17 @@ def occurrence_edit(request, pk):
                 updated = Occurrence.objects.filter(pk=pk, revision=expected_value).update(
                     item_type=form.cleaned_data["item_type"], label=form.cleaned_data["label"],
                     show=form.cleaned_data["show"], episode=form.cleaned_data["episode"],
+                    asset=form.cleaned_data["asset"],
                     starts_at=form.cleaned_data["starts_at"], planned_duration_seconds=form.cleaned_data["planned_duration_seconds"],
                     status=form.cleaned_data["status"], reason=form.cleaned_data["reason"], revision=expected_value + 1)
                 if not updated: return HttpResponseBadRequest("This item changed in another tab; reload before saving.")
             audit("update", "Occurrence", occurrence, "Schedule plan revised")
-            messages.success(request, "Occurrence updated."); return redirect("dashboard")
+            messages.success(request, "Occurrence updated."); return redirect("occurrence-workbench", pk=occurrence.pk)
     else:
         form = OccurrenceForm(instance=occurrence, station=occurrence.station, initial={"expected_revision": occurrence.revision})
     return render(request, "occurrence_form.html", {"form": form, "title": "Edit schedule item", "occurrence": occurrence})
 
-def _crud(request, model, form_class, title, pk=None, initial=None):
+def _crud(request, model, form_class, title, pk=None, initial=None, extra_context=None):
     obj = get_object_or_404(model, pk=pk) if pk else None
     scoped = {ShowForm, AssetForm, DeliveryForm}
     kwargs = {"instance": obj}
@@ -254,6 +424,9 @@ def _crud(request, model, form_class, title, pk=None, initial=None):
         if isinstance(obj, Show): return redirect("show-detail", show_id=obj.pk)
         if isinstance(obj, MediaAsset) and obj.episode_id: return redirect("episode-detail", pk=obj.episode_id)
         if isinstance(obj, Delivery) and obj.episodes.count() == 1: return redirect("episode-detail", pk=obj.episodes.first().pk)
+        next_url = request.GET.get("next", "")
+        if next_url.startswith("/") and not next_url.startswith("//"):
+            return redirect(next_url)
         return redirect("dashboard")
     intros = {
         "Create show": "Add the show once, then manage its episodes and weekly air times from the show page.",
@@ -261,23 +434,31 @@ def _crud(request, model, form_class, title, pk=None, initial=None):
         "Record media asset": "Record a source or encoded rendition as private metadata. ChannelDex does not move or validate the file.",
         "Record delivery": "Record how a submission was made available and link one or more episodes. ChannelDex does not fetch it.",
     }
-    return render(request, "simple_form.html", {"form": form, "title": title, "intro": intros.get(title)})
+    context = {"form": form, "title": title, "intro": intros.get(title)}
+    context.update(extra_context or {})
+    return render(request, "simple_form.html", context)
 def setup_station(request):
     existing = Station.objects.first()
     return _crud(request, Station, StationForm, "Station setup", pk=existing.pk if existing else None)
 def setup_device(request): return _crud(request, Device, DeviceForm, "Device setup")
-def show_create(request): return _crud(request, Show, ShowForm, "Create show")
+def show_create(request):
+    return _crud(
+        request, Show, ShowForm, "Create show",
+        extra_context={"producer_url": "/producers/new/?popup=1"},
+    )
 def show_edit(request, show_id):
     station = Station.objects.first()
     show = get_object_or_404(Show, pk=show_id, station=station)
     return _crud(request, Show, ShowForm, "Edit show", pk=show.pk)
 
+@xframe_options_sameorigin
 def producer_create(request):
     station = Station.objects.first()
     if not station:
         return HttpResponseBadRequest("Create a station first")
     show = Show.objects.filter(pk=request.GET.get("show"), station=station).first()
     episode = Episode.objects.filter(pk=request.GET.get("episode"), show__station=station).first()
+    popup = request.GET.get("popup") == "1"
     form = ProducerForm(request.POST or None)
     if request.method == "POST" and form.is_valid():
         producer = form.save(commit=False)
@@ -285,42 +466,78 @@ def producer_create(request):
         producer.full_clean()
         producer.save()
         audit("create", "Producer", producer, "Producer added")
+        if popup:
+            return render(request, "producer_popup_complete.html", {"producer": producer})
         messages.success(request, f"Producer {producer} added and selected.")
+        next_url = request.GET.get("next", "")
+        if next_url.startswith("/") and not next_url.startswith("//"):
+            return redirect(next_url + ("&" if "?" in next_url else "?") + f"producer={producer.pk}")
         if episode:
             return redirect(f"/episodes/{episode.pk}/edit/?producer={producer.pk}")
         suffix = f"?producer={producer.pk}"
         if show:
             suffix += f"&show={show.pk}"
         return redirect(f"/episodes/new/{suffix}")
-    return render(request, "simple_form.html", {
+    return render(request, "producer_popup_form.html" if popup else "simple_form.html", {
         "form": form,
         "title": "Add producer",
         "intro": "Add the producer by name. Contact and membership details remain private local metadata.",
     })
 
-def episode_create(request):
+def _episode_create(request, reference=None):
     station = Station.objects.first()
-    show = get_object_or_404(Show, pk=request.GET.get("show"), station=station) if request.GET.get("show") and station else None
+    show = reference.show if reference else (
+        get_object_or_404(Show, pk=request.GET.get("show"), station=station)
+        if request.GET.get("show") and station else None
+    )
     producer = Producer.objects.filter(pk=request.GET.get("producer"), station=station).first() if station else None
-    initial = {}
-    if show: initial["show"] = show.pk
-    if producer: initial["producer"] = producer.pk
-    if show:
+    initial = {
+        "show": reference.show_id,
+        "title": reference.title,
+        "producer": reference.producer_id,
+        "intended_air_order": reference.intended_air_order,
+        "intended_premiere_date": reference.intended_premiere_date,
+        "runtime_seconds": reference.runtime_seconds,
+    } if reference else {}
+    if show and not reference:
+        initial["show"] = show.pk
+    if producer:
+        initial["producer"] = producer.pk
+    if show and not reference:
         current_max = show.episodes.aggregate(value=Max("intended_air_order"))["value"] or 0
         initial["intended_air_order"] = current_max + 1
     form = EpisodeForm(request.POST or None, station=station, initial=initial)
     if request.method == "POST" and form.is_valid():
         episode = form.save()
-        audit("create", "Episode", episode, "Episode created")
-        messages.success(request, "Episode saved. Record its current workflow stage when ready.")
+        summary = f"Episode duplicated from {reference.pk}" if reference else "Episode created"
+        audit("create", "Episode", episode, summary)
+        messages.success(request, "Duplicate episode saved as a separate record." if reference else "Episode saved. Record its current workflow stage when ready.")
         return redirect("episode-detail", pk=episode.pk)
-    producer_url = f"/producers/new/?show={show.pk}" if show else "/producers/new/"
+    producer_url = f"/producers/new/?popup=1&show={show.pk}" if show else "/producers/new/?popup=1"
     return render(request, "simple_form.html", {
-        "form": form, "title": "Add episode", "producer_url": producer_url,
-        "queue_preview": show.episodes.filter(status="pending").order_by(F("intended_air_order").asc(nulls_last=True), F("received_at").asc(nulls_last=True), "pk") if show else None,
+        "form": form, "title": "Duplicate episode" if reference else "Add episode", "producer_url": producer_url,
+        "queue_preview": _pending_queue(show) if show else None,
         "queue_show": show,
-        "intro": "Create the episode record first; delivery, media, workflow, and scheduling actions remain separate and auditable.",
+        "intro": (
+            f"Review the copied fields from {reference.title}, then save a separate episode record. Deliveries, assets, workflow facts, schedules, and airing evidence are not copied."
+            if reference else
+            "Create the episode record first; delivery, media, workflow, and scheduling actions remain separate and auditable."
+        ),
     })
+
+
+def episode_create(request):
+    return _episode_create(request)
+
+
+def episode_duplicate(request, pk):
+    station = Station.objects.first()
+    reference = get_object_or_404(
+        Episode.objects.select_related("show", "producer"),
+        pk=pk,
+        show__station=station,
+    )
+    return _episode_create(request, reference=reference)
 
 def episode_edit(request, pk):
     station = Station.objects.first()
@@ -339,13 +556,17 @@ def episode_edit(request, pk):
         return redirect("episode-detail", pk=episode.pk)
     return render(request, "simple_form.html", {
         "form": form, "title": "Edit episode",
-        "producer_url": f"/producers/new/?episode={episode.pk}",
+        "producer_url": f"/producers/new/?popup=1&episode={episode.pk}",
         "intro": "Queue classification and airing evidence are managed separately from the episode's workflow milestones.",
     })
 
 def episode_milestone_create(request, pk):
     station = Station.objects.first()
     episode = get_object_or_404(Episode, pk=pk, show__station=station)
+    if request.method != "GET":
+        messages.info(request, "Workflow milestones are now derived from delivery, asset, transfer, programming, and upload facts.")
+    return redirect("episode-detail", pk=episode.pk)
+    # Kept below as a compatibility reference for migrated installations.
     form = EpisodeMilestoneForm(request.POST or None)
     if request.method == "POST" and form.is_valid():
         milestone = form.save(commit=False)
@@ -368,6 +589,10 @@ def asset_create(request):
     station = Station.objects.first()
     episode = get_object_or_404(Episode, pk=request.GET.get("episode"), show__station=station) if request.GET.get("episode") and station else None
     return _crud(request, MediaAsset, AssetForm, "Record media asset", initial={"episode": episode.pk} if episode else None)
+def asset_edit(request, pk):
+    station = Station.objects.first()
+    asset = get_object_or_404(MediaAsset, pk=pk, episode__show__station=station)
+    return _crud(request, MediaAsset, AssetForm, "Edit media asset", pk=asset.pk)
 def delivery_create(request):
     station = Station.objects.first()
     episode = get_object_or_404(Episode, pk=request.GET.get("episode"), show__station=station) if request.GET.get("episode") and station else None
@@ -446,6 +671,8 @@ def show_slot_duration_edit(request, show_id):
 def show_slot_manager(request, show_id):
     station = Station.objects.first()
     show = get_object_or_404(Show, pk=show_id, station=station)
+    if request.GET.get("legacy") != "1":
+        return redirect(f"/shows/{show.pk}/#weekly-times")
     today = timezone.localdate()
     slots = list(show.slots.order_by("weekday", "start_time", "pk"))
     active = [slot for slot in slots if (not slot.active_from or slot.active_from <= today) and (not slot.active_until or slot.active_until >= today)]
@@ -494,17 +721,15 @@ def assignment_create(request):
             pass
         else:
             selected_show = Show.objects.filter(pk=posted_show_id, station=station).first()
+            posted_week = posted_premiere - timedelta(days=posted_premiere.weekday())
+            # The database identity is show + Monday week. Resolve that exact
+            # row even when a legacy or corrected record has a different or
+            # missing premiere_date, avoiding a duplicate-key server error.
             existing = WeeklyEpisodeAssignment.objects.filter(
                 show_id=posted_show_id,
                 show__station=station,
-                premiere_date=posted_premiere,
+                week_start=posted_week,
             ).first()
-            if not existing:
-                posted_week = posted_premiere - timedelta(days=posted_premiere.weekday())
-                existing = WeeklyEpisodeAssignment.objects.filter(
-                    show_id=posted_show_id, show__station=station,
-                    week_start=posted_week, premiere_date=None,
-                ).first()
     existing_episode_id = existing.episode_id if existing else None
     form = AssignmentForm(
         form_data,
@@ -513,11 +738,12 @@ def assignment_create(request):
         initial=initial,
     )
     if request.method == "POST" and form.is_valid():
+        form.instance.is_automatic_carry_forward = False
         if existing:
             blocked = Occurrence.objects.filter(weekly_assignment=existing).filter(Q(uploaded_revisions__isnull=False) | Q(airing_evidence__isnull=False)).exists()
             if blocked:
                 form.add_error(None, "This premiere cycle cannot be changed because an upload or airing record already relies on it.")
-                return render(request, "assignment_form.html", {"form": form, "title": "Plan the next premiere cycle", "selected_show": selected_show, "queue": selected_show.episodes.filter(status="pending").order_by(F("intended_air_order").asc(nulls_last=True), F("received_at").asc(nulls_last=True), "pk"), "prior_cycle": existing}, status=400)
+                return render(request, "assignment_form.html", {"form": form, "title": "Plan the next premiere cycle", "selected_show": selected_show, "queue": _pending_queue(selected_show), "prior_cycle": existing}, status=400)
             episode_changed = existing_episode_id != getattr(form.cleaned_data["episode"], "pk", None)
             programming_recorded = OccurrenceProgramming.objects.filter(
                 occurrence__weekly_assignment=existing
@@ -528,10 +754,10 @@ def assignment_create(request):
                 Q(source_available__in=("yes", "na"))
                 | Q(source_available_at__isnull=False)
                 | ~Q(ame_preset="")
-                | ~Q(ftp_output_device="")
+                | ~Q(legacy_ftp_output_device="")
                 | ~Q(library_registration="")
                 | ~Q(slot_assignment="")
-                | ~Q(uploaded_schedule_revision="")
+                | ~Q(legacy_uploaded_schedule_revision="")
             ).exists()
             workflow_recorded = programming_recorded or preparation_recorded
             if episode_changed and workflow_recorded:
@@ -542,7 +768,7 @@ def assignment_create(request):
                 return render(
                     request,
                     "assignment_form.html",
-                    {"form": form, "title": "Plan the next premiere cycle", "selected_show": selected_show, "queue": selected_show.episodes.filter(status="pending").order_by(F("intended_air_order").asc(nulls_last=True), F("received_at").asc(nulls_last=True), "pk"), "prior_cycle": existing},
+                    {"form": form, "title": "Plan the next premiere cycle", "selected_show": selected_show, "queue": _pending_queue(selected_show), "prior_cycle": existing},
                     status=400,
                 )
             with transaction.atomic():
@@ -562,6 +788,10 @@ def assignment_create(request):
                         occurrence.episode = assignment.episode
                         occurrence.item_type = "episode"
                         occurrence.label = assignment.show.title
+                        if episode_changed:
+                            # An asset belongs to the prior episode; never silently
+                            # carry it across a premiere-cycle correction.
+                            occurrence.asset = None
                         occurrence.schedule_role = (
                             "rerun" if assignment.selection_type == "rerun"
                             else ("premiere" if occurrence.recurrence_slot and occurrence.recurrence_slot.is_premiere else "replay")
@@ -576,11 +806,7 @@ def assignment_create(request):
             audit("create", "WeeklyEpisodeAssignment", assignment, "Premiere cycle planned")
         messages.success(request, "Premiere cycle planned. The premiere and following replays now use the selected episode.")
         return redirect(f"/week/?date={assignment.premiere_date.isoformat()}")
-    queue = selected_show.episodes.filter(status="pending").order_by(
-        F("intended_air_order").asc(nulls_last=True),
-        F("intended_premiere_date").asc(nulls_last=True),
-        F("received_at").asc(nulls_last=True), "pk"
-    ) if selected_show else Episode.objects.none()
+    queue = _pending_queue(selected_show) if selected_show else []
     prior_cycle = selected_show.weekly_assignments.exclude(premiere_date=None).order_by("-premiere_date").first() if selected_show else None
     return render(request, "assignment_form.html", {
         "form": form,
@@ -588,6 +814,7 @@ def assignment_create(request):
         "selected_show": selected_show,
         "queue": queue,
         "prior_cycle": prior_cycle,
+        "premiere_setup_missing": bool(selected_show and not next_premiere_date(selected_show)),
     })
 def day_view(request):
     station = Station.objects.first()
@@ -595,6 +822,8 @@ def day_view(request):
         selected = date.fromisoformat(request.GET.get("date", "")) if request.GET.get("date") else timezone.localdate()
     except ValueError:
         return HttpResponseBadRequest("Invalid date")
+    if station:
+        _apply_carry_forward(request, station, selected - timedelta(days=selected.weekday()))
     tz = ZoneInfo(station.timezone) if station else ZoneInfo("America/Detroit")
     start = timezone.make_aware(datetime.combine(selected, datetime.min.time()), tz)
     end = timezone.make_aware(datetime.combine(selected + timedelta(days=1), datetime.min.time()), tz)
@@ -620,7 +849,11 @@ def day_view(request):
     occurrences = list(qs)
     for item in occurrences: item.readiness = preparation_readiness(item)
     total_seconds = int((end.astimezone(utc) - start.astimezone(utc)).total_seconds())
-    return render(request, "calendar_day.html", {"title": "Day plan", "occurrences": occurrences, "selected_date": selected, "previous_date": selected - timedelta(days=1), "next_date": selected + timedelta(days=1), "capacity": calendar_capacity(station, selected)[0] if station else {"intervals": []}, "capacity_filter": request.GET.get("capacity", "all"), "show_type_filter": show_type, "show_types": Show.SHOW_TYPES, "coverage_label": _human_duration(covered), "alerts": _alerts(occurrences)})
+    capacity = calendar_capacity(station, selected)[0] if station else {"intervals": []}
+    timeline = [{"kind": "occurrence", "starts_at": item.starts_at, "ends_at": item.ends_at, "occurrence": item} for item in occurrences]
+    timeline += [{"kind": "capacity", "starts_at": interval["start"], "ends_at": interval["end"], "interval": interval} for interval in capacity.get("intervals", [])]
+    timeline.sort(key=lambda item: (item["starts_at"], 0 if item["kind"] == "occurrence" else 1))
+    return render(request, "calendar_day.html", {"title": "Day plan", "occurrences": occurrences, "timeline": timeline, "selected_date": selected, "previous_date": selected - timedelta(days=1), "next_date": selected + timedelta(days=1), "capacity": capacity, "capacity_filter": request.GET.get("capacity", "all"), "show_type_filter": show_type, "show_types": Show.SHOW_TYPES, "coverage_label": _human_duration(covered), "alerts": _alerts(occurrences)})
 
 def week_view(request):
     station = Station.objects.first()
@@ -629,6 +862,8 @@ def week_view(request):
     except ValueError:
         return HttpResponseBadRequest("Invalid date")
     selected -= timedelta(days=selected.weekday())
+    if station:
+        _apply_carry_forward(request, station, selected)
     days = []
     for offset in range(7):
         day = selected + timedelta(days=offset)
@@ -636,17 +871,16 @@ def week_view(request):
     tz = ZoneInfo(station.timezone) if station else ZoneInfo("America/Detroit")
     start = timezone.make_aware(datetime.combine(selected, datetime.min.time()), tz)
     end = timezone.make_aware(datetime.combine(selected + timedelta(days=7), datetime.min.time()), tz)
-    view_mode = request.GET.get("view", "scheduled")
-    if view_mode not in {"scheduled", "availability"}:
-        view_mode = "scheduled"
+    requested_mode = request.GET.get("view", "capacity")
+    # Preserve old bookmarked URLs while presenting only the two clear modes.
+    view_mode = {"scheduled": "schedule", "availability": "capacity"}.get(requested_mode, requested_mode)
+    if view_mode not in {"schedule", "capacity"}:
+        view_mode = "capacity"
     occurrences = Occurrence.objects.filter(
         station=station, status="planned",
         starts_at__lt=end,
     ).select_related("show", "episode", "weekly_assignment", "recurrence_slot", "preparation").order_by("starts_at") if station else []
     occurrences = [item for item in occurrences if item.ends_at > start]
-    show_type = request.GET.get("show_type", "") if view_mode == "scheduled" else ""
-    if show_type:
-        occurrences = [item for item in occurrences if item.show and item.show.show_type == show_type]
     for item in occurrences: item.readiness = preparation_readiness(item)
     day_segments = []
     for day in days:
@@ -658,17 +892,28 @@ def week_view(request):
                                      "start": max(item.starts_at, day_start).astimezone(tz),
                                      "end": min(item.ends_at, day_end).astimezone(tz)})
     capacity = calendar_capacity(station, selected, 7) if station else []
-    capacity_filter = request.GET.get("capacity", "all")
-    if capacity_filter not in {"all", "reserved", "available"}:
-        capacity_filter = "all"
+    segments_by_day = {day: [] for day in days}
+    for segment in day_segments:
+        segments_by_day[segment["date"]].append({
+            "kind": "occurrence", "start": segment["start"], "end": segment["end"],
+            "occurrence": segment["occurrence"],
+        })
+    capacity_by_day = {item["date"]: _coarse_capacity_blocks(item) for item in capacity}
+    week_columns = []
+    for day in days:
+        blocks = capacity_by_day.get(day, [])
+        if view_mode == "capacity":
+            items = blocks
+        else:
+            items = segments_by_day[day] + [item for item in blocks if item["status"] == "available"]
+            items.sort(key=lambda item: (item["start"], 0 if item["kind"] == "occurrence" else 1))
+        week_columns.append({"date": day, "items": items})
     return render(request, "calendar_week.html", {
-        "title": "Week plan", "view_mode": view_mode, "occurrences": occurrences if view_mode == "scheduled" else [],
-        "day_segments": day_segments if view_mode == "scheduled" else [], "week_days": days,
+        "title": "Week plan", "view_mode": view_mode, "occurrences": occurrences,
+        "day_segments": day_segments, "week_days": days, "week_columns": week_columns,
         "selected_date": selected, "previous_week": selected - timedelta(days=7),
         "next_week": selected + timedelta(days=7), "capacity": capacity,
-        "capacity_filter": capacity_filter, "show_type_filter": show_type,
-        "show_types": Show.SHOW_TYPES,
-        "alerts": _alerts(occurrences) if view_mode == "scheduled" else [],
+        "alerts": _alerts(occurrences) if view_mode == "schedule" else [],
     })
 
 def agenda_view(request):
@@ -679,6 +924,12 @@ def agenda_view(request):
     station = Station.objects.first()
     start = timezone.localdate()
     end = start + timedelta(days=days)
+    if station:
+        carry_week = start - timedelta(days=start.weekday())
+        last_week = (end - timedelta(days=1)) - timedelta(days=(end - timedelta(days=1)).weekday())
+        while carry_week <= last_week:
+            _apply_carry_forward(request, station, carry_week)
+            carry_week += timedelta(days=7)
     tz = ZoneInfo(station.timezone) if station else ZoneInfo("America/Detroit")
     start_at = timezone.make_aware(datetime.combine(start, datetime.min.time()), tz)
     end_at = timezone.make_aware(datetime.combine(end, datetime.min.time()), tz)
@@ -691,80 +942,102 @@ def agenda_view(request):
     for item in occurrences: item.readiness = preparation_readiness(item)
     return render(request, "calendar_agenda.html", {"title": "Upcoming agenda", "occurrences": occurrences, "selected_date": start, "alerts": _alerts(occurrences)})
 def history_view(request):
-    station = Station.objects.first(); occurrences = list(Occurrence.objects.filter(station=station).select_related("show", "episode", "weekly_assignment", "recurrence_slot", "preparation").order_by("starts_at")) if station else []
-    for item in occurrences: item.readiness = preparation_readiness(item)
-    return render(request, "history.html", {"title": "History: plans and evidence", "occurrences": occurrences, "uploads": UploadedScheduleRevision.objects.all().order_by("-uploaded_at"), "previously_scheduled": Episode.objects.filter(status="previously_scheduled").select_related("show"), "evidence": AiringEvidence.objects.all().order_by("aired_at"), "audit_events": AuditEvent.objects.all().order_by("occurred_at")})
+    tab = request.GET.get("tab", "uploads")
+    if tab not in {"uploads", "air", "audit"}: tab = "uploads"
+    uploads = UploadedScheduleRevision.objects.all().order_by("-uploaded_at")
+    evidence = AiringEvidence.objects.all().order_by("-aired_at")
+    audit_events = AuditEvent.objects.all().order_by("-occurred_at")
+    query = request.GET.get("q", "").strip()
+    if query:
+        uploads = uploads.filter(external_reference__icontains=query)
+        evidence = evidence.filter(source__icontains=query)
+        audit_events = audit_events.filter(summary__icontains=query)
+    return render(request, "history.html", {"title": "History: evidence and audit", "tab": tab, "query": query, "uploads": uploads, "evidence": evidence, "audit_events": audit_events})
 def preparation_edit(request, pk):
     occurrence = get_object_or_404(Occurrence, pk=pk)
-    obj, _ = Preparation.objects.get_or_create(occurrence=occurrence)
-    if request.method == "POST":
-        form = PreparationForm(request.POST, instance=obj)
-        expected = request.POST.get("expected_revision")
-        try: expected = int(expected)
-        except (TypeError, ValueError): expected = None
-        if expected is None or expected != obj.revision:
-            return HttpResponseBadRequest("This preparation changed in another tab; reload before saving.")
-        if form.is_valid():
-            actor = request.POST.get("actor", "owner") or "owner"
-            provenance = form.cleaned_data.get("provenance", "manual") or "manual"
-            changed = [name for name in form.changed_data if name not in {"provenance", "expected_revision"}]
-            mapping = {"source_available": "source_available", "ame_preset": "ame", "ftp_output_device": "ftp", "library_registration": "library", "slot_assignment": "slot", "uploaded_schedule_revision": "upload"}
-            if not changed:
-                audit("update", "Preparation", obj, "Preparation facts changed: none", actor)
-                return redirect("dashboard")
-            now = timezone.now()
-            updates = {"revision": expected + 1}
-            for field in changed:
-                fact = mapping[field]
-                updates[field] = form.cleaned_data[field]
-                updates[f"{fact}_actor"] = actor
-                updates[f"{fact}_at"] = now
-                updates[f"{fact}_provenance"] = provenance
-            if Preparation.objects.filter(pk=obj.pk, revision=expected).update(**updates) != 1:
-                return HttpResponseBadRequest("This preparation changed in another tab; reload before saving.")
-            obj.refresh_from_db()
-            audit("update", "Preparation", obj, f"Preparation facts changed: {', '.join(changed) or 'none'}", actor)
-            return redirect("dashboard")
-    else:
-        form = PreparationForm(instance=obj, initial={"expected_revision": obj.revision})
-    return render(request, "simple_form.html", {"form": form, "title": "Preparation checklist", "occurrence": occurrence})
+    if not occurrence.asset_id:
+        messages.info(request, "This occurrence has no asset. Live items are N/A; select an asset for media preparation.")
+        return redirect("occurrence-workbench", pk=occurrence.pk)
+    asset = occurrence.asset
+    prep, _ = AssetPreparation.objects.get_or_create(asset=asset)
+    transfer = AssetTargetTransfer.objects.filter(asset=asset).first()
+    prep_form = AssetPreparationForm(request.POST or None, instance=prep, prefix="prep")
+    if request.method == "POST" and "save_preparation" in request.POST:
+        if prep_form.is_valid():
+            prep_form.save()
+            audit("update", "AssetPreparation", prep, "Canonical asset preparation updated")
+            messages.success(request, "Canonical asset preparation saved.")
+            return redirect("occurrence-workbench", pk=occurrence.pk)
+    transfer_form = AssetTargetTransferForm(station=occurrence.station, prefix="transfer")
+    return render(request, "asset_preparation_form.html", {"occurrence": occurrence, "asset": asset, "prep_form": prep_form, "transfer_form": transfer_form})
+
+
+def transfer_create(request, asset_id):
+    asset = get_object_or_404(MediaAsset.objects.select_related("episode__show"), pk=asset_id)
+    station = asset.episode.show.station if asset.episode_id else Station.objects.first()
+    form = AssetTargetTransferForm(request.POST or None, station=station, prefix="transfer")
+    if request.method == "POST" and form.is_valid():
+        transfer = form.save(commit=False); transfer.asset = asset
+        transfer.full_clean(); transfer.save()
+        audit("create", "AssetTargetTransfer", transfer, "Canonical asset transfer created")
+        messages.success(request, "Transfer record saved.")
+        return redirect("episode-detail", pk=asset.episode_id) if asset.episode_id else redirect("dashboard")
+    return render(request, "asset_transfer_form.html", {"asset": asset, "form": form, "title": "Add asset transfer"})
+
+
+def transfer_edit(request, asset_id, pk):
+    asset = get_object_or_404(MediaAsset, pk=asset_id)
+    transfer = get_object_or_404(AssetTargetTransfer, pk=pk, asset=asset)
+    station = asset.episode.show.station if asset.episode_id else Station.objects.first()
+    form = AssetTargetTransferForm(request.POST or None, instance=transfer, station=station, prefix="transfer")
+    if request.method == "POST" and form.is_valid():
+        transfer = form.save(commit=False); transfer.asset = asset; transfer.full_clean(); transfer.save()
+        audit("update", "AssetTargetTransfer", transfer, "Canonical asset transfer updated")
+        messages.success(request, "Transfer record updated.")
+        return redirect("episode-detail", pk=asset.episode_id) if asset.episode_id else redirect("dashboard")
+    return render(request, "asset_transfer_form.html", {"asset": asset, "form": form, "title": "Edit asset transfer", "transfer": transfer})
 def programming_create(request, pk):
     occurrence = get_object_or_404(Occurrence, pk=pk); form = ProgrammingForm(request.POST or None)
     if request.method == "POST" and form.is_valid():
-        obj = form.save(commit=False); obj.occurrence=occurrence; obj.save(); audit("create", "OccurrenceProgramming", obj, "Programming confirmation"); return redirect("dashboard")
-    return render(request, "simple_form.html", {"form": form, "title": "Programming confirmation"})
+        obj, created = OccurrenceProgramming.objects.update_or_create(
+            occurrence=occurrence,
+            device=form.cleaned_data["device"],
+            defaults={"slot_assignment": form.cleaned_data.get("slot_assignment", ""), "note": form.cleaned_data.get("note", ""), "actor": request.POST.get("actor", "owner") or "owner", "provenance": request.POST.get("provenance", "manual") or "manual"},
+        )
+        audit("create" if created else "update", "OccurrenceProgramming", obj, "Programming record saved"); return redirect("occurrence-workbench", pk=occurrence.pk)
+    return render(request, "simple_form.html", {"form": form, "title": "Record device programming", "occurrence": occurrence, "device_url": "/setup/device/?next=/occurrences/%s/programming/" % occurrence.pk})
 def upload_create(request):
     station = Station.objects.first()
     initial = None
-    if request.GET.get("occurrence") and station:
-        selected_occurrence = Occurrence.objects.filter(
-            pk=request.GET["occurrence"], station=station, status="planned"
-        ).first()
-        if selected_occurrence:
-            initial = {"occurrences": [selected_occurrence.pk]}
+    if station:
+        raw_occurrences = request.GET.getlist("occurrence") + request.GET.getlist("occurrences")
+        requested_ids = []
+        for value in raw_occurrences:
+            requested_ids.extend(part.strip() for part in value.split(",") if part.strip())
+        try:
+            requested_ids = list(dict.fromkeys(int(value) for value in requested_ids))
+        except ValueError:
+            requested_ids = []
+        selected = list(Occurrence.objects.filter(pk__in=requested_ids, station=station, status="planned"))
+        if selected:
+            initial = {"occurrences": [item.pk for item in selected]}
     form = UploadForm(request.POST or None, station=station, initial=initial)
     if request.method == "POST" and form.is_valid():
         submitted = list(form.cleaned_data["occurrences"])
         if any(item.status != "planned" for item in submitted):
-            if request.POST.get("upload_preview_token"):
-                return HttpResponseBadRequest("Upload preview is invalid, expired, or stale.")
-            form.add_error("occurrences", "Only current planned occurrences may be previewed.")
-            return render(request, "simple_form.html", {"form": form, "title": "Preview and commit uploaded schedule"})
+            form.add_error("occurrences", "Only current planned occurrences may be recorded.")
+            return render(request, "simple_form.html", {"form": form, "title": "Record schedule upload"})
         selected = submitted
         if not selected:
             form.add_error("occurrences", "Select at least one current planned occurrence.")
-            return render(request, "simple_form.html", {"form": form, "title": "Preview and commit uploaded schedule"})
-        preview = {
-            "device": form.cleaned_data["device"],
-            "external_reference": form.cleaned_data["external_reference"],
-            "occurrences": selected,
-            "conflicts": _alerts(selected),
-            "token": sign_upload_preview(device_id=form.cleaned_data["device"].pk, external_reference=form.cleaned_data["external_reference"], occurrences=selected),
-        }
-        if request.POST.get("preview"):
-            return render(request, "simple_form.html", {"form": form, "title": "Preview and commit uploaded schedule", "upload_preview": preview})
+            return render(request, "simple_form.html", {"form": form, "title": "Record schedule upload"})
+        token = sign_upload_preview(
+            device_id=form.cleaned_data["device"].pk,
+            external_reference=form.cleaned_data["external_reference"],
+            occurrences=selected,
+        )
         try:
-            signed = load_upload_preview(request.POST.get("upload_preview_token", ""))
+            signed = load_upload_preview(token)
             upload, committed_occurrences = commit_upload_preview(
                 device=form.cleaned_data["device"],
                 external_reference=form.cleaned_data["external_reference"],
@@ -778,8 +1051,8 @@ def upload_create(request):
             from .services import advance_passed_premiere
             advance_passed_premiere(occurrence)
         messages.success(request, "Schedule upload snapshot committed.")
-        return redirect("history")
-    return render(request, "simple_form.html", {"form": form, "title": "Preview and commit uploaded schedule"})
+        return redirect("occurrence-workbench", pk=committed_occurrences[0].pk if committed_occurrences else submitted[0].pk)
+    return render(request, "simple_form.html", {"form": form, "title": "Record schedule upload"})
 
 def upload_transition(request, pk, state):
     if request.method != "POST" or state not in {"superseded", "invalidated"}:

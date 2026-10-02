@@ -17,7 +17,8 @@ MIDDLEWARE = [
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
 ]
-INSTALLED_APPS = ["django.contrib.contenttypes", "django.contrib.staticfiles", "django.contrib.messages", "pubtv.operations"]
+INSTALLED_APPS = ["django.contrib.contenttypes", "django.contrib.staticfiles", "django.contrib.messages", "django.forms", "pubtv.operations"]
+FORM_RENDERER = "django.forms.renderers.TemplatesSetting"
 TEMPLATES = [{
     "BACKEND": "django.template.backends.django.DjangoTemplates",
     "DIRS": [BASE_DIR / "pubtv" / "templates"],
@@ -37,7 +38,10 @@ USE_TZ = True
 STATIC_URL = "static/"
 STATICFILES_DIRS = [BASE_DIR / "pubtv" / "static"]
 STATIC_ROOT = DATA_DIR / "staticfiles"
-STATICFILES_STORAGE = "django.contrib.staticfiles.storage.ManifestStaticFilesStorage"
+STORAGES = {
+    "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
+    "staticfiles": {"BACKEND": "pubtv.config.static.DevelopmentManifestStaticFilesStorage"},
+}
 MESSAGE_STORAGE = "django.contrib.messages.storage.cookie.CookieStorage"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 DATA_UPLOAD_MAX_MEMORY_SIZE = 2_000_000

@@ -21,18 +21,16 @@ class BrandingAssetsTests(unittest.TestCase):
         icon = self.root / "pubtv" / "static" / "images" / "channeldex-app-icon.icns"
         self.assertEqual(icon.read_bytes()[:4], b"icns")
 
-    def test_dashboard_landing_uses_supplied_tagline_lockup_and_setup_cta(self):
+    def test_today_uses_app_navigation_and_setup_cta_without_landing_hero(self):
         dashboard = (self.root / "pubtv" / "templates" / "dashboard.html").read_text(encoding="utf-8")
-        self.assertIn("channeldex-full-logo-color-tagline.png", dashboard)
-        self.assertIn("ChannelDex – Television Programming Management", dashboard)
+        self.assertIn("Today · ChannelDex", dashboard)
         self.assertIn("{% url 'setup-station' %}", dashboard)
-        self.assertIn('class="landing-hero"', dashboard)
+        self.assertNotIn('class="landing-hero"', dashboard)
 
     def test_configured_dashboard_exposes_core_workflow_links(self):
         dashboard = (self.root / "pubtv" / "templates" / "dashboard.html").read_text(encoding="utf-8")
-        for url_name in ("day-view", "assignment-create", "show-list", "history"):
-            self.assertIn("{% url '" + url_name + "' %}", dashboard)
-        self.assertIn('class="workflow-grid"', dashboard)
+        self.assertIn("{% url 'occurrence-create' %}", dashboard)
+        self.assertIn('class="timeline-list"', dashboard)
 
     def test_dashboard_landing_asset_is_copied_without_substitution(self):
         source = self.root / "creative" / "Finished Creative Assets" / "PNGs" / "ChannelDex Full Logo Color with Tagline.png"

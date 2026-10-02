@@ -4,8 +4,8 @@ from django import forms
 from django.utils import timezone
 
 from .models import (
-    AiringEvidence, Delivery, Device, Episode, EpisodeWorkflowMilestone,
-    MediaAsset, Occurrence, OccurrenceProgramming, Preparation, Producer,
+    AiringEvidence, AssetPreparation, AssetTargetTransfer, Delivery, Device, Episode, EpisodeWorkflowMilestone,
+    MediaAsset, Occurrence, OccurrenceProgramming, Producer,
     RecurrenceSlot, Show, Station, UploadedScheduleRevision,
     WeeklyEpisodeAssignment,
 )
@@ -14,13 +14,21 @@ from .models import (
 class DurationWidget(forms.MultiWidget):
     """Owner-facing hours/minutes controls backed by integer seconds."""
 
-    def __init__(self, attrs=None):
+    template_name = "widgets/duration.html"
+
+    def __init__(self, attrs=None, show_seconds=False):
+        self.show_seconds = show_seconds
         widgets = [
-            forms.NumberInput(attrs={"min": 0, "step": 1, "aria-label": "Hours", "placeholder": "Hours"}),
-            forms.NumberInput(attrs={"min": 0, "max": 59, "step": 1, "aria-label": "Minutes", "placeholder": "Minutes"}),
-            forms.HiddenInput(),
+            forms.NumberInput(attrs={"min": 0, "step": 1, "aria-label": "Hours"}),
+            forms.NumberInput(attrs={"min": 0, "max": 59, "step": 1, "aria-label": "Minutes"}),
+            forms.NumberInput(attrs={"min": 0, "max": 59, "step": 1, "aria-label": "Seconds"}) if show_seconds else forms.HiddenInput(),
         ]
         super().__init__(widgets, attrs)
+
+    def get_context(self, name, value, attrs):
+        context = super().get_context(name, value, attrs)
+        context["widget"]["show_seconds"] = self.show_seconds
+        return context
 
     def decompress(self, value):
         if value in (None, ""):
@@ -38,13 +46,14 @@ class DurationWidget(forms.MultiWidget):
 class DurationField(forms.MultiValueField):
     widget = DurationWidget
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, show_seconds=False, **kwargs):
         fields = [
             forms.IntegerField(min_value=0, required=False),
             forms.IntegerField(min_value=0, max_value=59, required=False),
             forms.IntegerField(min_value=0, max_value=59, required=False),
         ]
-        kwargs.setdefault("help_text", "Enter hours and minutes. Existing second precision is preserved.")
+        kwargs.setdefault("widget", DurationWidget(show_seconds=show_seconds))
+        kwargs.setdefault("help_text", "Enter hours, minutes, and seconds." if show_seconds else "Enter hours and minutes. Existing second precision is preserved.")
         super().__init__(fields=fields, require_all_fields=False, *args, **kwargs)
 
     def compress(self, data_list):
@@ -65,7 +74,7 @@ class OccurrenceForm(forms.ModelForm):
 
     class Meta:
         model = Occurrence
-        fields = ["item_type", "label", "show", "episode", "starts_at", "planned_duration_seconds", "status", "reason"]
+        fields = ["item_type", "label", "show", "episode", "asset", "starts_at", "planned_duration_seconds", "status", "reason"]
         labels = {"starts_at": "Start date and time"}
         help_texts = {
             "starts_at": "Interpreted in the ChannelDex station timezone (America/Detroit).",
@@ -79,6 +88,28 @@ class OccurrenceForm(forms.ModelForm):
         if station:
             self.fields["show"].queryset = Show.objects.filter(station=station)
             self.fields["episode"].queryset = Episode.objects.filter(show__station=station)
+            self.fields["asset"].queryset = MediaAsset.objects.filter(episode__show__station=station)
+        self.fields["label"].required = False
+        self.fields["label"].help_text = "Used for station IDs, PSAs, filler, live events, and other non-episode items. Episode labels are derived."
+
+    def clean(self):
+        data = super().clean()
+        item_type, show, episode, asset = data.get("item_type"), data.get("show"), data.get("episode"), data.get("asset")
+        if item_type == "episode":
+            if not episode:
+                self.add_error("episode", "Choose an episode for an episode item.")
+            else:
+                data["show"] = episode.show
+                data["label"] = episode.title
+                if asset and asset.episode_id != episode.pk:
+                    self.add_error("asset", "Choose an asset belonging to this episode.")
+        elif item_type == "live" and asset:
+            self.add_error("asset", "Live items cannot have a media asset.")
+        elif asset and episode and asset.episode_id != episode.pk:
+            self.add_error("asset", "Choose an asset belonging to this episode.")
+        elif item_type != "episode" and not (data.get("label") or "").strip():
+            self.add_error("label", "Enter a label for this non-episode item.")
+        return data
 
 
 class StationForm(forms.ModelForm):
@@ -94,6 +125,21 @@ class StationForm(forms.ModelForm):
         return name
 
 
+class CarryForwardSettingsForm(forms.ModelForm):
+    class Meta:
+        model = Station
+        fields = ["carry_forward_unassigned_episodes"]
+        labels = {
+            "carry_forward_unassigned_episodes": "Keep the most recent episode in its weekly slots until another episode is explicitly planned",
+        }
+        help_texts = {
+            "carry_forward_unassigned_episodes": (
+                "Applies only to current and future unassigned weeks. Automatically created plans are labeled, "
+                "an explicit episode or No program choice overrides them, and turning this off does not erase existing plans."
+            ),
+        }
+
+
 class DeviceForm(forms.ModelForm):
     class Meta:
         model = Device
@@ -104,11 +150,11 @@ class DeviceForm(forms.ModelForm):
 class ShowForm(forms.ModelForm):
     class Meta:
         model = Show
-        fields = ["station", "title", "description", "code", "show_type", "show_type_other", "producer_name", "producer_phone", "producer_email", "website", "youtube", "facebook", "instagram", "primary_delivery_method", "primary_delivery_other"]
+        fields = ["station", "title", "description", "code", "show_type", "show_type_other", "primary_producer", "website", "youtube", "facebook", "instagram", "primary_delivery_method", "primary_delivery_other"]
         labels = {
             "code": "Show code", "youtube": "YouTube link",
             "facebook": "Facebook link", "instagram": "Instagram link",
-            "primary_delivery_other": "Describe other delivery method",
+            "primary_delivery_other": "Describe other delivery method", "primary_producer": "Primary producer",
             "show_type_other": "Describe other show type",
         }
         help_texts = {
@@ -121,6 +167,7 @@ class ShowForm(forms.ModelForm):
         super().__init__(*args, **kwargs)
         if station:
             self.fields["station"].queryset = Station.objects.filter(pk=station.pk)
+            self.fields["primary_producer"].queryset = Producer.objects.filter(station=station)
 
     def clean(self):
         data = super().clean()
@@ -157,29 +204,25 @@ class ProducerForm(forms.ModelForm):
 
 
 class EpisodeForm(forms.ModelForm):
-    runtime_seconds = DurationField(label="Episode runtime", required=False)
+    runtime_seconds = DurationField(label="Episode runtime", required=False, show_seconds=True)
 
     class Meta:
         model = Episode
-        fields = ["show", "title", "producer", "intended_air_order", "intended_premiere_date", "runtime_seconds", "received_at"]
+        fields = ["show", "title", "producer", "intended_air_order", "intended_premiere_date", "runtime_seconds"]
         labels = {
             "intended_air_order": "Planned episode order",
             "intended_premiere_date": "Planned premiere date",
-            "received_at": "Episode received date and time",
         }
         help_texts = {
             "producer": "Choose the producer by name. The internal record ID is never used as their display name.",
             "intended_air_order": "Lower numbers air first; producer direction may override the usual FIFO order.",
-            "received_at": "When ChannelDex received or accepted the episode – not when it aired or was encoded.",
         }
         widgets = {
             "intended_premiere_date": forms.DateInput(attrs={"type": "date"}),
-            "received_at": forms.DateTimeInput(attrs={"type": "datetime-local"}, format="%Y-%m-%dT%H:%M"),
         }
 
     def __init__(self, *args, station=None, **kwargs):
         super().__init__(*args, **kwargs)
-        self.fields["received_at"].input_formats = ["%Y-%m-%dT%H:%M"]
         if station:
             self.fields["show"].queryset = Show.objects.filter(station=station)
             self.fields["producer"].queryset = Producer.objects.filter(station=station)
@@ -219,13 +262,18 @@ class EpisodeMilestoneForm(forms.ModelForm):
 
 
 class AssetForm(forms.ModelForm):
-    runtime_seconds = DurationField(label="Media runtime", required=False)
+    runtime_seconds = DurationField(
+        label="Asset duration",
+        required=False,
+        show_seconds=True,
+        help_text="Optional. Record the exact hours, minutes, and seconds for this source or encoded asset.",
+    )
     asset_id = forms.CharField(label="Asset ID", required=False, disabled=True)
 
     class Meta:
         model = MediaAsset
-        fields = ["episode", "file_name", "label", "kind", "version", "runtime_seconds", "smb_reference"]
-        labels = {"file_name": "File name", "label": "Legacy display label"}
+        fields = ["episode", "file_name", "kind", "version", "runtime_seconds", "smb_reference"]
+        labels = {"file_name": "File name"}
         widgets = {"asset_id": forms.TextInput(attrs={"readonly": True}), "label": forms.HiddenInput()}
         help_texts = {"smb_reference": "A private metadata reference only; ChannelDex does not mount, fetch, move, or rename the file."}
 
@@ -242,11 +290,10 @@ class AssetForm(forms.ModelForm):
 
     def clean(self):
         data = super().clean()
-        filename = (data.get("file_name") or data.get("label") or "").strip()
+        filename = (data.get("file_name") or "").strip()
         if not filename:
             self.add_error("file_name", "Enter the file name for this asset.")
         data["file_name"] = filename
-        data["label"] = filename
         return data
 
 
@@ -334,6 +381,10 @@ class AssignmentForm(forms.ModelForm):
 
     def __init__(self, *args, station=None, **kwargs):
         super().__init__(*args, **kwargs)
+        # The model preserves nullable legacy premiere dates, but every new or
+        # corrected owner-entered cycle needs a concrete date. Without this,
+        # an empty date reaches database-only fields and can fail with a 500.
+        self.fields["premiere_date"].required = True
         self.fields["show"].widget.attrs["data-cycle-show"] = "true"
         if station:
             self.fields["show"].queryset = Show.objects.filter(station=station)
@@ -343,6 +394,11 @@ class AssignmentForm(forms.ModelForm):
         show = data.get("show")
         premiere_date = data.get("premiere_date")
         episode = data.get("episode")
+        if show and not premiere_date:
+            self.add_error(
+                "premiere_date",
+                "Choose the premiere date. If no date is available, add one active premiere weekly time for this show first.",
+            )
         if show and episode and episode.show_id != show.pk:
             self.add_error("episode", "Choose an episode from this show.")
         if show and premiere_date:
@@ -365,29 +421,69 @@ class AssignmentForm(forms.ModelForm):
         return data
 
 
-class PreparationForm(forms.ModelForm):
-    expected_revision = forms.IntegerField(widget=forms.HiddenInput, required=False)
-
+class AssetPreparationForm(forms.ModelForm):
     class Meta:
-        model = Preparation
-        fields = ["source_available", "ame_preset", "ftp_output_device", "library_registration", "slot_assignment", "uploaded_schedule_revision"]
+        model = AssetPreparation
+        fields = ["source_available", "source_available_at", "ame_preset", "ame_details", "encoded_at"]
         labels = {
+            "source_available": "Source file available",
+            "source_available_at": "Source available at",
             "ame_preset": "Adobe Media Encoder preset",
-            "ftp_output_device": "FTP destination device",
-            "library_registration": "WinLGX library registration",
-            "slot_assignment": "WinLGX playback slot",
-            "uploaded_schedule_revision": "Uploaded schedule revision",
+            "ame_details": "Encoding machine and output notes",
+            "encoded_at": "Encoding completed at",
         }
         help_texts = {
-            "library_registration": "Record the name or identifier used when registering the encoded file in WinLGX.",
-            "slot_assignment": "Record the WinLGX playback slot assigned to the registered file.",
+            "source_available": "This belongs to the exact asset version and carries forward when that same asset is reused.",
+            "ame_preset": "Record the standard preset name and version used for this encoded rendition.",
+            "ame_details": "Optional machine, output, or exception notes; do not repeat schedule or playback-slot information here.",
+            "encoded_at": "When this exact encoded rendition finished.",
         }
+        widgets = {"source_available_at": forms.DateTimeInput(attrs={"type": "datetime-local"}, format="%Y-%m-%dT%H:%M"), "encoded_at": forms.DateTimeInput(attrs={"type": "datetime-local"}, format="%Y-%m-%dT%H:%M")}
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        for name in ("source_available_at", "encoded_at"):
+            self.fields[name].input_formats = ["%Y-%m-%dT%H:%M"]
+
+
+class AssetTargetTransferForm(forms.ModelForm):
+    class Meta:
+        model = AssetTargetTransfer
+        fields = ["device", "ftp_details", "library_registration", "transferred_at", "transferred_actor"]
+        labels = {
+            "ftp_details": "FTP transfer details",
+            "library_registration": "WinLGX library registration",
+            "transferred_at": "Transfer completed at",
+            "transferred_actor": "Recorded by",
+        }
+        help_texts = {
+            "device": "Choose the exact playback device that received this asset.",
+            "ftp_details": "Record the FTP destination or transfer confirmation for this device.",
+            "library_registration": "Record the WinLGX library name or identifier assigned after transfer.",
+        }
+        widgets = {"transferred_at": forms.DateTimeInput(attrs={"type": "datetime-local"}, format="%Y-%m-%dT%H:%M")}
+
+    def __init__(self, *args, station=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        if station:
+            self.fields["device"].queryset = Device.objects.all().order_by("name")
+        self.fields["transferred_at"].input_formats = ["%Y-%m-%dT%H:%M"]
+
+
+class PreparationForm(AssetPreparationForm):
+    """Deprecated import compatibility; canonical asset preparation only."""
+    pass
 
 
 class ProgrammingForm(forms.ModelForm):
     class Meta:
         model = OccurrenceProgramming
-        fields = ["device", "note"]
+        fields = ["device", "slot_assignment", "note"]
+        labels = {"slot_assignment": "WinLGX playback slot"}
+        help_texts = {
+            "device": "Choose the device programmed for this specific scheduled occurrence.",
+            "slot_assignment": "Record the WinLGX slot or schedule position used for this occurrence; it does not carry forward to replays.",
+        }
 
 
 class UploadForm(forms.ModelForm):

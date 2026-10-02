@@ -24,8 +24,9 @@ from pubtv.operations.models import (
 class MetadataFormsTests(SimpleTestCase):
     def test_show_and_producer_forms_expose_new_contact_fields(self):
         self.assertIn("description", ShowForm().fields)
-        self.assertIn("producer_phone", ShowForm().fields)
-        self.assertIn("producer_email", ShowForm().fields)
+        self.assertIn("primary_producer", ShowForm().fields)
+        self.assertNotIn("producer_phone", ShowForm().fields)
+        self.assertNotIn("producer_email", ShowForm().fields)
         self.assertNotIn("producer_contact", ShowForm().fields)
         self.assertEqual(set(ProducerForm().fields) & {"phone", "email"}, {"phone", "email"})
         self.assertNotIn("contact", ProducerForm().fields)
@@ -33,8 +34,11 @@ class MetadataFormsTests(SimpleTestCase):
     def test_preparation_form_uses_clear_labels_without_aggregate_provenance(self):
         form = PreparationForm()
         self.assertNotIn("provenance", form.fields)
-        self.assertEqual(form.fields["library_registration"].label, "WinLGX library registration")
-        self.assertEqual(form.fields["slot_assignment"].label, "WinLGX playback slot")
+        self.assertNotIn("library_registration", form.fields)
+        self.assertNotIn("slot_assignment", form.fields)
+        self.assertIn("source_available_at", form.fields)
+        self.assertEqual(form.fields["source_available_at"].label, "Source available at")
+        self.assertEqual(form.fields["ame_preset"].label, "Adobe Media Encoder preset")
 
 
 class HumanReadableLabelsTests(TestCase):
@@ -67,7 +71,7 @@ class HumanReadableLabelsTests(TestCase):
         self.assertIn("episode4.mov", str(asset))
         self.assertIn("January schedule", str(upload))
         self.assertIn("Community Hour", str(slot))
-        self.assertIn("Community Hour · Episode 4 · 2026-01-05 02:00", str(self.occurrence))
+        self.assertIn("Community Hour · Episode 4 · 2026-01-05 2:00 a.m.", str(self.occurrence))
 
     def test_recurrence_slot_label_accepts_unsaved_string_time(self):
         slot = RecurrenceSlot(

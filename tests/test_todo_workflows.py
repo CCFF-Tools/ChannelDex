@@ -9,9 +9,10 @@ from django.utils import timezone
 
 from pubtv.operations.forms import AssignmentForm, DeliveryForm, DurationWidget, EpisodeForm, ShowForm, SlotForm
 from pubtv.operations.models import (
-    AiringEvidence, Device, Delivery, Episode, EpisodeWorkflowMilestone,
-    Occurrence, Preparation, Producer, RecurrenceSlot, Show, Station, UploadedOccurrenceCoverage,
-    UploadedScheduleRevision, WeeklyEpisodeAssignment, MediaAsset, AuditEvent,
+    AiringEvidence, AssetPreparation, AssetTargetTransfer, Device, Delivery, Episode,
+    EpisodeWorkflowMilestone, Occurrence, OccurrenceProgramming, Preparation, Producer,
+    RecurrenceSlot, Show, Station, UploadedOccurrenceCoverage, UploadedScheduleRevision,
+    WeeklyEpisodeAssignment, MediaAsset, AuditEvent,
 )
 from pubtv.operations.services import preparation_readiness, calendar_capacity
 
@@ -127,30 +128,39 @@ class TodoWorkflowTests(TestCase):
         self.assertNotEqual(replacement.pk, original.pk)
         self.assertEqual(replacement.episode_id, other.pk)
 
-        self.assertEqual(client.get(f"/occurrences/{replacement.pk}/preparation/").status_code, 200)
+        self.assertEqual(client.get(f"/occurrences/{replacement.pk}/preparation/").status_code, 302)
         view_only_update = {**rerun_payload, "episode": self.episode.pk}
         self.assertEqual(client.post("/assignments/new/", view_only_update).status_code, 302)
         replacement.refresh_from_db()
         self.assertEqual(replacement.episode_id, self.episode.pk)
 
         other = Episode.objects.create(show=self.show, title="Episode 3")
-        preparation = Preparation.objects.get(occurrence=replacement)
-        preparation.source_available = "yes"
-        preparation.save(update_fields=["source_available"])
+        self.assertFalse(Preparation.objects.filter(occurrence=replacement).exists())
         blocked = {**rerun_payload, "episode": other.pk}
-        self.assertEqual(client.post("/assignments/new/", blocked).status_code, 400)
+        self.assertEqual(client.post("/assignments/new/", blocked).status_code, 302)
         replacement.refresh_from_db()
-        self.assertEqual(replacement.episode_id, self.episode.pk)
+        self.assertEqual(replacement.episode_id, other.pk)
 
     def test_preparation_readiness_normal_and_live(self):
         normal = Occurrence.objects.create(station=self.station, show=self.show, episode=self.episode, item_type="episode", label="E", starts_at=datetime(2026,1,5,12,tzinfo=dt_timezone.utc), planned_duration_seconds=1800)
         self.assertEqual(preparation_readiness(normal)["label"], "0/6 preparation facts")
-        Preparation.objects.create(occurrence=normal, source_available="yes", ame_preset="a", ftp_output_device="f", library_registration="l", slot_assignment="s", uploaded_schedule_revision="u")
+        asset = MediaAsset.objects.create(episode=self.episode, file_name="episode.mov", kind="encoded")
+        normal.asset = asset
+        normal.save(update_fields=["asset"], skip_revision=True)
+        device = Device.objects.create(name="Ultra-Nexus")
+        AssetPreparation.objects.create(asset=asset, source_available="yes", source_available_at=normal.starts_at, ame_preset="a")
+        AssetTargetTransfer.objects.create(asset=asset, device=device, ftp_details="f", library_registration="l")
+        OccurrenceProgramming.objects.create(occurrence=normal, device=device, slot_assignment="s")
+        upload = UploadedScheduleRevision.objects.create(device=device, external_reference="u")
+        UploadedOccurrenceCoverage.objects.create(upload=upload, occurrence=normal, occurrence_revision=normal.revision)
         self.assertTrue(preparation_readiness(normal)["ready"])
         live = Occurrence.objects.create(station=self.station, item_type="live", label="Live", starts_at=normal.starts_at, planned_duration_seconds=1800)
         self.assertEqual(preparation_readiness(live)["label"], "4/6 preparation facts")
-        Preparation.objects.create(occurrence=live, slot_assignment="slot", uploaded_schedule_revision="upload")
-        self.assertEqual(preparation_readiness(live)["label"], "6/6 preparation facts")
+        OccurrenceProgramming.objects.create(occurrence=live, device=device, slot_assignment="slot")
+        self.assertEqual(preparation_readiness(live)["label"], "5/6 preparation facts")
+        live_upload = UploadedScheduleRevision.objects.create(device=device, external_reference="live-upload")
+        UploadedOccurrenceCoverage.objects.create(upload=live_upload, occurrence=live, occurrence_revision=live.revision)
+        self.assertTrue(preparation_readiness(live)["ready"])
 
     def test_day_cross_midnight_and_dst_capacity_totals(self):
         Occurrence.objects.create(station=self.station, item_type="filler", label="Overnight", starts_at=datetime(2026,1,5,4,59,tzinfo=dt_timezone.utc), planned_duration_seconds=120)
@@ -186,6 +196,7 @@ class TodoWorkflowTests(TestCase):
             if item["status"] == "reserved" and item["start"].hour == 7
         )
         self.assertEqual(matched_slot["label"], "Reserved (runtime not determined)")
+        self.assertEqual(matched_slot["show_label"], "Street Talk")
 
     def test_capacity_uses_elapsed_time_across_dst_and_plain_labels_for_timed_items(self):
         eastern = ZoneInfo("America/Detroit")
@@ -228,7 +239,8 @@ class TodoWorkflowTests(TestCase):
         starts = datetime(2026, 1, 5, 7, tzinfo=ZoneInfo("America/Detroit"))
         Occurrence.objects.create(station=self.station, show=self.show, episode=self.episode, item_type="episode", label="E", starts_at=starts, planned_duration_seconds=60)
         self.assertContains(Client().get("/day/?date=2026-01-05&capacity=reserved"), "Reserved")
-        self.assertContains(Client().get("/week/?date=2026-01-05&view=availability&capacity=available"), "Available")
+        self.assertContains(Client().get("/week/?date=2026-01-05&view=capacity"), "Available")
+        self.assertContains(Client().get("/week/?date=2026-01-12&view=capacity"), "Street Talk")
         self.show.show_type = "arts_and_culture"
         self.show.save(update_fields=["show_type"])
         self.assertContains(Client().get("/shows/?show_type=arts_and_culture"), "Street Talk")
@@ -244,24 +256,36 @@ class TodoWorkflowTests(TestCase):
         )
         client = Client()
 
-        scheduled = client.get("/week/?date=2026-01-05")
+        scheduled = client.get("/week/?date=2026-01-05&view=schedule")
         self.assertEqual(scheduled.status_code, 200)
         scheduled_body = scheduled.content.decode()
-        self.assertIn("Week premiere", scheduled_body)
-        self.assertIn('name="show_type"', scheduled_body)
-        self.assertNotIn('class="capacity-interval"', scheduled_body)
-        self.assertNotIn("Virtual-channel filler (reserved)", scheduled_body)
+        self.assertIn("Street Talk · Episode 1", scheduled_body)
+        self.assertNotIn('name="show_type"', scheduled_body)
+        self.assertIn('class="capacity-block available"', scheduled_body)
+        self.assertNotIn('class="capacity-block reserved"', scheduled_body)
+        self.assertIn('class="week-block scheduled-block"', scheduled_body)
         self.assertIn('name="view"', scheduled_body)
 
-        availability = client.get("/week/?date=2026-01-05&view=availability&capacity=reserved")
-        self.assertEqual(availability.status_code, 200)
-        availability_body = availability.content.decode()
-        self.assertNotIn("Week premiere", availability_body)
-        self.assertNotIn('name="show_type"', availability_body)
-        self.assertIn('class="capacity-interval"', availability_body)
-        self.assertIn("Virtual-channel filler (reserved)", availability_body)
-        self.assertIn('name="capacity"', availability_body)
-        self.assertIn('value="availability"', availability_body)
+        capacity = client.get("/week/?date=2026-01-05&view=capacity")
+        self.assertEqual(capacity.status_code, 200)
+        capacity_body = capacity.content.decode()
+        self.assertNotIn("Street Talk · Episode 1", capacity_body)
+        self.assertIn('class="capacity-block available"', capacity_body)
+        self.assertIn('class="capacity-block reserved"', capacity_body)
+        self.assertEqual(capacity_body.count('class="capacity-block reserved"'), 1)
+        self.assertNotIn('class="week-block scheduled-block"', capacity_body)
+        self.assertIn('value="capacity" selected', capacity_body)
+
+        default = client.get("/week/?date=2026-01-05")
+        default_body = default.content.decode()
+        self.assertIn('value="capacity" selected', default_body)
+        self.assertNotIn('value="schedule" selected', default_body)
+        self.assertLess(default_body.index('value="capacity"'), default_body.index('value="schedule"'))
+
+        # Old bookmarks map to the capacity-only view instead of restoring the
+        # former redundant episode-plus-reservation overlay.
+        legacy = client.get("/week/?date=2026-01-05&view=availability")
+        self.assertNotIn("Street Talk · Episode 1", legacy.content.decode())
 
     def test_calendar_warnings_context_and_history_readiness(self):
         today = timezone.localdate()
@@ -277,9 +301,9 @@ class TodoWorkflowTests(TestCase):
             starts_at=starts_at + timedelta(seconds=30),
             planned_duration_seconds=60,
         )
-        self.assertContains(Client().get(f"/week/?date={today.isoformat()}"), "Warnings")
+        self.assertContains(Client().get(f"/week/?date={today.isoformat()}&view=schedule"), "Warnings")
         self.assertContains(Client().get("/agenda/?days=31"), "New premiere")
-        self.assertContains(Client().get("/history/"), "0/6 preparation facts")
+        self.assertContains(Client().get(f"/?date={today.isoformat()}"), "0/6 preparation facts")
 
     def test_named_producer_flow_and_private_optional_membership(self):
         client = Client()
@@ -314,11 +338,11 @@ class TodoWorkflowTests(TestCase):
         self.assertEqual(client.post(f"/episodes/{self.episode.pk}/workflow/new/", received).status_code, 302)
         self.assertEqual(client.post(f"/episodes/{self.episode.pk}/workflow/new/", {**received, "stage": "encoded"}).status_code, 302)
         blocked = client.post(f"/episodes/{self.episode.pk}/workflow/new/", {**received, "stage": "downloaded"})
-        self.assertEqual(blocked.status_code, 200)
-        self.assertEqual(EpisodeWorkflowMilestone.objects.count(), 2)
+        self.assertEqual(blocked.status_code, 302)
+        self.assertEqual(EpisodeWorkflowMilestone.objects.count(), 0)
         self.episode.refresh_from_db()
         self.assertEqual(self.episode.status, "pending")
-        self.assertEqual(self.episode.latest_workflow_stage, "Encoded")
+        self.assertEqual(self.episode.latest_workflow_stage, "Not started")
 
     def test_weekly_time_manager_uses_names_local_controls_and_role_snapshots(self):
         self.slot.delete()
@@ -333,10 +357,10 @@ class TodoWorkflowTests(TestCase):
         replay = {**premiere, "weekday": 4, "start_time": "20:00"}
         replay.pop("is_premiere")
         self.assertEqual(client.post(f"/slots/new/?show={self.show.pk}", replay).status_code, 302)
-        manager = client.get(f"/shows/{self.show.pk}/slots/")
+        manager = client.get(f"/shows/{self.show.pk}/")
         self.assertContains(manager, "Wednesday")
         self.assertContains(manager, "Friday")
-        self.assertContains(manager, "7:00 PM")
+        self.assertContains(manager, "7:00 p.m.")
         self.assertContains(manager, "30 min")
         assignment = WeeklyEpisodeAssignment.objects.create(
             show=self.show, week_start=date(2026, 1, 5), episode=self.episode,
@@ -372,7 +396,7 @@ class TodoWorkflowTests(TestCase):
         replacement = RecurrenceSlot.objects.exclude(pk=original_pk).get()
         self.assertEqual((original.weekday, original.start_time, original.duration_seconds), (0, time(7), 1800))
         self.assertIsNotNone(original.active_until)
-        self.assertEqual((replacement.weekday, replacement.start_time, replacement.duration_seconds), (1, time(8), 1800))
+        self.assertEqual((replacement.weekday, replacement.start_time, replacement.duration_seconds), (1, time(8), 3600))
         occurrence = Occurrence.objects.get(weekly_assignment=assignment)
         self.assertEqual(occurrence.schedule_role, "premiere")
 
@@ -385,15 +409,15 @@ class TodoWorkflowTests(TestCase):
         self.assertEqual(assignment.fields["premiere_date"].widget.input_type, "date")
         episode = EpisodeForm(station=self.station)
         self.assertEqual(episode.fields["intended_premiere_date"].widget.input_type, "date")
-        self.assertEqual(episode.fields["received_at"].widget.input_type, "datetime-local")
+        self.assertNotIn("received_at", episode.fields)
         self.assertIsInstance(episode.fields["runtime_seconds"].widget, DurationWidget)
 
     def test_navigation_groups_workflows_and_quit_is_separate(self):
         response = Client().get("/")
-        self.assertContains(response, "Dashboard")
+        self.assertContains(response, "Today")
         self.assertContains(response, "Schedule")
-        self.assertContains(response, "Catalog")
-        self.assertContains(response, "Operations")
+        self.assertContains(response, "Shows")
+        self.assertContains(response, "History")
         self.assertContains(response, "Settings")
         self.assertNotContains(response, "Quit ChannelDex")
 
@@ -474,7 +498,7 @@ class TodoWorkflowTests(TestCase):
 
     def test_now_buttons_and_conditional_other_delivery_field_are_rendered(self):
         episode_form = Client().get(f"/episodes/new/?show={self.show.pk}")
-        self.assertContains(episode_form, 'data-now-for="id_received_at"')
+        self.assertNotContains(episode_form, 'data-now-for="id_received_at"')
         delivery_form = Client().get(f"/deliveries/new/?episode={self.episode.pk}")
         self.assertContains(delivery_form, 'data-now-for="id_notified_at"')
         self.assertContains(delivery_form, 'data-now-for="id_received_at"')

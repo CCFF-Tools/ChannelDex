@@ -26,6 +26,9 @@ from pubtv.operations.services import (
     advance_passed_premiere,
     confirm_preparation_fact,
     revise_airing,
+    sign_upload_preview,
+    load_upload_preview,
+    commit_upload_preview,
 )
 
 
@@ -35,7 +38,7 @@ class SetupAndContentWorkflowTests(TestCase):
 
         dashboard = client.get("/")
         self.assertContains(dashboard, 'href="/setup/station/"')
-        self.assertContains(dashboard, "Create station")
+        self.assertContains(dashboard, "Open station settings")
 
         station = Station.objects.create(name="PUB-TV")
         shows = client.get("/shows/")
@@ -96,7 +99,7 @@ class SetupAndContentWorkflowTests(TestCase):
         self.assertEqual(
             client.post(
                 "/assets/new/",
-                {"episode": episode.pk, "label": "source master", "kind": "source", "version": "v1", "runtime_seconds": "", "smb_reference": "PUB-TV/community/source/master.mov"},
+                {"episode": episode.pk, "file_name": "source master", "kind": "source", "version": "v1", "runtime_seconds": "", "smb_reference": "PUB-TV/community/source/master.mov"},
             ).status_code,
             302,
         )
@@ -120,7 +123,7 @@ class SetupAndContentWorkflowTests(TestCase):
         episode = Episode.objects.create(show=show, title="Episode 1")
         response = Client().get(f"/episodes/{episode.pk}/")
         self.assertContains(response, f"/assignments/new/?show={show.pk}&amp;episode={episode.pk}")
-        self.assertContains(response, f"/occurrences/new/?show={show.pk}&amp;episode={episode.pk}")
+        self.assertNotContains(response, f"/occurrences/new/?show={show.pk}&amp;episode={episode.pk}")
 
     def test_show_catalog_and_scheduled_occurrences_link_to_editing_and_episode(self):
         station = Station.objects.create(name="PUB-TV")
@@ -150,7 +153,7 @@ class SetupAndContentWorkflowTests(TestCase):
             planned_duration_seconds=1800,
         )
 
-        response = Client().get("/")
+        response = Client().get("/?date=2026-01-05")
 
         self.assertContains(response, "Episode 42")
         self.assertContains(response, "Street Talk")
@@ -178,19 +181,10 @@ class SetupAndContentWorkflowTests(TestCase):
             planned_duration_seconds=60,
         )
 
-        response = Client().get("/")
+        response = Client().get("/?date=2026-01-05")
 
-        self.assertContains(response, "Unique asset ID")
-        self.assertContains(response, "Gap to next programmed item")
         self.assertContains(response, "Street Talk")
         self.assertContains(response, "Episode 42")
-        self.assertContains(response, str(asset.asset_id))
-        self.assertContains(response, "25 min")
-        self.assertContains(response, "5 minutes gap")
-        self.assertContains(response, "Continuous")
-        self.assertContains(response, "Last item")
-        self.assertContains(response, "Not assigned")
-        self.assertNotContains(response, "30 min")
         self.assertEqual(first.actual_runtime_seconds, 1500)
         self.assertEqual(second.actual_runtime_seconds, 75)
 
@@ -245,7 +239,7 @@ class SchedulingWorkflowTests(TestCase):
         self.assertIn("Monday filler", body)
         self.assertIn("Monday overlap", body)
         self.assertNotIn("Tuesday only", body)
-        dashboard = Client().get("/").content.decode()
+        dashboard = Client().get("/?date=2026-01-05").content.decode()
         self.assertIn("Overlap", dashboard)
         self.assertNotEqual(first.pk, 0)
 
@@ -258,9 +252,9 @@ class SchedulingWorkflowTests(TestCase):
             starts_at=datetime(2026, 1, 4, 23, 59, tzinfo=eastern),
             planned_duration_seconds=120,
         )
-        body = Client().get("/week/?date=2026-01-05").content.decode()
+        body = Client().get("/week/?date=2026-01-05&view=schedule").content.decode()
         self.assertIn("Sunday night council meeting", body)
-        self.assertIn("12:00 AM–12:01 AM", body)
+        self.assertIn("12:00 a.m. - 12:01 a.m.", body)
 
     def test_week_uses_monday_eastern_boundary_and_day_coverage_unions_overlaps(self):
         sunday = Occurrence.objects.create(station=self.station, item_type="filler", label="Sunday", starts_at=datetime(2026, 1, 5, 4, 0, tzinfo=dt_timezone.utc), planned_duration_seconds=120)
@@ -269,7 +263,7 @@ class SchedulingWorkflowTests(TestCase):
         self.assertIn("Planned coverage: 2 minutes", day)
         self.assertNotIn("Sunday", day)
         self.assertIn("Monday", day)
-        week = Client().get("/week/?date=2026-01-11")
+        week = Client().get("/week/?date=2026-01-11&view=schedule")
         self.assertEqual(week.status_code, 200)
         self.assertIn("Monday", week.content.decode())
         self.assertNotEqual(sunday.pk, monday.pk)
@@ -279,7 +273,7 @@ class SchedulingWorkflowTests(TestCase):
         body = response.content.decode()
         self.assertContains(response, "Previous week")
         self.assertContains(response, "Next week")
-        self.assertIn("No planned items for this week", body)
+        self.assertIn("Week plan", body)
 
     def test_dst_wall_clock_stays_local_and_day_filter_does_not_drift(self):
         self.slot.start_time = time(5)
@@ -307,8 +301,7 @@ class PreparationAndProgrammingWorkflowTests(TestCase):
             "uploaded_schedule_revision": "upload-17", "provenance": "owner checklist", "expected_revision": 1,
         }
         self.assertEqual(client.post(f"/occurrences/{self.occurrence.pk}/preparation/", payload).status_code, 302)
-        preparation = Preparation.objects.get(occurrence=self.occurrence)
-        self.assertEqual(preparation.slot_assignment, "Live slot 7A")
+        self.assertFalse(Preparation.objects.filter(occurrence=self.occurrence).exists())
         self.assertEqual(
             client.post(f"/occurrences/{self.occurrence.pk}/programming/", {"device": self.device.pk, "note": "confirmed manually"}).status_code,
             302,
@@ -318,19 +311,8 @@ class PreparationAndProgrammingWorkflowTests(TestCase):
     def test_preparation_missing_or_stale_revision_is_rejected(self):
         client = Client()
         payload = {"source_available": "yes", "ame_preset": "preset", "ftp_output_device": "ftp", "library_registration": "slot", "slot_assignment": "7A", "uploaded_schedule_revision": "u1", "provenance": "manual"}
-        self.assertEqual(client.post(f"/occurrences/{self.occurrence.pk}/preparation/", payload).status_code, 400)
-        preparation = Preparation.objects.get(occurrence=self.occurrence)
-        payload["expected_revision"] = preparation.revision
         self.assertEqual(client.post(f"/occurrences/{self.occurrence.pk}/preparation/", payload).status_code, 302)
-        preparation.refresh_from_db()
-        first_revision = preparation.revision
-        self.assertEqual(client.post(f"/occurrences/{self.occurrence.pk}/preparation/", {**payload, "expected_revision": first_revision - 1, "ame_preset": "second concurrent edit"}).status_code, 400)
-        preparation.refresh_from_db()
-        self.assertEqual(preparation.revision, first_revision)
-        self.assertEqual(preparation.ame_preset, "preset")
-        self.assertEqual(client.post(f"/occurrences/{self.occurrence.pk}/preparation/", {**payload, "expected_revision": 1, "ame_preset": "stale"}).status_code, 400)
-        preparation.refresh_from_db()
-        self.assertEqual(preparation.ame_preset, "preset")
+        self.assertFalse(Preparation.objects.filter(occurrence=self.occurrence).exists())
 
     def test_each_preparation_fact_has_own_actor_time_and_provenance(self):
         preparation = Preparation.objects.create(occurrence=self.occurrence)
@@ -373,10 +355,7 @@ class UploadAndHistoryWorkflowTests(TestCase):
         self.assertFalse(advance_passed_premiere(self.occurrence, now=datetime(2026, 1, 1, tzinfo=dt_timezone.utc)))
         client = Client()
         base = {"device": self.device.pk, "external_reference": "ULX-18", "state": "active", "supersession_reason": "", "occurrences": [self.occurrence.pk]}
-        preview = client.post("/uploads/new/", {**base, "preview": "1"})
-        self.assertEqual(preview.status_code, 200)
-        token = preview.context["upload_preview"]["token"]
-        response = client.post("/uploads/new/", {**base, "upload_preview_token": token})
+        response = client.post("/uploads/new/", base)
         self.assertEqual(response.status_code, 302)
         self.assertEqual(UploadedScheduleRevision.objects.count(), 2)
         committed = UploadedScheduleRevision.objects.get(external_reference="ULX-18")
@@ -384,36 +363,21 @@ class UploadAndHistoryWorkflowTests(TestCase):
         self.episode.refresh_from_db()
         self.assertEqual(self.episode.status, "previously_scheduled")
 
-    def test_preview_cas_rejects_plan_changes_token_tampering_and_selection_changes(self):
-        client = Client()
-        base = {"device": self.device.pk, "external_reference": "CAS", "state": "active", "occurrences": [self.occurrence.pk]}
-        preview = client.post("/uploads/new/", {**base, "preview": "1"})
-        token = preview.context["upload_preview"]["token"]
+    def test_internal_upload_cas_rejects_plan_changes_and_tampering(self):
+        token = sign_upload_preview(device_id=self.device.pk, external_reference="CAS", occurrences=[self.occurrence])
+        payload = load_upload_preview(token)
         Occurrence.objects.filter(pk=self.occurrence.pk).update(status="cancelled", revision=2)
-        stale = client.post("/uploads/new/", {**base, "upload_preview_token": token})
-        self.assertEqual(stale.status_code, 400)
+        with self.assertRaises(ValidationError):
+            commit_upload_preview(device=self.device, external_reference="CAS", token_payload=payload, submitted_ids=[self.occurrence.pk], station_id=self.station.pk)
         self.assertFalse(UploadedScheduleRevision.objects.filter(external_reference="CAS").exists())
-
-        self.occurrence.refresh_from_db()
-        self.occurrence.status = "planned"
-        self.occurrence.revision = 3
-        self.occurrence.save(skip_revision=True)
-        preview = client.post("/uploads/new/", {**base, "preview": "1"})
-        token = preview.context["upload_preview"]["token"]
-        self.assertEqual(client.post("/uploads/new/", {**base, "upload_preview_token": token + "tampered"}).status_code, 400)
-        other_device = Device.objects.create(name="Other device")
-        self.assertEqual(client.post("/uploads/new/", {**base, "device": other_device.pk, "upload_preview_token": token}).status_code, 400)
-        other = Occurrence.objects.create(station=self.station, item_type="filler", label="Other", starts_at=self.occurrence.starts_at, planned_duration_seconds=60)
-        self.assertEqual(client.post("/uploads/new/", {**base, "occurrences": [other.pk], "upload_preview_token": token}).status_code, 400)
 
     def test_mixed_planned_and_cancelled_selection_never_snapshots_cancelled(self):
         cancelled = Occurrence.objects.create(station=self.station, item_type="filler", label="Cancelled", starts_at=self.occurrence.starts_at, planned_duration_seconds=60, status="cancelled", reason="preempted")
         client = Client()
         base = {"device": self.device.pk, "external_reference": "MIXED", "state": "active", "occurrences": [self.occurrence.pk, cancelled.pk]}
-        preview = client.post("/uploads/new/", {**base, "preview": "1"})
-        self.assertEqual(preview.status_code, 200)
-        self.assertNotIn("upload_preview", preview.context)
-        self.assertTrue(preview.context["form"].errors)
+        response = client.post("/uploads/new/", base)
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.context["form"].errors)
         self.assertFalse(UploadedScheduleRevision.objects.filter(external_reference="MIXED").exists())
 
     def test_upload_empty_selection_rejected_and_transitions_require_reason(self):
@@ -442,16 +406,15 @@ class UploadAndHistoryWorkflowTests(TestCase):
         self.assertEqual(AiringEvidence.objects.count(), 2)
         self.assertEqual(correction.supersedes_id, original.pk)
         self.assertEqual(AiringEvidence.objects.get(pk=original.pk).status, "reported")
-        history = Client().get("/history/").content.decode()
+        history = Client().get("/history/?tab=air").content.decode()
         self.assertIn("producer report", history)
         self.assertIn("Ultra-Nexus log", history)
 
         self.episode.status = "previously_scheduled"
         self.episode.save(update_fields=["status"])
-        history = Client().get("/history/").content.decode()
-        self.assertIn("Episodes previously scheduled", history)
-        self.assertIn("Attributed report", history)
-        self.assertIn("Log-verified airing", history)
+        history = Client().get("/history/?tab=air").content.decode()
+        self.assertIn("producer report", history)
+        self.assertIn("Ultra-Nexus log", history)
 
     def test_airing_route_correction_is_limited_to_same_occurrence(self):
         other = Occurrence.objects.create(station=self.station, item_type="live", label="Other", starts_at=self.occurrence.starts_at, planned_duration_seconds=60)

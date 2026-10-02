@@ -6,7 +6,7 @@
 <p><strong>Time slot length for every occurrence:</strong> {{ show.slot_duration_label }}</p>
 {% if warning %}<aside class="alerts" role="alert"><strong>Needs attention</strong><p>{{ warning }}</p></aside>{% endif %}
 <table><thead><tr><th>Day</th><th>Local start</th><th>Role</th><th>Effective dates</th><th></th></tr></thead><tbody>
-{% for slot in slots %}<tr><td>{{ slot.get_weekday_display }}</td><td>{{ slot.start_time|time:"g:i A" }}</td><td>{% if slot.is_premiere %}<span class="badge premiere">Premiere</span>{% else %}<span class="badge replay">Replay</span>{% endif %}</td><td>{{ slot.active_from|default:"Ongoing" }}{% if slot.active_until %} through {{ slot.active_until }}{% endif %}</td><td><a href="{% url 'slot-edit' slot.pk %}">Edit</a></td></tr>
+{% for slot in slots %}<tr><td>{{ slot.get_weekday_display }}</td><td>{{ slot.start_time|time:"g:i a" }}</td><td>{% if slot.is_premiere %}<span class="badge premiere">Premiere</span>{% else %}<span class="badge replay">Replay</span>{% endif %}</td><td>{{ slot.active_from|default:"Ongoing" }}{% if slot.active_until %} through {{ slot.active_until }}{% endif %}</td><td><a href="{% url 'slot-edit' slot.pk %}">Edit</a></td></tr>
 {% empty %}<tr><td colspan="5">No weekly times yet. Set the show time slot length, then <a href="{% url 'slot-create' %}?show={{ show.pk }}">add the premiere time</a>.</td></tr>{% endfor %}
 </tbody></table>
 <p class="muted">Changing a definition affects future materialization only. Existing planned and historical occurrences retain their recorded times.</p>
