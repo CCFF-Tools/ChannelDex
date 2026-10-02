@@ -176,6 +176,7 @@ class AutomationPublicationForm(forms.Form):
 
 
 class UltraNexusSettingsForm(forms.Form):
+    settings_version = forms.IntegerField(required=False, min_value=0, widget=forms.HiddenInput())
     controller_family = forms.CharField(required=False, initial="UltraNEXUS-HD")
     firmware_version = forms.CharField(required=False, initial="7.0.3.48")
     output_number = forms.IntegerField(required=False, min_value=1, initial=1)
@@ -185,22 +186,22 @@ class UltraNexusSettingsForm(forms.Form):
     ffmpeg_profile_sha256 = forms.CharField(required=False, help_text="SHA-256 of the exact FFmpeg argument profile.")
     nmg_template_sha256 = forms.CharField(required=False, help_text="SHA-256 of the qualified NMG resource+schedule template records.")
     bin_template_sha256 = forms.CharField(required=False, help_text="SHA-256 of the qualified BIN resource+schedule template records.")
-    qualification_status = forms.ChoiceField(choices=UltraNexusTargetSettings.QUALIFICATION_STATUS, initial="open")
+    qualification_status = forms.ChoiceField(choices=UltraNexusTargetSettings.QUALIFICATION_STATUS, initial="open", required=False)
     qualification_evidence_hash = forms.CharField(required=False, help_text="SHA-256 of the destination qualification evidence.")
     host = forms.CharField(required=False, help_text="Controller FTP host or IP address.")
     port = forms.IntegerField(required=False, min_value=1, max_value=65535, initial=21)
-    ftp_username = forms.CharField(required=False)
+    ftp_username = forms.CharField(required=False, widget=forms.HiddenInput())
     media_directory = forms.CharField(required=False, initial="/Vol1/mpeg")
     schedule_path = forms.CharField(required=False, initial="/internal/schedule/schedule.bin")
-    secret_reference = forms.CharField(required=False, help_text="macOS Keychain service:account reference only; never enter a password or token.")
-    reconciliation_mode = forms.ChoiceField(choices=SchedulePublicationBatch.RECONCILIATION_MODES, initial="preserve")
+    secret_reference = forms.CharField(required=False, widget=forms.HiddenInput())
+    reconciliation_mode = forms.ChoiceField(choices=SchedulePublicationBatch.RECONCILIATION_MODES, initial="preserve", required=False)
     base_nmg_path = forms.CharField(required=False)
     base_nmg_hash = forms.CharField(required=False)
     base_bin_path = forms.CharField(required=False, help_text="Private local copy of the qualified controller schedule.bin.")
     base_bin_hash = forms.CharField(required=False, help_text="Approved SHA-256 of that exact BIN.")
     command_port = forms.IntegerField(required=False, min_value=1, max_value=65535, initial=23)
-    command_username = forms.CharField(required=False)
-    command_secret_reference = forms.CharField(required=False, help_text="Separate macOS Keychain service:account reference for XPASS.")
+    command_username = forms.CharField(required=False, widget=forms.HiddenInput())
+    command_secret_reference = forms.CharField(required=False, widget=forms.HiddenInput())
     bin_resource_template_reference = forms.IntegerField(required=False, min_value=1)
     bin_schedule_template_slot = forms.IntegerField(required=False, min_value=0, max_value=2999)
     ame_executable = forms.CharField(required=False)
@@ -212,12 +213,47 @@ class UltraNexusSettingsForm(forms.Form):
     nmg_resource_template_reference = forms.IntegerField(required=False, min_value=1, help_text="Qualified Nexus Mono resource reference to clone.")
     nmg_schedule_template_base = forms.IntegerField(required=False, min_value=46586, help_text="Qualified aligned schedule record byte offset to clone.")
     capability_flags = forms.CharField(required=False, help_text="Comma-separated qualified capability names.")
+    # Friendly aliases used by Station Settings. Legacy ftp/command fields
+    # remain accepted and are populated together by the view.
+    username = forms.CharField(required=False, label="Controller username")
+    password = forms.CharField(required=False, label="Controller password", widget=forms.PasswordInput(render_value=False), help_text="Leave blank to retain the saved Keychain password.")
 
     def clean_schedule_path(self):
         path = self.cleaned_data["schedule_path"]
         if path and path != "/internal/schedule/schedule.bin":
             raise forms.ValidationError("Use the qualified /internal/schedule/schedule.bin path. Review and resave legacy settings.")
         return path
+
+    def clean(self):
+        data = super().clean()
+        username = data.get("username") or data.get("ftp_username") or data.get("command_username") or ""
+        data["username"] = username
+        if data.get("password") and len(data["password"]) > 1024:
+            self.add_error("password", "Password is too long.")
+        return data
+
+
+class StationPreparationForm(forms.Form):
+    source_video = forms.FileField(required=True, label="Source video")
+    target = forms.ModelChoiceField(queryset=Device.objects.none(), empty_label=None)
+    occurrence = forms.ModelChoiceField(queryset=Occurrence.objects.none(), label="Planned schedule occurrence")
+    encode_before_transfer = forms.BooleanField(required=False, initial=True, label="Encode before transfer")
+
+    def __init__(self, *args, station=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["target"].queryset = Device.objects.all().order_by("name")
+        qs = Occurrence.objects.filter(status="planned").select_related("show", "episode").order_by("starts_at")
+        self.fields["occurrence"].queryset = qs.filter(station=station) if station else qs
+
+    def clean_source_video(self):
+        uploaded = self.cleaned_data["source_video"]
+        if uploaded.size > 50 * 1024 * 1024 * 1024:
+            raise forms.ValidationError("Source video exceeds the 50 GB intake limit.")
+        if not uploaded.name or uploaded.name in {".", ".."}:
+            raise forms.ValidationError("Choose a named source video.")
+        if uploaded.name.rsplit(".", 1)[-1].lower() not in {"mp4", "mov", "mxf", "m4v", "mkv", "avi", "webm"}:
+            raise forms.ValidationError("Choose a supported video container: MP4, MOV, MXF, M4V, MKV, AVI, or WebM.")
+        return uploaded
 
 
 class DeviceForm(forms.ModelForm):

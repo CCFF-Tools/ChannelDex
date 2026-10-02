@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block page_title %}{{ target.name }} settings{% endblock %}
+{% block content %}
+<div class="page-heading"><p class="eyebrow">Settings / Device</p><h1>{{ target.name }}</h1><p class="lede">Configure the ordinary connection details used by FTP and command delivery.</p></div>
+<form method="post" class="stacked-form list-card">{% csrf_token %}{{ form.settings_version }}{{ form.non_field_errors }}
+  <h2>Connection</h2>
+  {% for field in form.visible_fields %}{% if field.name == 'host' or field.name == 'port' or field.name == 'username' or field.name == 'password' or field.name == 'media_directory' or field.name == 'schedule_path' or field.name == 'command_port' or field.name == 'reconciliation_mode' %}<div class="field"><label for="{{ field.id_for_label }}">{{ field.label }}</label>{{ field }}{% if field.help_text %}<p class="helptext">{{ field.help_text }}</p>{% endif %}{{ field.errors }}</div>{% endif %}{% endfor %}
+  <details><summary>Advanced qualification and recovery</summary>{% for field in form.visible_fields %}{% if field.name != 'host' and field.name != 'port' and field.name != 'username' and field.name != 'password' and field.name != 'media_directory' and field.name != 'schedule_path' and field.name != 'command_port' and field.name != 'reconciliation_mode' %}<div class="field"><label for="{{ field.id_for_label }}">{{ field.label }}</label>{{ field }}{% if field.name == 'ame_executable' or field.name == 'ffmpeg_executable' or field.name == 'ame_preset' or field.name == 'base_nmg_path' or field.name == 'base_bin_path' or field.name == 'ffmpeg_qualification_manifest' %}<button type="button" class="button-link browse-button" data-browse-field="{{ field.id_for_label }}" data-browse-kind="{% if field.name == 'ame_executable' %}application{% else %}file{% endif %}">Browse</button>{% endif %}{% if field.help_text %}<p class="helptext">{{ field.help_text }}</p>{% endif %}{{ field.errors }}</div>{% endif %}{% endfor %}</details>
+  <button class="primary" type="submit">Save device settings</button> <a class="button-link" href="{% url 'settings' %}">Back to station settings</a>
+</form>
+<script>
+document.querySelectorAll('.browse-button').forEach((button) => button.addEventListener('click', async () => { const token = document.querySelector('[name=csrfmiddlewaretoken]').value; const body = new FormData(); body.append('kind', button.dataset.browseKind); const response = await fetch('{% url "browse-path" %}', {method:'POST', headers:{'X-CSRFToken':token}, body}); const data = await response.json(); if (data.path) document.getElementById(button.dataset.browseField).value = data.path; }));
+</script>
+{% endblock %}

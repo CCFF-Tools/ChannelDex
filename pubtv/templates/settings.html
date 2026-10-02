@@ -4,7 +4,7 @@
   <p class="eyebrow">Settings</p>
   <h1>Station settings</h1>
   <p class="lede">Infrequent system information, schedule defaults, and device configuration.</p>
-  <p><a class="button-link primary" href="{% url 'automation' %}">Open UltraNEXUS automation</a></p>
+  <p><a class="button-link primary" href="{% url 'automation' %}">Open Prepare &amp; Deliver</a></p>
 </div>
 
 <section class="summary-grid">
@@ -24,6 +24,12 @@
     <a class="button-link" href="{% url 'device-list' %}">Manage devices</a>
     <a class="button-link" href="{% url 'setup-device' %}">Add device</a>
   </div>
+</section>
+
+<section class="list-card">
+  <h2>UltraNEXUS devices</h2>
+  <p>Connection details and credentials belong to the station device they serve. Passwords are kept in the macOS login Keychain.</p>
+  {% for device in devices %}<p><strong>{{ device.name }}</strong> <a class="button-link" href="{% url 'device-settings' device.pk %}">Configure device</a></p>{% empty %}<p>No playback devices configured.</p>{% endfor %}
 </section>
 
 {% if carry_forward_form %}

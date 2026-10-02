@@ -898,6 +898,7 @@ class ControllerSnapshot(models.Model):
 
 
 class SchedulePublicationBatch(models.Model):
+    preparation_item = models.OneToOneField("PreparationBatchItem", null=True, blank=True, on_delete=models.PROTECT, related_name="schedule_publication",)
     RECONCILIATION_MODES = [("preserve", "Preserve"), ("authoritative", "Authoritative")]
     WORKFLOW_MODES = [("selected_changes", "Selected changes"), ("full_week", "Full week")]
     STATUS = [(x, x.replace("_", " ").title()) for x in ("previewed", "approved", "awaiting_activation", "delivering", "verified", "blocked", "failed", "cancelled")]
