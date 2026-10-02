@@ -229,8 +229,6 @@ class MediaAsset(models.Model):
         # canonical filename or mirrors future changes.
         legacy_label = kwargs.pop("label", None)
         super().__init__(*args, **kwargs)
-        if legacy_label is not None and not self.file_name:
-            self.file_name = legacy_label
         # Seed the canonical filename for legacy Python callers once; later
         # edits remain deliberately non-mirroring.
         if legacy_label is not None and not self.file_name:
