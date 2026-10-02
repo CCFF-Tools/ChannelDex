@@ -216,9 +216,14 @@ def _automation_context(request, *, form_p=None, form_s=None, message=""):
     for batch in publication_batches:
         bins = [item for item in batch.artifact_revisions.all() if item.artifact_type == "bin"]
         operations = list(batch.delivery_operations.all())
+        operation = max(operations, key=lambda item: item.pk) if operations else None
         publication_cards.append({"batch": batch,
                                   "bin_artifact": max(bins, key=lambda item: item.revision) if bins else None,
-                                  "operation": max(operations, key=lambda item: item.pk) if operations else None})
+                                  "operation": operation,
+                                  "can_rollback": bool(operation and operation.remote_backup_path and operation.state in {
+                                      "schedule_transferred", "activation_requested", "activation_acknowledged",
+                                      "activation_observed", "ambiguous",
+                                  })})
     return {"station": Station.objects.first(), "targets": Device.objects.order_by("name"), "target": target,
             "research_gates": gates, "preparation_batches": PreparationBatch.objects.select_related("target").prefetch_related("items__asset").order_by("-created_at")[:12],
             "publication_batches": publication_batches, "publication_cards": publication_cards,

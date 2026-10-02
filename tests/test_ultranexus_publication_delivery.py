@@ -221,6 +221,22 @@ class AttendedDeliveryTests(TestCase):
             observe_activation(operation.pk, evidence_file=str(evidence))
         self.assertEqual(UploadedOccurrenceCoverage.objects.count(), 0)
 
+    def test_observation_rejects_timestamp_without_offset(self):
+        operation = stage_publication(self.batch.pk, expected_hash=self.candidate_hash,
+                                      ftp_factory=FakeFTPAdapter, secret_resolver=lambda _: "example")
+        operation = activate_publication(operation.pk, expected_hash=self.candidate_hash,
+                                         ftp_factory=FakeFTPAdapter, secret_resolver=lambda _: "example",
+                                         socket_factory=lambda *args, **kwargs: FakeSocket())
+        evidence = Path(self.directory.name) / "naive-observation.json"
+        evidence.write_text(json.dumps({
+            "target_id": self.target.pk, "artifact_sha256": self.candidate_hash,
+            "schedule_path": "/internal/schedule/schedule.bin", "status": "observed_active",
+            "observed_at": "2026-10-02T12:00:00", "source": "operator_observation",
+        }))
+        with self.assertRaisesRegex(ValueError, "UTC offset"):
+            observe_activation(operation.pk, evidence_file=str(evidence))
+        self.assertEqual(UploadedOccurrenceCoverage.objects.count(), 0)
+
     def test_lost_loadsch_ack_is_ambiguous_without_retry_or_coverage(self):
         operation = stage_publication(self.batch.pk, expected_hash=self.candidate_hash,
                                       ftp_factory=FakeFTPAdapter, secret_resolver=lambda _: "example")
@@ -250,3 +266,32 @@ class AttendedDeliveryTests(TestCase):
         self.assertEqual(operation.state, "failed")
         self.assertEqual(FakeFTPConnection.files["/internal/schedule/schedule.bin"], self.base_path.read_bytes())
         self.assertEqual(UploadedOccurrenceCoverage.objects.count(), 0)
+
+    def test_uncertain_rollback_cannot_repeat_loadsch(self):
+        operation = stage_publication(self.batch.pk, expected_hash=self.candidate_hash,
+                                      ftp_factory=FakeFTPAdapter, secret_resolver=lambda _: "example")
+        operation = activate_publication(operation.pk, expected_hash=self.candidate_hash,
+                                         ftp_factory=FakeFTPAdapter, secret_resolver=lambda _: "example",
+                                         socket_factory=lambda *args, **kwargs: FakeSocket())
+        evidence = Path(self.directory.name) / "rollback-observation.json"
+        evidence.write_text(json.dumps({
+            "target_id": self.target.pk, "artifact_sha256": self.candidate_hash,
+            "schedule_path": "/internal/schedule/schedule.bin", "status": "observed_active",
+            "observed_at": "2026-10-02T12:00:00-04:00", "source": "operator_observation",
+        }))
+        operation = observe_activation(operation.pk, evidence_file=str(evidence))
+        sockets = []
+        def uncertain_socket(address, timeout):
+            sock = TimeoutAfterLoadSocket(); sockets.append(sock); return sock
+        with self.assertRaises(Exception):
+            rollback_publication(operation.pk, expected_rollback_hash=self.base_hash,
+                                 ftp_factory=FakeFTPAdapter, secret_resolver=lambda _: "example",
+                                 socket_factory=uncertain_socket)
+        operation.refresh_from_db()
+        self.assertEqual(operation.state, "rollback_ambiguous")
+        self.assertEqual(sum(line.startswith(b"LOADSCH ") for line in sockets[0].sent), 1)
+        with self.assertRaisesRegex(ValueError, "no reviewed rollback action"):
+            rollback_publication(operation.pk, expected_rollback_hash=self.base_hash,
+                                 ftp_factory=FakeFTPAdapter, secret_resolver=lambda _: "example",
+                                 socket_factory=uncertain_socket)
+        self.assertEqual(len(sockets), 1)

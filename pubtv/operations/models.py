@@ -997,8 +997,10 @@ class ScheduleDeliveryOperation(models.Model):
     STATES = [(x, x.replace("_", " ").title()) for x in (
         "prepared", "staged", "promotion_started", "schedule_transferred",
         "activation_requested", "activation_acknowledged", "activation_observed",
-        "ambiguous", "failed", "rolled_back")]
-    ACTIVE = ("prepared", "staged", "promotion_started", "schedule_transferred", "activation_requested", "activation_acknowledged", "ambiguous")
+        "ambiguous", "rollback_started", "rollback_ambiguous", "failed", "rolled_back")]
+    ACTIVE = ("prepared", "staged", "promotion_started", "schedule_transferred",
+              "activation_requested", "activation_acknowledged", "ambiguous",
+              "rollback_started", "rollback_ambiguous")
     publication_batch = models.ForeignKey(SchedulePublicationBatch, on_delete=models.PROTECT, related_name="delivery_operations")
     target = models.ForeignKey(Device, on_delete=models.PROTECT, related_name="schedule_delivery_operations")
     artifact = models.ForeignKey(ArtifactRevision, on_delete=models.PROTECT, related_name="delivery_operations")
@@ -1016,7 +1018,9 @@ class ScheduleDeliveryOperation(models.Model):
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=["target"], condition=Q(state__in=(
-            "prepared", "staged", "promotion_started", "schedule_transferred", "activation_requested", "activation_acknowledged", "ambiguous"
+            "prepared", "staged", "promotion_started", "schedule_transferred",
+            "activation_requested", "activation_acknowledged", "ambiguous",
+            "rollback_started", "rollback_ambiguous"
         )), name="unique_active_schedule_delivery_target")]
 
 

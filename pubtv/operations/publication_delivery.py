@@ -5,6 +5,7 @@ import hashlib
 import json
 import socket
 import uuid
+from datetime import datetime
 from pathlib import Path
 
 from django.conf import settings as django_settings
@@ -222,6 +223,12 @@ def observe_activation(operation_id: int, *, evidence_file: str, actor="owner"):
                 or not observation.get("observed_at")
                 or observation.get("source") not in {"controller", "winlgx", "operator_observation"}):
             raise ValueError("Activation evidence does not independently identify this target and BIN")
+        try:
+            observed_at = datetime.fromisoformat(str(observation["observed_at"]).replace("Z", "+00:00"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Activation evidence requires a valid ISO-8601 observation time") from exc
+        if not timezone.is_aware(observed_at):
+            raise ValueError("Activation evidence observation time must include a UTC offset")
         digest = sha256_file(evidence_file)
         ActivationEvidence.objects.create(
             publication_batch=operation.publication_batch, target=operation.target,
@@ -248,19 +255,27 @@ def rollback_publication(operation_id: int, *, expected_rollback_hash: str, acto
                          ftp_factory=StdlibFTPAdapter, secret_resolver=_keychain_password,
                          socket_factory=socket.create_connection):
     """Operator-confirmed restoration; uncertain results stay ambiguous."""
-    operation = ScheduleDeliveryOperation.objects.select_related("publication_batch", "target").get(pk=operation_id)
-    current = operation.target.ultranexus_settings.filter(is_current=True).first()
-    if not current or operation.state not in {"schedule_transferred", "activation_requested",
-                                                "activation_acknowledged", "activation_observed", "ambiguous"}:
-        raise ValueError("This operation has no reviewed rollback action")
-    if (not operation.remote_backup_path or not operation.rollback_path or
-            expected_rollback_hash.lower() != operation.rollback_hash or
-            sha256_file(operation.rollback_path) != operation.rollback_hash):
-        raise ValueError("Known-good rollback hash or artifact changed")
-    adapter = _ftp(current, ftp_factory=ftp_factory, secret_resolver=secret_resolver)
-    if adapter.read_hash(operation.remote_backup_path) != operation.rollback_hash:
-        raise ValueError("Remote rollback backup hash changed")
+    with transaction.atomic():
+        operation = ScheduleDeliveryOperation.objects.select_for_update().select_related(
+            "publication_batch", "target", "artifact").get(pk=operation_id)
+        Device.objects.select_for_update().get(pk=operation.target_id)
+        current = operation.target.ultranexus_settings.filter(is_current=True).first()
+        if not current or operation.state not in {"schedule_transferred", "activation_requested",
+                                                  "activation_acknowledged", "activation_observed", "ambiguous"}:
+            raise ValueError("This operation has no reviewed rollback action")
+        approved_settings = operation.publication_batch.approval_2_snapshot.get("target_settings")
+        if settings_record_snapshot(current) != approved_settings:
+            raise ValueError("Target settings changed after approval; rollback requires manual reconciliation")
+        if (not operation.remote_backup_path or not operation.rollback_path or
+                expected_rollback_hash.lower() != operation.rollback_hash or
+                sha256_file(operation.rollback_path) != operation.rollback_hash):
+            raise ValueError("Known-good rollback hash or artifact changed")
+        operation.state = "rollback_started"
+        operation.save(update_fields=["state", "updated_at"])
     try:
+        adapter = _ftp(current, ftp_factory=ftp_factory, secret_resolver=secret_resolver)
+        if adapter.read_hash(operation.remote_backup_path) != operation.rollback_hash:
+            raise ValueError("Remote rollback backup hash changed")
         adapter.rollback(operation.staging_path, LOADSCH_PATH, operation.remote_backup_path)
         if adapter.read_hash(LOADSCH_PATH) != operation.rollback_hash:
             raise ValueError("Restored remote BIN hash mismatch")
@@ -277,7 +292,7 @@ def rollback_publication(operation_id: int, *, expected_rollback_hash: str, acto
         batch.save(update_fields=["status"])
         return operation
     except Exception:
-        operation.state = "ambiguous"
+        operation.state = "rollback_ambiguous"
         operation.save(update_fields=["state", "updated_at"])
-        _evidence(operation, "ambiguous", actor=actor)
+        _evidence(operation, "ambiguous", detail={"phase": "rollback"}, actor=actor)
         raise

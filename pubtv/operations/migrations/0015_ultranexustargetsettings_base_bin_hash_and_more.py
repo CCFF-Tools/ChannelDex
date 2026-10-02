@@ -46,7 +46,7 @@ class Migration(migrations.Migration):
             name='ScheduleDeliveryOperation',
             fields=[
                 ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
-                ('state', models.CharField(choices=[('prepared', 'Prepared'), ('staged', 'Staged'), ('promotion_started', 'Promotion Started'), ('schedule_transferred', 'Schedule Transferred'), ('activation_requested', 'Activation Requested'), ('activation_acknowledged', 'Activation Acknowledged'), ('activation_observed', 'Activation Observed'), ('ambiguous', 'Ambiguous'), ('failed', 'Failed'), ('rolled_back', 'Rolled Back')], default='prepared', max_length=32)),
+                ('state', models.CharField(choices=[('prepared', 'Prepared'), ('staged', 'Staged'), ('promotion_started', 'Promotion Started'), ('schedule_transferred', 'Schedule Transferred'), ('activation_requested', 'Activation Requested'), ('activation_acknowledged', 'Activation Acknowledged'), ('activation_observed', 'Activation Observed'), ('ambiguous', 'Ambiguous'), ('rollback_started', 'Rollback Started'), ('rollback_ambiguous', 'Rollback Ambiguous'), ('failed', 'Failed'), ('rolled_back', 'Rolled Back')], default='prepared', max_length=32)),
                 ('approval_hash', models.CharField(max_length=64)),
                 ('base_hash', models.CharField(max_length=64)),
                 ('rollback_path', models.CharField(blank=True, max_length=500)),
@@ -62,7 +62,7 @@ class Migration(migrations.Migration):
                 ('target', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='schedule_delivery_operations', to='operations.device')),
             ],
             options={
-                'constraints': [models.UniqueConstraint(condition=models.Q(('state__in', ('prepared', 'staged', 'promotion_started', 'schedule_transferred', 'activation_requested', 'ambiguous'))), fields=('target',), name='unique_active_schedule_delivery_target')],
+                'constraints': [models.UniqueConstraint(condition=models.Q(('state__in', ('prepared', 'staged', 'promotion_started', 'schedule_transferred', 'activation_requested', 'ambiguous', 'rollback_started', 'rollback_ambiguous'))), fields=('target',), name='unique_active_schedule_delivery_target')],
             },
         ),
     ]

@@ -27,7 +27,7 @@
     {% elif card.operation.state == 'activation_acknowledged' %}
     <form method="post" class="stacked-form">{% csrf_token %}<input type="hidden" name="action" value="observe_publication"><input type="hidden" name="batch" value="{{ batch.pk }}"><label>Candidate SHA-256 <input name="expected_hash" size="68" maxlength="64" required></label><label>Private independent controller evidence JSON file <input name="evidence_file" required></label><p>Include target_id, artifact_sha256, schedule_path, status "observed_active", observed_at, and source.</p><label><input type="checkbox" name="confirm_observation" required> I observed that this controller accepted and activated this exact candidate</label><button type="submit">Record activation observation</button></form>
     {% endif %}
-    {% if card.operation.remote_backup_path and card.operation.state != 'rolled_back' %}
+    {% if card.can_rollback %}
     <form method="post" class="stacked-form">{% csrf_token %}<input type="hidden" name="action" value="rollback_publication"><input type="hidden" name="batch" value="{{ batch.pk }}"><label>Known-good SHA-256 <input name="rollback_hash" size="68" maxlength="64" required></label><label><input type="checkbox" name="confirm_rollback" required> Restore this known-good BIN and send one LOADSCH</label><button type="submit">Confirm rollback</button></form>
     {% endif %}
   </article>{% endwith %}{% empty %}<p>No publication batches.</p>{% endfor %}

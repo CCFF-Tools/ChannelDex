@@ -16,6 +16,6 @@ class Migration(migrations.Migration):
         ),
         migrations.AddConstraint(
             model_name='scheduledeliveryoperation',
-            constraint=models.UniqueConstraint(condition=models.Q(('state__in', ('prepared', 'staged', 'promotion_started', 'schedule_transferred', 'activation_requested', 'activation_acknowledged', 'ambiguous'))), fields=('target',), name='unique_active_schedule_delivery_target'),
+            constraint=models.UniqueConstraint(condition=models.Q(('state__in', ('prepared', 'staged', 'promotion_started', 'schedule_transferred', 'activation_requested', 'activation_acknowledged', 'ambiguous', 'rollback_started', 'rollback_ambiguous'))), fields=('target',), name='unique_active_schedule_delivery_target'),
         ),
     ]
