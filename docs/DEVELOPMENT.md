@@ -74,6 +74,14 @@ files, binds one Gunicorn worker to `127.0.0.1`, and opens the default browser a
 readiness. The visible, CSRF-protected **Quit ChannelDex** control terminates the
 launcher. Closing the browser does not.
 
+The launcher also supervises the singleton UltraNEXUS worker. A crashed worker
+restarts with bounded backoff; interrupted active items require explicit review
+and retry, while untouched queued work can continue. For `manage.py runserver`
+development, start `python manage.py run_ultranexus_worker` separately. Use an
+isolated `PUBTV_DATA_DIR` for tests and never point browser fixtures at a qualified
+production target. The packaged executable's `--worker` entry is internal and
+starts neither migrations nor another web server.
+
 ## macOS packaging
 
 Build the unsigned application for the current machine's architecture with:
@@ -157,4 +165,4 @@ Planning documents:
 - [Decisions](DECISIONS.md)
 - [TODO and usability backlog](TODO.md)
 
-The implemented scaffold covers local Django/SQLite records, server-rendered planning views, recurrence and weekly assignment rules, preparation/history provenance, conflict warnings, stale-edit checks, and local macOS packaging. It does not claim vendor exchange, device automation, public/LAN access, or production distribution. Proposed, accepted, and open statements remain clearly distinguished in project documentation.
+The implemented scaffold covers local Django/SQLite records, server-rendered planning views, recurrence and weekly assignment rules, preparation/history provenance, conflict warnings, stale-edit checks, and local macOS packaging. The restricted UltraNEXUS integration supports qualified media and attended schedule delivery; external encoder/controller evidence is still required. It does not claim public/LAN access or production distribution. Proposed, accepted, and open statements remain clearly distinguished in project documentation.

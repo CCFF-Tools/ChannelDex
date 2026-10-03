@@ -131,3 +131,18 @@ The MVP is private to its owner. Producer contacts and operational notes remain 
 ## Deliberately deferred design choices
 
 The model still requires detailed application backup/recovery procedure; V1 backup is manual and local. Calendar export format/public fields are deferred roadmap decisions. Media retention scheduling is deferred. Multi-user roles, LAN access, and device integrations are outside the MVP. A future **ImportBatch/ImportRow** extension may be designed only from representative Leightronix/TelVue samples; no export shape, API, or live-control capability is implied.
+
+## Media queue and publication cycle provenance
+
+**Accepted additive contract:** PreparationBatch gains nullable show and a unique
+nullable submission UUID for idempotent intake. Existing batches remain valid.
+Each PreparationBatchItem retains its asset/episode identity, file-row position,
+optional historical occurrence link, and granular durable execution state.
+
+PublicationCycleSelection records publication, confirmed assignment, exact asset,
+optional originating preparation item, and reviewed snapshot. A cycle may be
+reviewed in multiple revisions; a prepared asset may serve several cycles. The
+legacy SchedulePublicationBatch.preparation_item link remains for historical
+records; new cycle publication does not use it to constrain media reuse. A unique
+nullable review token prevents duplicate confirmation from creating publications.
+No migrations delete or rewrite existing evidence.

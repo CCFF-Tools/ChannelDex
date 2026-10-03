@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block page_title %}Media Preparation{% endblock %}
+{% block content %}
+<div class="page-heading"><h1>Media Preparation</h1><p class="lede">Queue episode videos for one show and destination. You can plan premieres in Schedule while preparation continues.</p></div>
+<form method="post" enctype="multipart/form-data" class="stacked-form list-card upload-dropzone" id="media-queue-form">{% csrf_token %}
+{% if error %}<p role="alert" class="errorlist">{{ error }} Select the files again to review and submit.</p>{% endif %}
+<div class="field"><label for="queue-show">Show</label><select id="queue-show" name="show" required><option value="">Choose a show</option>{% for show in shows %}<option value="{{ show.pk }}">{{ show.title }}</option>{% endfor %}</select></div>
+<div class="field"><label for="queue-target">Destination device</label><select id="queue-target" name="target" required><option value="">Choose a device</option>{% for target in targets %}<option value="{{ target.pk }}">{{ target.name }}</option>{% endfor %}</select></div>
+<label class="drop-label" for="queue-files">Drop episode videos here or browse files</label><input id="queue-files" name="source_files" type="file" multiple required accept="video/*,.mxf,.mkv"><p class="helptext">Choose a show first, then identify each episode. A filename suggests a title; confirm each new episode or select an existing episode.</p>
+<div id="queue-rows"></div><label><input type="checkbox" name="encode_before_transfer" checked> Encode before transfer</label><p class="helptext">Uncheck only for externally encoded media qualified for this destination. Existing qualification checks still apply.</p>
+<input type="hidden" name="submission_token" value="{{ submission_token }}"><button class="primary" type="submit">Queue preparation &amp; transfer</button><p>This authorizes only the selected files and destination. Scheduling and activation require separate review.</p></form>
+{{ episodes|json_script:"queue-episodes" }}
+<section aria-label="Accepted media batches"><h2>Accepted batches</h2>
+{% for batch in batches %}<article class="list-card" id="batch-{{ batch.pk }}"><h3>Batch {{ batch.pk }} · {{ batch.label|default:"Media batch" }}</h3><p>{{ batch.target }} · {{ batch.get_status_display }}{% if batch.show_id %} · <a href="{% url 'bulk-premiere-planner' batch.show_id %}">Plan this show's premieres</a>{% endif %}</p><ol>
+{% for item in batch.items.all %}<li id="item-{{ item.pk }}"><p><strong>{{ item.asset.episode.title|default:item.asset.file_name }}</strong> · {{ item.asset.file_name }} · {{ item.asset.version }} · <span data-item-status>{{ item.get_execution_status_display }}</span></p><progress aria-label="Preparing {{ item.asset.file_name }}" hidden></progress><p class="helptext" data-item-blocker>{{ item.blocker }}</p><form method="post" action="{% url 'media-item-retry' item.pk %}" data-item-retry{% if item.execution_status != 'failed' and item.execution_status != 'blocked' %} hidden{% endif %}>{% csrf_token %}<button type="submit">Retry this item</button></form></li>{% empty %}<li>No files.</li>{% endfor %}</ol></article>{% empty %}<p>No accepted media batches yet.</p>{% endfor %}
+</section>
+<script>
+(() => {
+  const input = document.getElementById('queue-files'), rows = document.getElementById('queue-rows'), show = document.getElementById('queue-show');
+  const episodes = JSON.parse(document.getElementById('queue-episodes').textContent), form = document.getElementById('media-queue-form');
+  function draw() {
+    rows.replaceChildren();
+    [...input.files].forEach((file, index) => {
+      const row = document.createElement('fieldset'), legend = document.createElement('legend');
+      legend.textContent = `${index + 1}. ${file.name}`; row.append(legend);
+      const label = document.createElement('label'), select = document.createElement('select');
+      label.textContent = 'Episode'; select.name = `episode_id_${index}`; select.required = true;
+      [['', 'Choose an episode'], ['new', 'Create a new episode']].forEach(([value, text]) => { const option = document.createElement('option'); option.value = value; option.textContent = text; select.append(option); });
+      episodes.filter(ep => String(ep.show_id) === show.value).forEach(ep => { const option = document.createElement('option'); option.value = ep.id; option.textContent = ep.title; select.append(option); });
+      label.append(select); row.append(label);
+      const titleLabel = document.createElement('label'), title = document.createElement('input');
+      titleLabel.textContent = 'New episode title'; title.name = `new_title_${index}`; title.maxLength = 160;
+      title.value = file.name.replace(/\.[^.]+$/, '').replace(/[_-]+/g, ' '); title.disabled = true; titleLabel.hidden = true; titleLabel.append(title); row.append(titleLabel);
+      select.addEventListener('change', () => { const isNew = select.value === 'new'; title.disabled = !isNew; title.required = isNew; titleLabel.hidden = !isNew; });
+      rows.append(row);
+    });
+  }
+  input.addEventListener('change', draw); show.addEventListener('change', draw);
+  form.addEventListener('dragover', event => { event.preventDefault(); form.classList.add('dragging'); });
+  form.addEventListener('dragleave', () => form.classList.remove('dragging'));
+  form.addEventListener('drop', event => { event.preventDefault(); form.classList.remove('dragging'); if (event.dataTransfer.files.length) { input.files = event.dataTransfer.files; draw(); } });
+})();
+</script>
+{% endblock %}

@@ -1,14 +1,22 @@
 from django.urls import path
 from pubtv.operations import views
+from pubtv.operations import media_queue, premiere_planning, schedule_preparation
 
 urlpatterns = [
     path("", views.dashboard, name="dashboard"),
     path("today/", views.dashboard, name="today"),
     path("schedule-today/", views.scheduling_today, name="scheduling-today"),
     path("schedule/", views.schedule_view, name="schedule"),
+    path("schedule/prepare/", schedule_preparation.schedule_prepare, name="schedule-prepare"),
+    path("schedule/delivery/", views.automation_dashboard, name="schedule-delivery"),
+    path("media/", media_queue.media_queue, name="media-queue"),
+    path("media/status/", media_queue.media_queue_status, name="media-queue-status"),
+    path("media/status/", media_queue.media_queue_status, name="media-queue-summary"),
+    path("media/items/<int:item_id>/retry/", media_queue.media_item_retry, name="media-item-retry"),
     path("schedule/recurring/", views.reserved_schedule, name="reserved-schedule"),
     path("shows/", views.show_list, name="show-list"),
     path("shows/<int:show_id>/", views.show_detail, name="show-detail"),
+    path("shows/<int:show_id>/premieres/", premiere_planning.bulk_premiere_planner, name="bulk-premiere-planner"),
     path("shows/<int:show_id>/edit/", views.show_edit, name="show-edit"),
     path("shows/<int:show_id>/episodes/queue/", views.episode_queue_reorder, name="episode-queue-reorder"),
     path("episodes/", views.episode_list, name="episode-list"), path("episodes/<int:pk>/", views.episode_detail, name="episode-detail"),
@@ -26,7 +34,7 @@ urlpatterns = [
     path("slots/new/", views.slot_create, name="slot-create"), path("slots/<int:pk>/edit/", views.slot_edit, name="slot-edit"), path("assignments/new/", views.assignment_create, name="assignment-create"),
     path("day/", views.day_view, name="day-view"), path("week/", views.week_view, name="week-view"), path("agenda/", views.agenda_view, name="agenda"), path("history/", views.history_view, name="history"),
     path("settings/", views.settings_view, name="settings"), path("settings/devices/", views.device_list, name="device-list"), path("settings/devices/<int:pk>/", views.device_settings, name="device-settings"),
-    path("automation/", views.automation_dashboard, name="automation"), path("prepare/", views.station_prepare, name="station-prepare"), path("settings/browse/", views.browse_path, name="browse-path"),
+    path("automation/", views.automation_dashboard, name="automation"), path("prepare/", media_queue.media_queue, name="station-prepare"), path("schedule/prepare/", views.schedule_prepare, name="schedule-prepare"), path("settings/browse/", views.browse_path, name="browse-path"),
     path("occurrences/<int:pk>/", views.occurrence_workbench, name="occurrence-workbench"),
     path("occurrences/<int:pk>/preparation/", views.preparation_edit, name="preparation-edit"), path("occurrences/<int:pk>/programming/", views.programming_create, name="programming-create"),
     path("assets/<int:asset_id>/transfers/new/", views.transfer_create, name="transfer-create"),

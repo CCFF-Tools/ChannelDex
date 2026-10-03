@@ -35,20 +35,14 @@ class StationDeliveryUXTests(TestCase):
         response = Client().post("/settings/browse/", {"kind": "directory"})
         assert response.status_code == 400
 
-    def test_prepare_page_has_progress_stepper_and_private_upload_entrypoint(self):
-        root = Path(__file__).resolve().parents[1]
-        template = (root / "pubtv/templates/ultranexus_automation.html").read_text()
-        assert 'class="delivery-progress"' in template
-        for label in ("Encode", "Media transfer", "Schedule insertion", "Schedule upload", "Confirmation"):
-            assert label in template
-        assert 'enctype="multipart/form-data"' in (root / "pubtv/templates/station_prepare.html").read_text()
-
-    def test_prepare_form_rejects_unsupported_extension(self):
-        from pubtv.operations.forms import StationPreparationForm
-        Station.objects.create(name="PUB-TV")
-        form = StationPreparationForm(files={"source_video": SimpleUploadedFile("bad.txt", b"x")})
-        assert not form.is_valid()
-        assert "supported video container" in str(form.errors)
+    def test_workspaces_have_separate_media_and_schedule_actions(self):
+        response = Client().get("/schedule/delivery/")
+        self.assertContains(response, "Prepare schedule")
+        self.assertContains(response, "Confirm activation")
+        self.assertNotContains(response, "Schedule insertion")
+        media = Client().get("/media/")
+        self.assertContains(media, "Queue preparation &amp; transfer")
+        self.assertNotContains(media, "Planned schedule occurrence")
 
     def test_device_setup_requires_password(self):
         device = Device.objects.create(name="WinLGX")
@@ -123,27 +117,31 @@ class StationDeliveryUXTests(TestCase):
         run.return_value = Mock(returncode=1, stdout="")
         assert Client().post("/settings/browse/", {"kind": "file"}).json()["cancelled"] is True
 
-    def test_valid_upload_creates_private_asset_revision_batch_job_and_audit(self):
+    def test_valid_upload_creates_private_episode_media_without_changing_occurrence(self):
+        import uuid
         station = Station.objects.create(name="PUB-TV")
         device = Device.objects.create(name="WinLGX")
-        UltraNexusTargetSettings.objects.create(
-            target=device, version=1, is_current=True,
-            schedule_path="/internal/schedule/schedule.bin",
-            command_port=23,
-        )
+        UltraNexusTargetSettings.objects.create(target=device, version=1, is_current=True,
+            schedule_path="/internal/schedule/schedule.bin", command_port=23)
         show = Show.objects.create(station=station, title="News", code="news")
         episode = Episode.objects.create(show=show, title="Episode 1")
-        occurrence = Occurrence.objects.create(station=station, show=show, episode=episode, item_type="episode", label="Episode 1", starts_at=timezone.now(), planned_duration_seconds=1800)
+        occurrence = Occurrence.objects.create(station=station, show=show, episode=episode,
+            item_type="episode", label="Episode 1", starts_at=timezone.now(), planned_duration_seconds=1800)
         with tempfile.TemporaryDirectory() as directory, self.settings(DATA_DIR=Path(directory)):
-            response = Client().post("/prepare/", {"source_video": SimpleUploadedFile("episode.mp4", b"video"), "target": device.pk, "occurrence": occurrence.pk, "encode_before_transfer": "on"})
-            assert response.status_code == 302
-            assert MediaAsset.objects.filter(file_name="episode.mp4").exists()
-            item = PreparationBatchItem.objects.get(occurrence=occurrence)
+            response = Client().post("/prepare/", {"source_files": [SimpleUploadedFile("episode.mp4", b"video")],
+                "target": device.pk, "show": show.pk, "episode_id_0": episode.pk,
+                "submission_token": str(uuid.uuid4()), "encode_before_transfer": "on"})
+            self.assertEqual(response.status_code, 302)
+            item = PreparationBatchItem.objects.get(asset__episode=episode)
             source_path = Path(item.selected_input_path)
-            assert source_path.exists() and PreparationJob.objects.filter(batch=item.batch).exists()
-            assert stat.S_IMODE(source_path.stat().st_mode) == 0o600
-            assert stat.S_IMODE(source_path.parent.stat().st_mode) == 0o700
-            assert AuditEvent.objects.filter(entity="Occurrence", entity_id=occurrence.pk).exists()
+            self.assertTrue(source_path.exists())
+            self.assertTrue(PreparationJob.objects.filter(batch=item.batch).exists())
+            self.assertEqual(stat.S_IMODE(source_path.stat().st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(source_path.parent.stat().st_mode), 0o700)
+            self.assertIsNone(item.occurrence_id)
+            occurrence.refresh_from_db()
+            self.assertIsNone(occurrence.asset_id)
+            self.assertEqual(occurrence.revision, 1)
 
     def test_ready_publication_creation_is_idempotent(self):
         station = Station.objects.create(name="PUB-TV"); device = Device.objects.create(name="WinLGX")
@@ -155,11 +153,11 @@ class StationDeliveryUXTests(TestCase):
         assert SchedulePublicationBatch.objects.filter(target=device).count() == 1
         assert SchedulePublicationBatch.objects.get(target=device).occurrence_selections.count() == 1
 
-    def test_automation_renders_all_delivery_state_labels(self):
+    def test_legacy_automation_url_renders_schedule_delivery(self):
         response = Client().get("/automation/")
-        assert response.status_code == 200
-        for label in ("Encode", "Media transfer", "Schedule insertion", "Schedule upload", "Confirmation"):
-            assert label in response.content.decode()
+        self.assertContains(response, "Schedule delivery")
+        for label in ("Review changes", "Generate and validate", "Stage upload", "Confirm activation", "Record independent confirmation"):
+            self.assertContains(response, label)
 
     def test_durable_publication_relation_exists(self):
         assert "preparation_item" in Path(__file__).resolve().parents[1].joinpath("pubtv/operations/models.py").read_text()

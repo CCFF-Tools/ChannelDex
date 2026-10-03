@@ -2,10 +2,60 @@
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 import time
 import webbrowser
 from pathlib import Path
 import threading
+
+
+def worker_command() -> list[str]:
+    """Return the worker command for source and frozen packaged launches."""
+    if getattr(sys, "frozen", False):
+        return [sys.executable, "--worker"]
+    return [sys.executable, "manage.py", "run_ultranexus_worker"]
+
+
+def start_worker():
+    """Start the singleton-supervised worker beside the local web server."""
+    return subprocess.Popen(worker_command(), cwd=str(Path(__file__).resolve().parents[2]), close_fds=True)
+
+
+def supervise_worker(application, host: str, port: int) -> None:
+    """Run Gunicorn on the main thread; supervise its singleton worker beside it."""
+    stopped = threading.Event()
+    worker = start_worker()
+
+    def monitor():
+        nonlocal worker
+        delay = 1.0
+        while not stopped.wait(1.0):
+            if worker.poll() is None:
+                continue
+            if stopped.wait(delay):
+                return
+            try:
+                worker = start_worker()
+            except OSError:
+                pass
+            delay = min(delay * 2, 60.0)
+
+    watcher = threading.Thread(target=monitor, name="media-worker-supervisor", daemon=True)
+    watcher.start()
+    try:
+        # Gunicorn installs signal handlers, which requires the main thread.
+        run_gunicorn(application, host, port)
+    finally:
+        stopped.set()
+        watcher.join(timeout=5)
+        if worker.poll() is None:
+            worker.terminate()
+            try:
+                worker.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                worker.kill()
+                worker.wait(timeout=5)
 
 
 def default_data_dir() -> Path:
@@ -84,6 +134,13 @@ def wait_until_ready(host: str, port: int, timeout: float = 15.0) -> bool:
 
 
 def main() -> None:
+    if "--worker" in sys.argv[1:]:
+        os.environ.setdefault("DJANGO_SETTINGS_MODULE", "pubtv.config.settings")
+        import django
+        django.setup()
+        from django.core.management import call_command
+        call_command("run_ultranexus_worker")
+        return
     # Ensure all files created by Django/SQLite are private to the owner.
     os.umask(0o077)
     prepare_data_dir()
@@ -93,6 +150,6 @@ def main() -> None:
     os.environ.setdefault("PUBTV_ENABLE_QUIT", "1")
     os.environ["PUBTV_MASTER_PID"] = str(os.getpid())
     _open_browser_when_ready(host, port)
-    run_gunicorn(application, host, port)
+    supervise_worker(application, host, port)
 
 if __name__ == "__main__": main()

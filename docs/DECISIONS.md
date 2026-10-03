@@ -172,3 +172,14 @@ The owner approved the complete V1 scope and Python + Django + SQLite stack on 2
 
 - 2026-09-09: Owner confirmed Sunday 01:00–03:00 is curated supplemental filler without producer-assigned slots and explicitly directed no further effort on daylight-saving edge cases. Closed as a planning issue.
 - 2026-09-09: Owner accepted calendar capacity semantics: Available is outside planned occurrences and active recurring reservations; virtual-channel filler remains reserved, with missing runtime shown as an undetermined filler amount. Owner accepted the controlled Show type vocabulary and Day/Week-only Reserved/Available filters with accessible text legends.
+
+## Accepted: independent media queue and premiere planning (2026-10-02)
+
+One show and one destination per intake batch, multiple persistent batches, and
+sequential processing are accepted. Episode identity connects media to scheduling.
+Preparing/transferring a video does not assign an occurrence, change pending status,
+or record airing. Users may arrange and confirm premieres while processing runs.
+Consecutive premiere proposals require explicit confirmation, preserve reviewed
+order, and reject conflicts rather than moving episodes around them. Schedule
+media versions are explicit reviewed choices; readiness never initiates delivery.
+Controller activation remains a separate attended action behind existing gates.

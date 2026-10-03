@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block page_title %}Prepare schedule{% endblock %}
+{% block content %}
+<div class="page-heading"><h1>Prepare schedule</h1><p class="lede">Select confirmed cycles and exact episode videos. Review premieres and linked replays together, even while media is being prepared.</p></div>
+{% if error %}<p role="alert">{{ error }}</p>{% endif %}
+{% if review %}
+<h2>Review · {{ target }}</h2><p>{% if review.ready %}Selected media is ready for this device.{% else %}Waiting for media or review corrections. Saving a plan never starts schedule delivery.{% endif %}</p>
+{% for row in rows %}<article class="list-card"><h3>{{ row.assignment.show }} · {{ row.assignment.episode }} · {{ row.assignment.premiere_date }}</h3><p>Selected video: {{ row.asset.file_name }} · {{ row.asset.version }} · {{ row.readiness|title }}{% if row.job %} · <a href="{% url 'media-queue' %}#item-{{ row.job.pk }}">Media preparation job</a>{% endif %}</p>
+{% for blocker in row.blockers %}<p role="alert">{{ blocker }}</p>{% endfor %}
+<table><thead><tr><th>Playback</th><th>Review</th><th>Existing media</th><th>Controller mappings</th></tr></thead><tbody>
+{% for entry in row.entries %}<tr><td>{{ entry.occurrence.starts_at }} · {{ entry.occurrence.get_schedule_role_display }} · revision {{ entry.occurrence.revision }}</td><td>{{ entry.reason }}{% if entry.replacement %} · Replaces media{% endif %}</td><td>{{ entry.occurrence.asset|default:"No media chosen" }}</td><td>{% for mapping in entry.mappings %}Publication {{ mapping.publication_batch_id }}: {{ mapping.operation }}{% if mapping.source_bin_slot != None %} · BIN slot {{ mapping.source_bin_slot }} · {{ mapping.source_bin_record_hash }}{% endif %}<br>{% empty %}No recorded mapping. Review Add or explicit mapping in Schedule delivery.{% endfor %}</td></tr>{% endfor %}
+</tbody></table></article>{% endfor %}
+{% if not review.blockers %}<form method="post">{% csrf_token %}<input type="hidden" name="action" value="confirm"><input type="hidden" name="review_token" value="{{ review_token }}"><label><input type="checkbox" name="confirm_replacements"> I reviewed and authorize the listed replacements of existing media choices</label><button type="submit" class="primary">Confirm reviewed schedule plan</button></form>{% endif %}
+<p><a href="{% url 'schedule-prepare' %}">Change selections</a></p>
+{% else %}
+<form method="post" class="stacked-form">{% csrf_token %}<input type="hidden" name="action" value="preview"><label>Destination device <select name="target" required><option value="">Choose a device</option>{% for target in targets %}<option value="{{ target.pk }}">{{ target }}</option>{% endfor %}</select></label>
+{% for assignment, assets in cycle_options %}<fieldset><legend><label><input type="checkbox" name="assignment" value="{{ assignment.pk }}"> {{ assignment.show }} · {{ assignment.episode }} · {{ assignment.premiere_date|default:assignment.week_start }}</label></legend><label>Episode video <select name="asset_{{ assignment.pk }}"><option value="">Choose the reviewed media version</option>{% for asset in assets %}<option value="{{ asset.pk }}">{{ asset.file_name }} · {{ asset.version }} (media {{ asset.pk }})</option>{% endfor %}</select></label></fieldset>{% empty %}<p>No confirmed premiere cycles. Open a show to plan its premieres.</p><a href="{% url 'show-list' %}">Shows</a>{% endfor %}
+<button class="primary" type="submit">Review changes</button></form>
+{% endif %}
+{% endblock %}

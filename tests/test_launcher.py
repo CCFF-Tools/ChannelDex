@@ -1,5 +1,7 @@
 import os
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -46,10 +48,10 @@ class LauncherTests(unittest.TestCase):
                 patch.dict(os.environ, {"PUBTV_DATA_DIR": temp_dir, "PUBTV_PORT": "43210"}, clear=False), \
                 patch.object(launcher, "_load_application", return_value=app), \
                 patch.object(launcher, "_open_browser_when_ready") as browser, \
-                patch.object(launcher, "run_gunicorn") as gunicorn:
+                patch.object(launcher, "supervise_worker") as supervisor:
             launcher.main()
         browser.assert_called_once_with("127.0.0.1", 43210)
-        gunicorn.assert_called_once_with(app, "127.0.0.1", 43210)
+        supervisor.assert_called_once_with(app, "127.0.0.1", 43210)
 
     def test_main_sets_private_umask(self):
         from pubtv.config import launcher
@@ -58,6 +60,65 @@ class LauncherTests(unittest.TestCase):
                 patch.object(launcher.os, "umask") as umask, \
                 patch.object(launcher, "_load_application", return_value=object()), \
                 patch.object(launcher, "_open_browser_when_ready"), \
-                patch.object(launcher, "run_gunicorn"):
+                patch.object(launcher, "supervise_worker"):
             launcher.main()
         umask.assert_called_once_with(0o077)
+
+    def test_supervisor_runs_gunicorn_on_calling_thread_and_cleans_up_worker(self):
+        from pubtv.config import launcher
+
+        class Worker:
+            def __init__(self):
+                self.terminated = False
+            def poll(self):
+                return 0 if self.terminated else None
+            def terminate(self):
+                self.terminated = True
+            def wait(self, timeout):
+                return 0
+
+        worker = Worker()
+        calling_thread = threading.current_thread()
+        with patch.object(launcher, "start_worker", return_value=worker), \
+                patch.object(launcher, "run_gunicorn") as gunicorn:
+            gunicorn.side_effect = lambda *_: self.assertIs(threading.current_thread(), calling_thread)
+            launcher.supervise_worker(object(), "127.0.0.1", 43211)
+        self.assertTrue(worker.terminated)
+
+    def test_supervisor_restarts_exited_worker_and_terminates_replacement(self):
+        from pubtv.config import launcher
+
+        class Worker:
+            def __init__(self, exited=False):
+                self.exited = exited
+                self.terminated = False
+            def poll(self):
+                return 1 if self.exited else (0 if self.terminated else None)
+            def terminate(self):
+                self.terminated = True
+            def wait(self, timeout):
+                return 0
+
+        exited, replacement = Worker(exited=True), Worker()
+        with patch.object(launcher, "start_worker", side_effect=[exited, replacement]) as start, \
+                patch.object(launcher, "run_gunicorn", side_effect=lambda *_: time.sleep(2.2)):
+            launcher.supervise_worker(object(), "127.0.0.1", 43212)
+        self.assertEqual(start.call_count, 2)
+        self.assertTrue(replacement.terminated)
+
+    def test_frozen_worker_mode_runs_only_worker_command(self):
+        from pubtv.config import launcher
+
+        with patch.object(launcher.sys, "argv", ["ChannelDex", "--worker"]), \
+                patch.object(launcher.sys, "frozen", True, create=True), \
+                patch("django.setup") as setup, \
+                patch("django.core.management.call_command") as command, \
+                patch.object(launcher, "prepare_data_dir") as prepare, \
+                patch.object(launcher, "_load_application") as load, \
+                patch.object(launcher, "supervise_worker") as supervise:
+            launcher.main()
+        setup.assert_called_once_with()
+        command.assert_called_once_with("run_ultranexus_worker")
+        prepare.assert_not_called()
+        load.assert_not_called()
+        supervise.assert_not_called()

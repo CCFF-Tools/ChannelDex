@@ -51,10 +51,30 @@ class Command(BaseCommand):
             lock_handle.close()
             raise CommandError("Another UltraNEXUS worker is already running.") from exc
         now = timezone.now()
-        PreparationJob.objects.filter(status="running").update(
+        interrupted = PreparationJob.objects.filter(status="running")
+        interrupted_jobs = list(interrupted)
+        interrupted_batches = [job.batch_id for job in interrupted_jobs]
+        interrupted.update(
             status="failed", finished_at=now,
-            error="Worker interruption detected; review remote state before an explicit retry.",
+            error="Needs attention: worker interruption detected; review remote state before an explicit retry.",
         )
+        # Never replay uncertain transfers.  Leave each item visibly blocked
+        # for an operator to inspect and retry individually.
+        from pubtv.operations.models import PreparationBatchItem
+        if interrupted_batches:
+            PreparationBatchItem.objects.filter(batch_id__in=interrupted_batches, execution_status__in=("encoding", "validating", "transferring", "verifying")).update(
+                execution_status="blocked", blocker="Needs attention: worker interruption; explicit item retry required."
+            )
+            # Untouched rows are safe to continue; uncertain rows stay blocked.
+            for job in interrupted_jobs:
+                pending = list(PreparationBatchItem.objects.filter(
+                    batch_id=job.batch_id, execution_status="pending"
+                ).values_list("pk", flat=True))
+                if pending:
+                    PreparationJob.objects.get_or_create(
+                        idempotency_key=f"preparation-recovery:{job.pk}",
+                        defaults={"batch_id": job.batch_id, "result": {"item_ids": pending}},
+                    )
         PublicationJob.objects.filter(status="running").update(
             status="failed", finished_at=now,
             error="Worker interruption left publication state uncertain; automatic retry is prohibited.",

@@ -156,3 +156,14 @@ All phases after phase 1 are proposals. The project's test scope should follow a
 # Prepare & Deliver boundary
 
 The station workflow keeps private source intake, preparation, schedule publication, attended activation, and independent observation as separate durable facts. The operator view is a server-rendered stepper over those facts; it does not imply that transfer or airing occurred merely because a batch was queued.
+
+## Independent media and schedule workspaces
+
+**Accepted:** intake creates immutable episode-linked approved batches; a singleton
+worker processes them sequentially while web requests continue to plan premieres.
+The launcher owns worker lifetime. Recovery surfaces interrupted items for review,
+without replaying uncertain transfer or activation work. Browser polling reads
+durable status and does not execute jobs. Bulk premiere planning and cycle-based
+publication preparation use reviewed snapshots and transactional confirmation.
+Media approval excludes planning metadata; publication approval includes exact
+occurrence revisions, chosen media versions, and cycle/target provenance.

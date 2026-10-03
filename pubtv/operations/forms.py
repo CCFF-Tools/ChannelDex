@@ -233,29 +233,6 @@ class UltraNexusSettingsForm(forms.Form):
         return data
 
 
-class StationPreparationForm(forms.Form):
-    source_video = forms.FileField(required=True, label="Source video")
-    target = forms.ModelChoiceField(queryset=Device.objects.none(), empty_label=None)
-    occurrence = forms.ModelChoiceField(queryset=Occurrence.objects.none(), label="Planned schedule occurrence")
-    encode_before_transfer = forms.BooleanField(required=False, initial=True, label="Encode before transfer")
-
-    def __init__(self, *args, station=None, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.fields["target"].queryset = Device.objects.all().order_by("name")
-        qs = Occurrence.objects.filter(status="planned").select_related("show", "episode").order_by("starts_at")
-        self.fields["occurrence"].queryset = qs.filter(station=station) if station else qs
-
-    def clean_source_video(self):
-        uploaded = self.cleaned_data["source_video"]
-        if uploaded.size > 50 * 1024 * 1024 * 1024:
-            raise forms.ValidationError("Source video exceeds the 50 GB intake limit.")
-        if not uploaded.name or uploaded.name in {".", ".."}:
-            raise forms.ValidationError("Choose a named source video.")
-        if uploaded.name.rsplit(".", 1)[-1].lower() not in {"mp4", "mov", "mxf", "m4v", "mkv", "avi", "webm"}:
-            raise forms.ValidationError("Choose a supported video container: MP4, MOV, MXF, M4V, MKV, AVI, or WebM.")
-        return uploaded
-
-
 class DeviceForm(forms.ModelForm):
     class Meta:
         model = Device

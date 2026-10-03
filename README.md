@@ -38,8 +38,11 @@ connection.
 - Retains an audit trail for important changes.
 
 ChannelDex records and organizes the owner's work. It does **not** fetch files from
-Dropbox, email, or SMB; encode or move media; upload schedules; control broadcast
-equipment; confirm that content aired; or publish a public calendar.
+Dropbox, email, or SMB; confirm that content aired; or publish a public calendar.
+Its restricted UltraNEXUS workflow can prepare and transfer media and publish
+reviewed schedules only after the relevant target and encoder qualification gates
+pass. Media Preparation runs independently of premiere planning; schedule activation
+requires a separate attended confirmation. See the [integration contract](docs/ULTRANEXUS_AUTOMATION.md).
 
 ## Starting and stopping ChannelDex
 
