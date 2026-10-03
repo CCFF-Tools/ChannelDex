@@ -17,6 +17,10 @@ class StdlibFTPAdapter(FTPAdapter):
     def __init__(self, host, *, port=21, username=None, password=None, timeout=30, staging=True, ftp_factory=FTP):
         self.host, self.port, self.username, self.password, self.timeout = host, port, username, password, timeout
         self.staging = staging; self.ftp_factory = ftp_factory
+        self.progress_callback = None
+    def _progress(self, stage):
+        if self.progress_callback:
+            self.progress_callback(stage)
     def _connect(self):
         ftp = self.ftp_factory(); ftp.connect(self.host, self.port, timeout=self.timeout); ftp.login(self.username or "anonymous", self.password or "anonymous@"); ftp.set_pasv(True); return ftp
     def upload(self, local_path, remote_path, *, overwrite=False, reuse_identical=True):
@@ -30,14 +34,17 @@ class StdlibFTPAdapter(FTPAdapter):
             else:
                 if not overwrite:
                     if reuse_identical and existing_size == size:
+                        self._progress("verifying")
                         remote_hash = hashlib.sha256()
                         ftp.retrbinary("RETR " + remote_path, remote_hash.update, blocksize=1024 * 1024)
                         if remote_hash.hexdigest() == digest:
                             return TransferResult(remote_path, digest, reused=True)
                     raise TransferError("remote file exists and overwrite is disabled")
             target = remote_path + "." + uuid.uuid4().hex + ".part" if self.staging else remote_path
+            self._progress("transferring")
             with open(local_path, "rb") as source: ftp.storbinary("STOR " + target, source, blocksize=1024 * 1024)
             # Read back the exact remote bytes before exposing the final name.
+            self._progress("verifying")
             remote_hash = hashlib.sha256()
             ftp.retrbinary("RETR " + target, remote_hash.update, blocksize=1024 * 1024)
             if remote_hash.hexdigest() != digest:

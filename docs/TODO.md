@@ -231,3 +231,11 @@ These additions are **accepted** and implemented.
 ### Plain-language queue labels
 
 - [x] **Accepted:** Replace **Pending producer-directed queue** with the owner-facing label **Queued episodes**. Keep producer-directed ordering as a behavioral rule without repeating it in routine headings.
+
+## Independent queue qualification
+
+**Accepted:** independent media intake, premiere planning, and cycle publication.
+**Open:** destination-specific hardware and encoder qualification still require
+owner-supplied outputs and independent controller evidence. Exercise the packaged
+Mac with representative real source files before production operation; automated
+fixtures do not establish AME equivalence or controller acceptance.

@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block page_title %}Bulk premiere planner · {{ show.title }}{% endblock %}
+{% block content %}
+<div class="page-heading"><p class="eyebrow"><a href="{% url 'show-detail' show.pk %}">{{ show.title }}</a> / Schedule</p><h1>Bulk premiere planner</h1><p class="lede">Choose pending episodes in premiere order, review every premiere and replay occurrence, then confirm the complete proposal together.</p></div>
+{% if error %}<p class="form-errors" role="alert">{{ error }}</p>{% endif %}
+{% if proposal %}
+<section class="help-panel"><h2>Review proposal</h2><p>These cycles use the configured active premiere slots. Replay dates are shown across calendar-week boundaries.</p>
+{% for cycle in proposal.cycles %}<article class="list-card"><h3>{{ cycle.episode_title }} · premiere {{ cycle.premiere_date }}</h3><ul>{% for occurrence in cycle.occurrences %}<li>{{ occurrence.date }} at {{ occurrence.time }}{% if occurrence.premiere %} · Premiere{% else %} · Replay{% endif %}</li>{% endfor %}</ul></article>{% endfor %}
+<form method="post">{% csrf_token %}<input type="hidden" name="action" value="confirm"><input type="hidden" name="preview_token" value="{{ proposal.token }}"><button class="primary" type="submit">Confirm all premiere cycles</button><a class="button-link" href="{% url 'bulk-premiere-planner' show.pk %}">Start over</a></form></section>
+{% else %}
+<form method="post" class="stacked-form"><input type="hidden" name="action" value="preview">{% csrf_token %}<div class="field"><label for="first-premiere-date">First premiere date</label><input id="first-premiere-date" name="first_premiere_date" type="date" value="{{ first_premiere_date }}" required><p class="helptext">The date must match exactly one active premiere slot.</p></div><fieldset><legend>Premiere order</legend><ol id="premiere-order">{% for episode in episodes %}<li data-episode-id="{{ episode.pk }}" class="field"><label><input type="checkbox" name="episode_ids" value="{{ episode.pk }}"{% if not selected_ids or episode.pk|stringformat:'s' in selected_ids %} checked{% endif %}> {{ episode.title }}</label> <button type="button" class="move-up" aria-label="Move {{ episode.title }} earlier">Move up</button> <button type="button" class="move-down" aria-label="Move {{ episode.title }} later">Move down</button></li>{% empty %}<li>No pending episodes are available.</li>{% endfor %}</ol></fieldset><div class="form-actions"><button class="primary" type="submit">Preview consecutive premieres</button><a class="button-link" href="{% url 'show-detail' show.pk %}">Cancel</a></div></form>
+<script>
+document.querySelectorAll('#premiere-order button').forEach(function(button) { button.addEventListener('click', function() { var row = button.closest('li'); if (button.classList.contains('move-up') && row.previousElementSibling) row.parentNode.insertBefore(row, row.previousElementSibling); if (button.classList.contains('move-down') && row.nextElementSibling) row.parentNode.insertBefore(row.nextElementSibling, row); row.querySelector('input').focus(); }); });
+</script>
+{% endif %}
+{% endblock %}

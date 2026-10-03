@@ -147,8 +147,40 @@ controller reference and private evidence are reviewed, record the attestation:
 ```sh
 python manage.py attest_ultranexus_legacy_binding BINDING_ID EVIDENCE_FILE
 ```
-# Station-centered Prepare & Deliver
+# Independent media preparation and schedule delivery
 
-The owner-facing entry point is `/automation/` (also labelled Prepare & Deliver). Source videos are submitted through Station Prepare, stored privately below `DATA_DIR/imports`, attached to a planned occurrence, and queued as a versioned preparation batch. The page derives five states—encode, media transfer, schedule insertion, schedule upload, and confirmation—from durable preparation, publication, delivery, and observation records. Creating a selected-change publication is idempotent and remains reviewable before attended activation.
+**Accepted:** Media Preparation and Schedule are independent workspaces. A media
+submission explicitly authorizes preparation and verified transfer to one device,
+not schedule publication. Schedule publication remains attended and qualified.
 
-UltraNEXUS device connection settings live in Station Settings. A device has one username and one opaque macOS Keychain reference shared by FTP and command delivery. Qualification hashes, template offsets, and recovery controls remain advanced records and are never treated as proof of airing.
+Media Preparation accepts several video files for one show and device. Each row
+requires an explicit existing episode or a reviewed new episode title. The
+submission creates a separate approved batch and makes new episodes available
+for planning immediately. Further batches append to the queue. Processing follows
+batch/file order, independent of producer premiere order. Progress is indeterminate
+unless the adapter reports a measurement. Failed or interrupted items require an
+explicit item retry; other eligible items continue. The desktop launcher supervises
+the singleton local worker. Closing a browser page does not stop accepted work.
+
+The show's bulk premiere planner previews consecutive confirmed premiere cycles
+and their linked replays in the reviewed episode order. Existing cycles, including
+No program, are conflicts. A signed preview and transactional confirmation protect
+against stale edits. Planning does not consume the pending queue or claim airing.
+
+Schedule → Prepare schedule reviews confirmed cycles and explicitly chosen media
+versions for a target. Future planned occurrences are included automatically;
+past, cancelled, and already covered entries are identified separately. Plans can
+wait for media. Readiness completion never uploads or activates a schedule.
+Generation requires verified target-specific media and the existing qualification
+gates. Delivery remains Review changes → Generate and validate → Stage upload →
+Confirm activation → Record independent confirmation. Each publication retains
+cycle/media/job provenance; a prepared video can be reused in later publications.
+A replacement file is a separate asset and does not silently replace cycle media.
+
+Device connection settings remain in Station Settings, with one username and one
+opaque macOS Keychain reference shared by FTP and command delivery per device.
+Legacy occurrence-linked preparations and publication links remain readable.
+No automatic pruning is introduced. **Open external qualification:** actual AME
+comparisons, destination authentication/transfer/activation/rollback observations,
+and WinLGX reconstruction remain required where the existing gates demand them.
+Local tests and software readiness never substitute for those observations.

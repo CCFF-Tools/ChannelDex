@@ -23,6 +23,7 @@ from django.utils import timezone
 from .models import (PreparationBatch, PreparationBatchItem, ResearchGate, MediaInspection,
                      MediaBinding, MediaIdAllocation, TransferAttempt, UltraNexusTargetSettings, ArtifactRevision,
                      SchedulePublicationBatch, Device)
+from pubtv.ultranexus.exceptions import CompatibilityError
 from pubtv.ultranexus.encoding import AdobeMediaEncoder, FFmpegEncoder, discover_ame
 from pubtv.ultranexus.media import parse_ffprobe_json, validate_nexus_mono
 from pubtv.ultranexus.ftp import StdlibFTPAdapter
@@ -187,9 +188,12 @@ def process_due_job_state(job, *, now=None):
 
 def preparation_snapshot(item: PreparationBatchItem):
     asset = item.asset
-    return {"asset_id": str(asset.asset_id), "file_name": asset.file_name, "version": asset.version,
+    snapshot = {"asset_id": str(asset.asset_id), "file_name": asset.file_name, "version": asset.version,
             "encode_before_transfer": item.encode_before_transfer, "occurrence_id": item.occurrence_id,
             "selected_input_path": item.selected_input_path, "selected_input_hash": item.selected_input_hash}
+    if item.batch.submission_token and asset.episode_id:
+        snapshot["episode_id"] = str(asset.episode_id)
+    return snapshot
 
 
 def settings_record_snapshot(target_settings):
@@ -446,7 +450,7 @@ def approve_preparation_batch(batch, *, actor="owner", at=None):
 def process_preparation_batch(batch, *, runner=subprocess.run, credential_resolver=None,
                               ftp_factory=StdlibFTPAdapter, ame_discoverer=discover_ame,
                               ffmpeg_executable="ffmpeg", probe_runner=None,
-                              ame_process_checker=_ame_process_running):
+                              ame_process_checker=_ame_process_running, item_ids=None):
     """Execute a prepared batch through injected, inspectable boundaries.
 
     Missing paths/tools/credentials/capabilities become durable blockers; this
@@ -459,6 +463,10 @@ def process_preparation_batch(batch, *, runner=subprocess.run, credential_resolv
         batch.status = "blocked"
         batch.notes = str(exc)
         batch.save(update_fields=["status", "notes"])
+        for item in batch.items.filter(execution_status__in=("pending", "queued")):
+            item.execution_status = "blocked"
+            item.blocker = f"Needs attention: {exc}"
+            item.save(update_fields=["execution_status", "blocker"])
         return {"batch": batch, "blockers": [str(exc)], "complete": False}
     artifact_root = Path(django_settings.DATA_DIR) / "ultranexus" / "renditions"
     artifact_root.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -498,20 +506,35 @@ def process_preparation_batch(batch, *, runner=subprocess.run, credential_resolv
         batch.save(update_fields=["approval_1_status", "status", "notes"])
         batch.items.update(execution_status="blocked", blocker=message)
         return {"batch": batch, "blockers": [message], "complete": False}
+    if item_ids is not None:
+        wanted = {int(value) for value in item_ids}
+        items = [item for item in items if item.pk in wanted]
     for item in items:
+        if item.resulting_inspection_id and item.resulting_inspection.status == "passed" and item.resulting_binding_id:
+            continue
+        if item.execution_status in {"blocked", "failed"} and not item_ids:
+            # A later batch run must never silently retry an operator decision.
+            continue
+        # Keep UI progress granular while the worker advances one item at a
+        # time.  Unknown future states are harmless to older schemas.
+        item.execution_status = "encoding" if item.encode_before_transfer else "validating"
+        item.save(update_fields=["execution_status"])
         attempt = None
         input_copy = None
         retain_input = False
         path = item.selected_input_path or item.asset.smb_reference
         current = live_snapshots[str(item.asset.asset_id)]
-        if not path or not Path(path).is_file(): blockers.append(f"{item.asset}: source path unavailable"); continue
+        if not path or not Path(path).is_file():
+            item.execution_status = "blocked"; item.blocker = "Needs attention: source path unavailable"; item.save(update_fields=["execution_status", "blocker"])
+            blockers.append(f"{item.asset}: source path unavailable"); continue
         secret_ref = config.get("secret_reference")
         if not config.get("host") or not config.get("media_directory") or not secret_ref:
+            item.execution_status = "blocked"; item.blocker = "Needs attention: target host, media directory, or secret reference is unavailable"; item.save(update_fields=["execution_status", "blocker"])
             blockers.append(f"{item.asset}: target host, media directory, or secret reference is unavailable")
             continue
         approved_digest = current["selected_input_hash"]
         remote_filename = controller_filename(item.asset.file_name, approved_digest, encoded=item.encode_before_transfer)
-        output = artifact_root / f"{item.asset.asset_id}-{remote_filename}"
+        output = artifact_root / f"{item.asset.asset_id}-{uuid.uuid4().hex}-{remote_filename}"
         try:
             if item.resulting_inspection_id and item.resulting_inspection.status == "passed" and item.resulting_binding_id:
                 continue
@@ -521,8 +544,19 @@ def process_preparation_batch(batch, *, runner=subprocess.run, credential_resolv
                 shutil.copyfileobj(source, destination, length=1024 * 1024)
             if _sha256_file(input_copy) != approved_digest:
                 raise RuntimeError("approved source changed while preparing its private copy")
-            if item.encode_before_transfer:
-                output.unlink(missing_ok=True)
+            existing_binding = MediaBinding.objects.filter(asset=item.asset, target=batch.target,
+                binding_type="encoded").select_related("local_inspection").first()
+            if existing_binding:
+                prior_inspection = existing_binding.local_inspection
+                if (existing_binding.verification_basis != "locally_verified" or not prior_inspection
+                        or prior_inspection.status != "passed" or existing_binding.bare_filename != remote_filename):
+                    raise RuntimeError("Existing media binding requires separate reconciliation")
+                output = Path(prior_inspection.local_path)
+                if not output.is_file() or _sha256_file(output) != prior_inspection.media_hash:
+                    raise RuntimeError("Retained prepared media changed; reconcile before retry")
+                encoder_backend = prior_inspection.details.get("encoder_backend", "retained")
+                command = ()
+            elif item.encode_before_transfer:
                 ame = ame_discoverer((config.get("ame_executable"),) if config.get("ame_executable") else ())
                 if ame and _gate_passed(batch.target, "ame_scripting"):
                     if not config.get("ame_preset"):
@@ -554,6 +588,8 @@ def process_preparation_batch(batch, *, runner=subprocess.run, credential_resolv
                 output = input_copy
                 if not _gate_passed(batch.target, "nexus_mono_bypass"):
                     raise RuntimeError("direct-transfer Nexus Mono qualification is not passed")
+            item.execution_status = "validating"
+            item.save(update_fields=["execution_status"])
             probe = parse_ffprobe_json(probe_runner(str(output))) if probe_runner else _run_ffprobe(output, runner=runner)
             validate_nexus_mono(probe)
             digest = _sha256_file(output)
@@ -575,6 +611,8 @@ def process_preparation_batch(batch, *, runner=subprocess.run, credential_resolv
                          "nominal_frames": probe.nominal_frames, "duration": str(probe.duration),
                          "encoder_backend": encoder_backend, "encoder_command": list(command)},
             )
+            item.execution_status = "transferring"
+            item.save(update_fields=["execution_status"])
             allocation = _reserve_media_identifiers(batch.target, digest, remote_filename.casefold())
             retain_input = not item.encode_before_transfer
             resolver = credential_resolver or _keychain_password
@@ -589,43 +627,62 @@ def process_preparation_batch(batch, *, runner=subprocess.run, credential_resolv
                 password=credentials.get("password"),
             )
             remote_path = posixpath.join(config["media_directory"].rstrip("/"), remote_filename)
+            if isinstance(adapter, StdlibFTPAdapter):
+                def transfer_progress(stage):
+                    item.execution_status = stage
+                    item.save(update_fields=["execution_status"])
+                adapter.progress_callback = transfer_progress
             attempt = TransferAttempt.objects.create(item=item, target=batch.target, status="started")
             transfer = adapter.upload(str(output), remote_path, overwrite=False)
             if transfer.sha256.lower() != digest.lower():
                 raise RuntimeError("remote transfer verification hash does not match the approved local bytes")
+            item.execution_status = "verifying"
+            item.save(update_fields=["execution_status"])
             with transaction.atomic():
                 Device.objects.select_for_update().get(pk=batch.target_id)
-                binding = MediaBinding(
-                    asset=item.asset,
-                    target=batch.target,
-                    binding_type="encoded",
-                    media_id_uint16=allocation.media_id_uint16,
-                    resource_reference_uint32=allocation.resource_reference_uint32,
-                    bare_filename=remote_filename,
-                    profile="Nexus Mono",
-                    verification_basis="locally_verified",
-                    local_inspection=inspection,
-                    external_reference=transfer.remote_path,
-                    notes="Verified FTP transfer",
-                )
-                binding.full_clean()
-                binding.save()
-            attempt.status = "succeeded"
-            attempt.external_reference = transfer.remote_path
-            attempt.artifact_hash = transfer.sha256
-            attempt.evidence = {"reused": transfer.reused, "verified_sha256": transfer.sha256}
-            attempt.save(update_fields=["status", "external_reference", "artifact_hash", "evidence"])
-            item.resulting_inspection = inspection; item.resulting_binding = binding; item.execution_status = "ready"; item.save(update_fields=["resulting_inspection", "resulting_binding", "execution_status"])
+                binding = MediaBinding.objects.filter(asset=item.asset, target=batch.target,
+                    binding_type="encoded").select_related("local_inspection").first()
+                if binding:
+                    if (binding.verification_basis != "locally_verified" or not binding.local_inspection
+                            or binding.local_inspection.media_hash != digest
+                            or binding.external_reference != transfer.remote_path
+                            or binding.bare_filename != remote_filename
+                            or binding.media_id_uint16 != allocation.media_id_uint16
+                            or binding.resource_reference_uint32 != allocation.resource_reference_uint32):
+                        raise RuntimeError("Existing binding differs from verified transfer; reconcile before retry")
+                    inspection = binding.local_inspection
+                else:
+                    binding = MediaBinding(asset=item.asset, target=batch.target, binding_type="encoded",
+                        media_id_uint16=allocation.media_id_uint16,
+                        resource_reference_uint32=allocation.resource_reference_uint32,
+                        bare_filename=remote_filename, profile="Nexus Mono", verification_basis="locally_verified",
+                        local_inspection=inspection, external_reference=transfer.remote_path, notes="Verified FTP transfer")
+                    binding.full_clean()
+                    binding.save()
+                attempt.status = "succeeded"
+                attempt.external_reference = transfer.remote_path
+                attempt.artifact_hash = transfer.sha256
+                attempt.evidence = {"reused": transfer.reused, "verified_sha256": transfer.sha256}
+                attempt.save(update_fields=["status", "external_reference", "artifact_hash", "evidence"])
+                item.resulting_inspection = inspection
+                item.resulting_binding = binding
+                item.execution_status = "ready"
+                item.blocker = ""
+                item.save(update_fields=["resulting_inspection", "resulting_binding", "execution_status", "blocker"])
         except Exception as exc:
-            if attempt is not None and attempt.status == "started":
-                attempt.status = "failed"
-                attempt.notes = str(exc)
-                attempt.save(update_fields=["status", "notes"])
-            item.execution_status = "blocked"; item.blocker = str(exc); item.save(update_fields=["execution_status", "blocker"]); blockers.append(f"{item.asset}: {exc}")
+            if attempt is not None:
+                # A rolled-back success write leaves the Python object stale.
+                TransferAttempt.objects.filter(pk=attempt.pk, status="started").update(
+                    status="failed", notes=str(exc)
+                )
+            item.execution_status = "blocked" if isinstance(exc, CompatibilityError) else "failed"; item.blocker = str(exc); item.save(update_fields=["execution_status", "blocker"]); blockers.append(f"{item.asset}: {exc}")
         finally:
             if input_copy is not None and not retain_input:
                 input_copy.unlink(missing_ok=True)
-    batch.status = "blocked" if blockers else "complete"; batch.notes = "; ".join(dict.fromkeys(blockers)); batch.save(update_fields=["status", "notes"])
+    remaining = batch.items.exclude(execution_status="ready")
+    batch.status = "blocked" if remaining.exists() else "complete"
+    batch.notes = "; ".join(dict.fromkeys(blockers))
+    batch.save(update_fields=["status", "notes"])
     return {"batch": batch, "blockers": blockers, "complete": not blockers}
 
 
@@ -638,11 +695,13 @@ def process_preparation_job(job, **kwargs):
     job.started_at = now
     job.save(update_fields=["status", "started_at"])
     try:
-        result = process_preparation_batch(job.batch, **kwargs)
+        item_ids = job.result.get("item_ids") if isinstance(job.result, dict) else None
+        result = process_preparation_batch(job.batch, item_ids=item_ids, **kwargs)
     except Exception as exc:
         result = {"complete": False, "blockers": [str(exc)]}
     job.finished_at = timezone.now()
-    job.result = {"complete": result["complete"], "blockers": result["blockers"]}
+    prior = job.result if isinstance(job.result, dict) else {}
+    job.result = {"complete": result["complete"], "blockers": result["blockers"], **({"item_ids": prior["item_ids"]} if prior.get("item_ids") else {})}
     job.status = "succeeded" if result["complete"] else "failed"
     job.error = "" if result["complete"] else "; ".join(result["blockers"])
     job.save(update_fields=["status", "finished_at", "result", "error"])
@@ -653,6 +712,9 @@ def generate_nmg_artifact(batch):
     """Generate one immutable, locally validated selected-change NMG revision."""
     if batch.workflow_mode != "selected_changes":
         raise ValueError("Full-week NMG generation remains disabled pending qualification.")
+    cycle_blockers = publication_cycle_provenance_blockers(batch)
+    if cycle_blockers:
+        raise ValueError("Cycle selection is stale: " + "; ".join(cycle_blockers))
     target_settings, config = _target_config(batch.target)
     target_blockers = restricted_target_blockers(target_settings)
     if target_blockers:
@@ -847,6 +909,9 @@ def generate_nmg_artifact(batch):
 
 
 def generate_bin_artifact(batch):
+    cycle_blockers = publication_cycle_provenance_blockers(batch)
+    if cycle_blockers:
+        raise ValueError("Cycle selection is stale: " + "; ".join(cycle_blockers))
     """Build a paired target-specific BIN from a reviewed NMG mutation set."""
     if batch.workflow_mode != "selected_changes" or batch.reconciliation_mode != "preserve":
         raise ValueError("Restricted BIN creation supports selected preserved changes only")
@@ -996,16 +1061,39 @@ def generate_bin_artifact(batch):
         raise
 
 
+def publication_cycle_provenance_blockers(batch):
+    """Reject changed cycle/media contracts, including detached occurrences."""
+    from .schedule_preparation import _assignment_snapshot, _asset_snapshot
+    blockers = []
+    for choice in batch.cycle_selections.select_related("assignment__show__station", "asset"):
+        snapshot = choice.reviewed_snapshot
+        if snapshot.get("target_settings") != target_settings_snapshot(batch.target):
+            blockers.append("Target settings changed since cycle review")
+        if snapshot.get("assignment") != _assignment_snapshot(choice.assignment):
+            blockers.append(f"Cycle {choice.assignment_id} changed; review a new schedule plan")
+        if snapshot.get("asset") != _asset_snapshot(choice.asset):
+            blockers.append(f"Cycle {choice.assignment_id} media version changed")
+        selected = list(batch.occurrence_selections.filter(
+            occurrence_id__in=[entry["id"] for entry in snapshot.get("occurrences", [])]
+        ).select_related("occurrence"))
+        if len(selected) != len(snapshot.get("occurrences", [])) or any(
+            entry.occurrence.weekly_assignment_id != choice.assignment_id
+            or entry.occurrence.asset_id != choice.asset_id for entry in selected if entry.operation != "delete"
+        ):
+            blockers.append(f"Cycle {choice.assignment_id} occurrence or media selection changed")
+    return blockers
+
+
 def publication_artifact_blockers(batch):
     """Rehash artifacts and confirm the generated schedule matches this batch."""
-    blockers = []
+    blockers = publication_cycle_provenance_blockers(batch)
     artifacts = []
     for artifact_type in ("nmg", "bin"):
         artifact = batch.artifact_revisions.filter(artifact_type=artifact_type).order_by("-revision").first()
         if artifact:
             artifacts.append(artifact)
     if not artifacts:
-        return ["validated NMG/BIN artifact is required"]
+        return blockers + ["validated NMG/BIN artifact is required"]
     if not any(item.artifact_type == "nmg" for item in artifacts):
         blockers.append("a validated NMG review artifact is required")
     if not any(item.artifact_type == "bin" for item in artifacts):
@@ -1075,13 +1163,17 @@ def publication_snapshot(batch):
                           "verification_basis": binding.verification_basis,
                           "inspection_hash": binding.local_inspection.media_hash if binding.local_inspection_id else "",
                           "legacy_attestation_hash": binding.legacy_attestation_hash})
+    from .schedule_preparation import _assignment_snapshot, _asset_snapshot
+    cycles = [{"assignment": _assignment_snapshot(choice.assignment),
+               "asset": _asset_snapshot(choice.asset), "reviewed_snapshot": choice.reviewed_snapshot}
+              for choice in batch.cycle_selections.select_related("assignment__show__station", "asset")]
     return {"target_id": batch.target_id, "target_settings": target_settings_snapshot(batch.target),
             "workflow_mode": batch.workflow_mode,
             "reconciliation_mode": batch.reconciliation_mode,
             "requested_activation_at": batch.requested_activation_at.isoformat() if batch.requested_activation_at else None,
             "controller_snapshot_hash": controller_hash,
             "artifacts": artifacts,
-            "media": media,
+            "media": media, "cycles": cycles,
             "occurrences": [{"id": s.occurrence_id, "revision": s.occurrence_revision,
                              "operation": s.operation, "source_bin_slot": s.source_bin_slot,
                              "source_bin_record_hash": s.source_bin_record_hash.lower()} for s in selections]}

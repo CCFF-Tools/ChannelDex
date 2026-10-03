@@ -797,6 +797,8 @@ class MediaBinding(models.Model):
 class PreparationBatch(models.Model):
     STATUS = [(x, x.replace("_", " ").title()) for x in ("draft", "approved", "in_progress", "complete", "blocked", "failed", "cancelled")]
     target = models.ForeignKey(Device, on_delete=models.PROTECT, related_name="preparation_batches")
+    show = models.ForeignKey(Show, null=True, blank=True, on_delete=models.PROTECT, related_name="preparation_batches")
+    submission_token = models.UUIDField(null=True, blank=True, unique=True)
     label = models.CharField(max_length=160, blank=True)
     status = models.CharField(max_length=20, choices=STATUS, default="draft")
     approval_1_snapshot = models.JSONField(default=dict, blank=True)
@@ -823,7 +825,7 @@ class PreparationBatchItem(models.Model):
     selected_input_hash = models.CharField(max_length=128, blank=True)
     resulting_inspection = models.ForeignKey(MediaInspection, null=True, blank=True, on_delete=models.PROTECT, related_name="resulting_batch_items")
     resulting_binding = models.ForeignKey(MediaBinding, null=True, blank=True, on_delete=models.PROTECT, related_name="resulting_batch_items")
-    execution_status = models.CharField(max_length=20, choices=[("pending", "Pending"), ("encoding", "Encoding"), ("ready", "Ready"), ("blocked", "Blocked"), ("failed", "Failed")], default="pending")
+    execution_status = models.CharField(max_length=20, choices=[("pending", "Queued"), ("encoding", "Encoding"), ("validating", "Validating"), ("transferring", "Transferring"), ("verifying", "Verifying"), ("ready", "Ready"), ("blocked", "Needs attention"), ("failed", "Needs attention")], default="pending")
     blocker = models.TextField(blank=True)
     encode_before_transfer = models.BooleanField(default=True)
     approval_1_snapshot = models.JSONField(default=dict, blank=True)
@@ -898,6 +900,7 @@ class ControllerSnapshot(models.Model):
 
 
 class SchedulePublicationBatch(models.Model):
+    review_token = models.UUIDField(null=True, blank=True, unique=True)
     preparation_item = models.OneToOneField("PreparationBatchItem", null=True, blank=True, on_delete=models.PROTECT, related_name="schedule_publication",)
     RECONCILIATION_MODES = [("preserve", "Preserve"), ("authoritative", "Authoritative")]
     WORKFLOW_MODES = [("selected_changes", "Selected changes"), ("full_week", "Full week")]
@@ -939,6 +942,19 @@ class SchedulePublicationBatch(models.Model):
     @property
     def activation_time(self):
         return self.activated_at
+
+
+class PublicationCycleSelection(models.Model):
+    """Exact media version reviewed for a cycle in one publication revision."""
+
+    publication_batch = models.ForeignKey(SchedulePublicationBatch, on_delete=models.CASCADE, related_name="cycle_selections")
+    assignment = models.ForeignKey(WeeklyEpisodeAssignment, on_delete=models.PROTECT, related_name="publication_cycle_selections")
+    asset = models.ForeignKey(MediaAsset, on_delete=models.PROTECT, related_name="publication_cycle_selections")
+    preparation_item = models.ForeignKey(PreparationBatchItem, null=True, blank=True, on_delete=models.PROTECT, related_name="publication_cycle_selections")
+    reviewed_snapshot = models.JSONField(default=dict)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["publication_batch", "assignment"], name="unique_publication_cycle_selection")]
 
 
 class OccurrenceRevisionSelection(models.Model):

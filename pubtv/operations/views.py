@@ -12,11 +12,12 @@ import threading
 from django.core.exceptions import ValidationError
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
-from .forms import OccurrenceForm, StationForm, CarryForwardSettingsForm, DeviceForm, ShowForm, ShowSlotDurationForm, EpisodeForm, ProducerForm, EpisodeMilestoneForm, AssetForm, DeliveryForm, SlotForm, AssignmentForm, AssetPreparationForm, AssetTargetTransferForm, ProgrammingForm, UploadForm, AiringForm, AutomationPreparationForm, AutomationPublicationForm, UltraNexusSettingsForm, StationPreparationForm
+from .forms import OccurrenceForm, StationForm, CarryForwardSettingsForm, DeviceForm, ShowForm, ShowSlotDurationForm, EpisodeForm, ProducerForm, EpisodeMilestoneForm, AssetForm, DeliveryForm, SlotForm, AssignmentForm, AssetPreparationForm, AssetTargetTransferForm, ProgrammingForm, UploadForm, AiringForm, AutomationPreparationForm, AutomationPublicationForm, UltraNexusSettingsForm
 from .models import Episode, EpisodeWorkflowMilestone, Occurrence, Show, Station, Device, Producer, MediaAsset, Delivery, RecurrenceSlot, WeeklyEpisodeAssignment, Preparation, AssetPreparation, AssetTargetTransfer, OccurrenceProgramming, UploadedOccurrenceCoverage, UploadedScheduleRevision, AiringEvidence, AuditEvent, UltraNexusTargetSettings, PreparationBatch, PreparationBatchItem, PreparationJob, SchedulePublicationBatch, OccurrenceRevisionSelection, ResearchGate, TransferAttempt
 from .services import schedule_alerts, audit, materialize_assignment, ensure_carry_forward_week, next_premiere_date, suggested_pending_episode, confirm_preparation_fact, create_upload_snapshot, revise_airing, sign_upload_preview, load_upload_preview, commit_upload_preview, preparation_readiness, calendar_capacity
 from .automation import approve_snapshot, canonical_hash, invalidate_snapshot, preparation_batch_snapshot, publication_snapshot, preview_schedule, approve_preparation_batch, schedule_ready_binding, generate_nmg_artifact, generate_bin_artifact, publication_artifact_blockers
 from .publication_delivery import stage_publication, activate_publication, observe_activation, rollback_publication
+from .schedule_preparation import schedule_prepare
 from pubtv.ultranexus.exceptions import UltraNexusError, CapabilityError
 from pubtv.ultranexus.secrets import device_secret_reference, new_device_secret_reference, KeychainSecretStore
 from pubtv.ultranexus.encoding import discover_executables
@@ -347,73 +348,6 @@ def browse_path(request):
     return JsonResponse({"path": selected if selected and Path(selected).exists() else "", "available": True})
 
 
-def station_prepare(request):
-    station = Station.objects.first()
-    if request.method == "POST":
-        form = StationPreparationForm(request.POST, request.FILES, station=station)
-        if form.is_valid():
-            uploaded = form.cleaned_data["source_video"]
-            safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", Path(uploaded.name).name)[:180] or "source-video"
-            root = Path(getattr(django_settings, "DATA_DIR", django_settings.BASE_DIR)) / "imports"
-            root.mkdir(parents=True, exist_ok=True, mode=0o700)
-            os.chmod(root, 0o700)
-            destination = root / f"{uuid.uuid4().hex[:12]}-{safe_name}"
-            descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            try:
-                with os.fdopen(descriptor, "wb") as stream:
-                    descriptor = None
-                    for chunk in uploaded.chunks():
-                        stream.write(chunk)
-                os.chmod(destination, 0o600)
-            finally:
-                if descriptor is not None:
-                    os.close(descriptor)
-            try:
-                with transaction.atomic():
-                    occurrence = form.cleaned_data["occurrence"]
-                    asset = MediaAsset.objects.create(episode=occurrence.episode, file_name=safe_name, kind="source", smb_reference=str(destination))
-                    occurrence.asset = asset
-                    occurrence.save(update_fields=["asset", "revision"])
-                    occurrence.refresh_from_db(fields=["revision"])
-                    audit("update", "Occurrence", occurrence, f"Private source uploaded and attached: {safe_name}")
-                    batch = PreparationBatch.objects.create(target=form.cleaned_data["target"], label=f"Upload {safe_name}")
-                    PreparationBatchItem.objects.create(batch=batch, asset=asset, occurrence=occurrence, selected_input_path=str(destination), encode_before_transfer=form.cleaned_data["encode_before_transfer"], position=0)
-                    approve_preparation_batch(batch)
-                    batch.status = "approved"; batch.save(update_fields=["status"])
-                    PreparationJob.objects.create(batch=batch, idempotency_key=f"preparation:{batch.pk}:{batch.approval_1_hash}")
-            except (ValueError, ValidationError, OSError):
-                destination.unlink(missing_ok=True)
-                messages.error(request, "The source could not be queued. No preparation records were retained.")
-                return render(request, "station_prepare.html", {"form": form})
-            messages.success(request, "Source uploaded privately and queued for preparation.")
-            return redirect("automation")
-    else:
-        form = StationPreparationForm(station=station)
-    return render(request, "station_prepare.html", {"form": form})
-
-
-def _delivery_cards():
-    cards = []
-    items = PreparationBatchItem.objects.select_related("batch__target", "asset", "occurrence").prefetch_related("transfer_attempts").order_by("-batch__created_at", "position")[:24]
-    for item in items:
-        occurrence = item.occurrence
-        if not occurrence:
-            continue
-        transfer = item.transfer_attempts.order_by("-attempted_at").first()
-        publication = SchedulePublicationBatch.objects.filter(target=item.batch.target, occurrence_selections__occurrence=occurrence).prefetch_related("artifact_revisions", "delivery_operations").order_by("-created_at").first()
-        selection = publication.occurrence_selections.filter(occurrence=occurrence).first() if publication else None
-        encode = "complete" if item.execution_status in {"ready"} or item.resulting_binding_id else ("active" if item.execution_status == "encoding" else "pending")
-        transfer_state = "complete" if transfer and transfer.status == "succeeded" else ("active" if transfer and transfer.status == "started" else "pending")
-        artifact_types = {artifact.artifact_type for artifact in publication.artifact_revisions.all()} if publication else set()
-        schedule_state = "complete" if selection and {"nmg", "bin"}.issubset(artifact_types) else ("active" if selection else "pending")
-        operation_state = publication.delivery_operations.order_by("-updated_at").first() if publication else None
-        upload_state = "complete" if operation_state and operation_state.state in {"activation_requested", "activation_acknowledged", "activation_observed"} else ("active" if operation_state and operation_state.state in {"staged", "schedule_transferred"} else "pending")
-        confirmation_state = "complete" if operation_state and operation_state.state == "activation_observed" else ("active" if operation_state and operation_state.state == "activation_acknowledged" else "pending")
-        next_action = "Encode and transfer" if encode != "complete" else ("Create schedule publication" if transfer_state == "complete" and not selection else ("Generate paired NMG and BIN" if schedule_state != "complete" else ("Stage and request attended activation" if upload_state != "complete" else "Record independent confirmation")))
-        cards.append({"item": item, "occurrence": occurrence, "target": item.batch.target, "publication": publication, "states": [("Encode", encode), ("Media transfer", transfer_state), ("Schedule insertion", schedule_state), ("Schedule upload", upload_state), ("Confirmation", confirmation_state)], "next_action": next_action, "can_publish": bool(item.resulting_binding_id or item.execution_status == "ready")})
-    return cards
-
-
 def _automation_context(request, *, form_p=None, form_s=None, message=""):
     target_id = request.GET.get("target") or request.POST.get("target")
     target = Device.objects.filter(pk=target_id).first() if target_id else Device.objects.order_by("name").first()
@@ -466,12 +400,13 @@ def _automation_context(request, *, form_p=None, form_s=None, message=""):
     publication_batches = list(SchedulePublicationBatch.objects.select_related("target").prefetch_related(
         "occurrence_selections__occurrence", "artifact_revisions", "delivery_operations"
     ).order_by("-created_at")[:12])
+    from .schedule_preparation import publication_readiness
     publication_cards = []
     for batch in publication_batches:
         bins = [item for item in batch.artifact_revisions.all() if item.artifact_type == "bin"]
         operations = list(batch.delivery_operations.all())
         operation = max(operations, key=lambda item: item.pk) if operations else None
-        publication_cards.append({"batch": batch,
+        publication_cards.append({"batch": batch, "readiness": publication_readiness(batch),
                                   "bin_artifact": max(bins, key=lambda item: item.revision) if bins else None,
                                   "operation": operation,
                                   "can_rollback": bool(operation and operation.remote_backup_path and operation.state in {
@@ -483,7 +418,7 @@ def _automation_context(request, *, form_p=None, form_s=None, message=""):
             "publication_batches": publication_batches, "publication_cards": publication_cards,
             "preparation_form": form_p or AutomationPreparationForm(), "publication_form": form_s or AutomationPublicationForm(),
             "settings_form": UltraNexusSettingsForm(initial=settings_initial),
-            "schedule_preview": preview, "automation_message": message, "delivery_cards": _delivery_cards()}
+            "schedule_preview": preview, "automation_message": message}
 
 
 def automation_dashboard(request):
@@ -492,9 +427,12 @@ def automation_dashboard(request):
         action = request.POST.get("action", "")
         if action == "create_delivery_publication":
             item = get_object_or_404(PreparationBatchItem.objects.select_related("batch", "occurrence"), pk=request.POST.get("item"))
+            if not item.occurrence_id:
+                messages.info(request, "Select confirmed premiere cycles in Prepare schedule.")
+                return redirect("schedule-prepare")
             if not (item.resulting_binding_id or item.execution_status == "ready"):
                 messages.error(request, "Media preparation must be ready before creating a schedule publication.")
-                return redirect("automation")
+                return redirect("schedule-delivery")
             batch = SchedulePublicationBatch.objects.filter(preparation_item=item).first()
             if not batch:
                 try:
@@ -508,7 +446,7 @@ def automation_dashboard(request):
                 defaults={"occurrence_revision": item.occurrence.revision, "operation": "add"},
             )
             messages.success(request, "Selected schedule publication is ready for review.")
-            return redirect("automation")
+            return redirect("schedule-delivery")
         if action == "save_target_settings":
             return redirect("device-settings", pk=request.POST.get("target"))
         if action == "create_preparation":
@@ -518,7 +456,7 @@ def automation_dashboard(request):
                 for position, asset in enumerate(form.cleaned_data["assets"]):
                     PreparationBatchItem.objects.create(batch=batch, asset=asset, encode_before_transfer=form.cleaned_data["encode_before_transfer"], position=position)
                 messages.success(request, f"Preparation batch {batch.pk} created. Review and approve each item before execution.")
-                return redirect("automation")
+                return redirect("schedule-delivery")
             return render(request, "ultranexus_automation.html", _automation_context(request, form_p=form))
         if action == "toggle_preparation_item":
             item = get_object_or_404(PreparationBatchItem.objects.select_related("batch"), pk=request.POST.get("item"))
@@ -528,7 +466,7 @@ def automation_dashboard(request):
                 item.encode_before_transfer = request.POST.get("encode_before_transfer") == "on"
                 item.save(update_fields=["encode_before_transfer"])
                 messages.success(request, "Media preparation choice updated.")
-            return redirect("automation")
+            return redirect("schedule-delivery")
         if action == "approve_preparation":
             batch = get_object_or_404(PreparationBatch, pk=request.POST.get("batch"))
             try:
@@ -541,16 +479,10 @@ def automation_dashboard(request):
                 messages.success(request, "Approval 1 recorded. Media preparation and verified transfer are queued for the local worker.")
             except ValueError as exc:
                 messages.error(request, str(exc))
-            return redirect("automation")
+            return redirect("schedule-delivery")
         if action == "execute_preparation":
-            batch = get_object_or_404(PreparationBatch, pk=request.POST.get("batch"))
-            if batch.approval_1_status != "approved":
-                messages.error(request, "Approval 1 is required before retrying preparation.")
-            else:
-                sequence = batch.jobs.count() + 1
-                PreparationJob.objects.create(batch=batch, idempotency_key=f"preparation:{batch.pk}:{batch.approval_1_hash}:retry:{sequence}")
-                messages.success(request, "Preparation retry queued for the local worker.")
-            return redirect("automation")
+            messages.info(request, "Review and retry individual items in Media Preparation.")
+            return redirect("media-queue")
         if action == "create_publication":
             form = AutomationPublicationForm(request.POST)
             if form.is_valid():
@@ -565,7 +497,7 @@ def automation_dashboard(request):
                 for occurrence in form.cleaned_data["occurrences"]:
                     OccurrenceRevisionSelection.objects.create(publication_batch=batch, occurrence=occurrence, occurrence_revision=occurrence.revision)
                 messages.success(request, f"Publication batch {batch.pk} created. Preview it before Approval 2.")
-                return redirect("automation")
+                return redirect("schedule-delivery")
             return render(request, "ultranexus_automation.html", _automation_context(request, form_s=form))
         if action == "set_publication_change":
             selection = get_object_or_404(OccurrenceRevisionSelection.objects.select_related("publication_batch"),
@@ -577,7 +509,7 @@ def automation_dashboard(request):
                 selection.source_bin_slot = int(slot_text) if slot_text else None
             except ValueError:
                 messages.error(request, "BIN slot must be an integer.")
-                return redirect("automation")
+                return redirect("schedule-delivery")
             selection.source_bin_record_hash = request.POST.get("source_bin_record_hash", "").strip().lower()
             try:
                 selection.full_clean()
@@ -587,7 +519,7 @@ def automation_dashboard(request):
                 messages.success(request, "Selected controller change saved. Generate new artifacts before approval.")
             except ValidationError as exc:
                 messages.error(request, "; ".join(exc.messages))
-            return redirect("automation")
+            return redirect("schedule-delivery")
         if action == "approve_publication":
             batch_id = request.POST.get("batch")
             with transaction.atomic():
@@ -622,7 +554,7 @@ def automation_dashboard(request):
                 messages.error(request, "Approval 2 blocked: " + "; ".join(result["blockers"]))
             else:
                 messages.success(request, "Approval 2 recorded. No schedule coverage is created by approval.")
-            return redirect("automation")
+            return redirect("schedule-delivery")
         if action == "generate_nmg":
             batch = get_object_or_404(SchedulePublicationBatch, pk=request.POST.get("batch"))
             try:
@@ -630,7 +562,7 @@ def automation_dashboard(request):
                 messages.success(request, f"Generated and validated NMG revision {artifact.revision}: {artifact.content_hash}")
             except (ValueError, ValidationError) as exc:
                 messages.error(request, str(exc))
-            return redirect("automation")
+            return redirect("schedule-delivery")
         if action == "generate_bin":
             batch = get_object_or_404(SchedulePublicationBatch, pk=request.POST.get("batch"))
             try:
@@ -638,7 +570,7 @@ def automation_dashboard(request):
                 messages.success(request, f"Generated and validated BIN revision {artifact.revision}: {artifact.content_hash}")
             except (ValueError, ValidationError) as exc:
                 messages.error(request, str(exc))
-            return redirect("automation")
+            return redirect("schedule-delivery")
         if action == "stage_publication":
             batch = get_object_or_404(SchedulePublicationBatch, pk=request.POST.get("batch"))
             if request.POST.get("confirm_stage") != "on":
@@ -649,7 +581,7 @@ def automation_dashboard(request):
                     messages.success(request, f"Candidate staged; current remote BIN retained as operation {operation.pk} rollback artifact.")
                 except (ValueError, ValidationError, UltraNexusError, OSError):
                     messages.error(request, "Staging failed; review the operation and remote schedule before retrying.")
-            return redirect("automation")
+            return redirect("schedule-delivery")
         if action == "activate_publication":
             batch = get_object_or_404(SchedulePublicationBatch, pk=request.POST.get("batch"))
             operation = batch.delivery_operations.order_by("-pk").first()
@@ -661,7 +593,7 @@ def automation_dashboard(request):
                     messages.success(request, "LOADSCH acknowledged. Attach independent controller evidence before recording coverage.")
                 except (ValueError, ValidationError, UltraNexusError, OSError):
                     messages.error(request, "Activation is uncertain or blocked; review the operation and controller evidence.")
-            return redirect("automation")
+            return redirect("schedule-delivery")
         if action == "observe_publication":
             batch = get_object_or_404(SchedulePublicationBatch, pk=request.POST.get("batch"))
             operation = batch.delivery_operations.order_by("-pk").first()
@@ -675,7 +607,7 @@ def automation_dashboard(request):
                     messages.success(request, "Independent activation observation and uploaded coverage recorded.")
                 except (ValueError, ValidationError, UltraNexusError, OSError):
                     messages.error(request, "Activation evidence was not accepted; review the operation.")
-            return redirect("automation")
+            return redirect("schedule-delivery")
         if action == "rollback_publication":
             batch = get_object_or_404(SchedulePublicationBatch, pk=request.POST.get("batch"))
             operation = batch.delivery_operations.order_by("-pk").first()
@@ -687,7 +619,7 @@ def automation_dashboard(request):
                     messages.success(request, "Known-good BIN restored and LOADSCH acknowledged; observe controller state separately.")
                 except (ValueError, ValidationError, UltraNexusError, OSError):
                     messages.error(request, "Rollback is uncertain or blocked; inspect remote and controller state.")
-            return redirect("automation")
+            return redirect("schedule-delivery")
     return render(request, "ultranexus_automation.html", _automation_context(request))
 
 

@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block content %}
 <div class="page-heading"><p class="eyebrow"><a href="{% url 'show-list' %}">Shows</a> / Workspace</p><h1>{{ show.title }}</h1>{% if show.description %}<p class="lede">{{ show.description }}</p>{% endif %}</div>
-<div class="action-bar"><a class="button-link" href="{% url 'show-edit' show.pk %}">Edit show</a><a class="button-link primary" href="{% url 'episode-create' %}?show={{ show.pk }}">Add episode</a><a class="button-link" href="{% url 'slot-create' %}?show={{ show.pk }}">Add weekly time</a><a class="button-link" href="{% url 'assignment-create' %}?show={{ show.pk }}">Choose next premiere episode</a></div>
+<div class="action-bar"><a class="button-link" href="{% url 'show-edit' show.pk %}">Edit show</a><a class="button-link primary" href="{% url 'episode-create' %}?show={{ show.pk }}">Add episode</a><a class="button-link" href="{% url 'slot-create' %}?show={{ show.pk }}">Add weekly time</a><a class="button-link" href="{% url 'assignment-create' %}?show={{ show.pk }}">Choose next premiere episode</a><a class="button-link" href="{% url 'bulk-premiere-planner' show.pk %}">Plan multiple premieres</a></div>
 <div class="summary-grid">
   <section><h2>Show details</h2><p>Type: {{ show.get_show_type_display|default:'Not classified' }}<br>Primary producer: {{ show.primary_producer|default:'Not recorded' }}<br>Slot length: {{ show.slot_duration_label }} <a href="{% url 'show-slot-duration-edit' show.pk %}">Change slot length</a></p></section>
   <section><h2>Premiere context</h2>{% if pending %}<p><strong>Next pending:</strong> {{ pending.0.title }}</p>{% else %}<p>No pending episodes.</p>{% endif %}<a href="{% url 'assignment-create' %}?show={{ show.pk }}">Open premiere planner</a></section>
