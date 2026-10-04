@@ -182,6 +182,31 @@ try:
                 self.assertEqual(TransferAttempt.objects.get(item=item).status, "succeeded")
                 self.assertEqual(UploadedOccurrenceCoverage.objects.count(), 0)
 
+        def test_blank_approved_hash_is_captured_and_stale_retry_is_blocked(self):
+            with TemporaryDirectory() as directory, override_settings(DATA_DIR=directory):
+                source, batch, item, probe = self._qualified_bypass_batch(directory)
+                item.selected_input_hash = ""
+                item.save(update_fields=["selected_input_hash"])
+                snapshot = batch.approval_1_snapshot
+                snapshot["items"][0]["selected_input_hash"] = ""
+                batch.approval_1_snapshot = snapshot
+                batch.approval_1_hash = canonical_hash(snapshot)
+                batch.save(update_fields=["approval_1_snapshot", "approval_1_hash"])
+                result = process_preparation_batch(batch, credential_resolver=lambda ref: None,
+                    ftp_factory=lambda *args, **kwargs: SimpleNamespace(upload=lambda *a, **k: TransferResult("remote", hashlib.sha256(source.read_bytes()).hexdigest())),
+                    probe_runner=lambda path: probe)
+                item.refresh_from_db()
+                original_digest = hashlib.sha256(source.read_bytes()).hexdigest()
+                self.assertFalse(result["complete"])
+                self.assertEqual(item.selected_input_hash, original_digest)
+                source.write_bytes(b"replacement bytes")
+                retry = process_preparation_batch(batch, credential_resolver=lambda ref: "password",
+                    probe_runner=lambda path: probe)
+                self.assertFalse(retry["complete"])
+                self.assertTrue(any("stale" in blocker.lower() for blocker in retry["blockers"]))
+                item.refresh_from_db()
+                self.assertEqual(item.selected_input_hash, original_digest)
+
         def test_bypass_uses_approved_private_copy_if_source_path_changes(self):
             with TemporaryDirectory() as directory, override_settings(DATA_DIR=directory):
                 source, batch, item, probe = self._qualified_bypass_batch(directory)

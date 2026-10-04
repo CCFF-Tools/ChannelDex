@@ -26,6 +26,7 @@ from .models import AuditEvent, Device, Episode, MediaAsset, MediaIntakeReview, 
 
 QUEUE_STATES = ("queued", "encoding", "validating", "transferring", "verifying", "ready", "blocked", "failed", "cancelled")
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024 * 1024
+SUPPORTED_VIDEO_SUFFIXES = {".mp4", ".mov", ".mxf", ".mpeg", ".mpg", ".m4v", ".avi", ".mkv"}
 
 
 def _safe_name(name: str) -> str:
@@ -54,23 +55,50 @@ def validate_rows(rows, *, show):
     if not rows:
         raise ValueError("Add at least one source file.")
     seen = set()
+    seen_paths = set()
     validated = []
     for row in rows:
+        source_path = row.get("source_path") or row.get("path")
         upload = row.get("file") or row.get("source_video") or row.get("upload")
-        if upload is None or not getattr(upload, "name", ""):
-            raise ValueError("Every queue row requires a source file.")
-        if getattr(upload, "size", 1) == 0:
-            raise ValueError(f"{upload.name}: empty source files are not allowed.")
-        if getattr(upload, "size", 0) > MAX_UPLOAD_BYTES:
-            raise ValueError(f"{upload.name}: files larger than 50 GiB are not allowed.")
-        if Path(upload.name).suffix.casefold() not in {".mp4", ".mov", ".mxf", ".mpeg", ".mpg", ".m4v", ".avi", ".mkv"}:
-            raise ValueError(f"{upload.name}: unsupported video file type.")
+        if source_path:
+            path = Path(str(source_path)).expanduser()
+            try:
+                path = path.resolve(strict=True)
+                stat = path.stat()
+            except (OSError, RuntimeError):
+                raise ValueError(f"{Path(str(source_path)).name or 'Selected file'}: file is unavailable.")
+            if not path.is_file():
+                raise ValueError(f"{path.name}: selected path is not a regular file.")
+            if len(str(path)) > 500:
+                raise ValueError(f"{path.name}: selected path is too long for intake.")
+            if stat.st_size == 0:
+                raise ValueError(f"{path.name}: empty source files are not allowed.")
+            if stat.st_size > MAX_UPLOAD_BYTES:
+                raise ValueError(f"{path.name}: files larger than 50 GiB are not allowed.")
+            if path.suffix.casefold() not in SUPPORTED_VIDEO_SUFFIXES:
+                raise ValueError(f"{path.name}: unsupported video file type.")
+            name = path.name
+            path_key = str(path)
+            if path_key in seen_paths:
+                raise ValueError("Each local source file may appear only once in a batch.")
+            seen_paths.add(path_key)
+        else:
+            if upload is None or not getattr(upload, "name", ""):
+                raise ValueError("Every queue row requires a source file.")
+            if getattr(upload, "size", 1) == 0:
+                raise ValueError(f"{upload.name}: empty source files are not allowed.")
+            if getattr(upload, "size", 0) > MAX_UPLOAD_BYTES:
+                raise ValueError(f"{upload.name}: files larger than 50 GiB are not allowed.")
+            if Path(upload.name).suffix.casefold() not in SUPPORTED_VIDEO_SUFFIXES:
+                raise ValueError(f"{upload.name}: unsupported video file type.")
+            name = upload.name
         episode, title = _row_episode(row, show)
         key = f"episode:{episode.pk}" if episode else f"new:{title.casefold()}"
         if key in seen:
             raise ValueError("Each episode may appear only once in a batch.")
         seen.add(key)
-        validated.append({"upload": upload, "episode": episode, "title": title, "encode_before_transfer": bool(row.get("encode_before_transfer", True))})
+        validated.append({"upload": upload, "source_path": str(path) if source_path else None, "name": name,
+                          "episode": episode, "title": title, "encode_before_transfer": bool(row.get("encode_before_transfer", True))})
     return validated
 
 
@@ -207,18 +235,15 @@ def create_intake_review(*, target, show, episode=None, asset=None, action="prep
 
 def _stage_review_rows(review, rows):
     staged = []
-    paths = []
-    try:
-        for position, row in enumerate(validate_rows(rows, show=review.show)):
-            path = _store_upload(row["upload"])
-            paths.append(path)
-            staged.append({"path": str(path.resolve()), "hash": _sha256_file(path), "name": _safe_name(row["upload"].name),
-                           "episode_id": row["episode"].pk if row["episode"] else None, "new_title": row["title"],
-                           "encode_before_transfer": row["encode_before_transfer"], "position": position})
-    except Exception:
-        for path in paths:
-            path.unlink(missing_ok=True)
-        raise
+    for position, row in enumerate(validate_rows(rows, show=review.show)):
+        if not row.get("source_path"):
+            raise ValueError("Select local source paths with the file chooser.")
+        path = Path(row["source_path"])
+        stat = path.stat()
+        staged.append({"path": str(path), "name": _safe_name(row["name"]),
+                       "size": stat.st_size, "mtime_ns": stat.st_mtime_ns,
+                       "episode_id": row["episode"].pk if row["episode"] else None, "new_title": row["title"],
+                       "encode_before_transfer": row["encode_before_transfer"], "position": position})
     review.payload = {**review.payload, "rows": staged}
     review.save(update_fields=["payload"])
     return staged
@@ -368,15 +393,21 @@ def confirm_intake_review(review, *, first_premiere_date=None, actor="owner"):
     episodes = []
     for row in sorted(rows, key=lambda value: (value.get("position", 0), value.get("name", ""))):
         path = Path(row["path"])
-        if not path.is_file() or _sha256_file(path) != row.get("hash"):
+        try:
+            stat = path.stat()
+        except OSError:
+            raise ValueError("A staged source file changed or is unavailable; review the intake again.")
+        metadata = (stat.st_size, stat.st_mtime_ns)
+        expected = (row.get("size"), row.get("mtime_ns"))
+        if not path.is_file() or len(str(path)) > 500 or metadata != expected:
             raise ValueError("A staged source file changed or is unavailable; review the intake again.")
         episode = Episode.objects.filter(pk=row.get("episode_id"), show=review.show).first() if row.get("episode_id") else None
         if episode is None:
             episode = Episode.objects.create(show=review.show, title=row.get("new_title", "").strip())
         episodes.append(episode)
         prior = [int(v[1:]) for v in MediaAsset.objects.filter(episode=episode).values_list("version", flat=True) if v.startswith("v") and v[1:].isdigit()]
-        asset = MediaAsset.objects.create(episode=episode, file_name=row["name"], kind="source", version=f"v{max(prior or [0]) + 1}", smb_reference=str(path))
-        PreparationBatchItem.objects.create(batch=batch, asset=asset, selected_input_path=str(path), selected_input_hash=row["hash"], encode_before_transfer=bool(row.get("encode_before_transfer", True)), position=row.get("position", 0))
+        asset = MediaAsset.objects.create(episode=episode, file_name=row["name"], kind="source", version=f"v{max(prior or [0]) + 1}")
+        PreparationBatchItem.objects.create(batch=batch, asset=asset, selected_input_path=str(path), selected_input_hash="", encode_before_transfer=bool(row.get("encode_before_transfer", True)), position=row.get("position", 0))
     approve_snapshot(batch, preparation_batch_snapshot(batch), approval=1, actor=actor)
     batch.status = "approved"; batch.save(update_fields=["status"])
     PreparationJob.objects.get_or_create(batch=batch, idempotency_key=f"preparation:{batch.pk}:{batch.approval_1_hash}")
@@ -413,13 +444,16 @@ def media_queue(request):
             asset = MediaAsset.objects.filter(pk=request.POST.get("asset"), episode=episode).first() if episode else None
             response_status = 200
             if show and target:
-                rows = [{"file": upload, "episode_id": request.POST.get(f"episode_id_{index}"), "new_title": request.POST.get(f"new_title_{index}", ""), "encode_before_transfer": request.POST.get("encode_before_transfer") == "on"} for index, upload in enumerate(request.FILES.getlist("source_files"))]
+                source_paths = request.POST.getlist("source_paths")
+                rows = [{"source_path": source_path, "episode_id": request.POST.get(f"episode_id_{index}"), "new_title": request.POST.get(f"new_title_{index}", ""), "encode_before_transfer": request.POST.get("encode_before_transfer") == "on"} for index, source_path in enumerate(source_paths)]
                 review = None
                 try:
                     validate_rows(rows, show=show)
                     review = create_intake_review(target=target, show=show, episode=episode, asset=asset,
                         action=request.POST.get("next_action", "prepare_only"), order=request.POST.get("order", 0), item=request.POST.get("item"))
                     _stage_review_rows(review, rows)
+                    connected["show"] = show
+                    connected["target"] = target
                     connected["review"] = review
                     connected["review_rows"] = review.payload.get("rows", [])
                     if review.action == "prepare_and_plan":

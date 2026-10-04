@@ -550,9 +550,24 @@ def process_preparation_batch(batch, *, runner=subprocess.run, credential_resolv
         live_snapshots[str(item.asset.asset_id)] = {
             **preparation_snapshot(item),
             "selected_input_path": str(Path(path).resolve()) if path else "",
-            "selected_input_hash": _sha256_file(path) if path and Path(path).is_file() else "",
+            "selected_input_hash": (_sha256_file(path) if item.selected_input_hash and path and Path(path).is_file() else ""),
         }
-    if any(entry != live_snapshots.get(entry.get("asset_id")) for entry in approved_items):
+    persisted_hashes = {str(item.asset.asset_id): item.selected_input_hash or "" for item in items}
+    def snapshot_matches(approved, current):
+        if not current or approved.get("asset_id") != current.get("asset_id"):
+            return False
+        for key, value in approved.items():
+            if key == "selected_input_hash" and not value:
+                persisted = persisted_hashes.get(approved.get("asset_id"), "")
+                if not persisted:
+                    continue
+                if current.get(key) != persisted:
+                    return False
+                continue
+            if current.get(key) != value:
+                return False
+        return True
+    if any(not snapshot_matches(entry, live_snapshots.get(entry.get("asset_id"))) for entry in approved_items):
         message = "Approval 1 snapshot is stale"
         batch.approval_1_status = "stale"
         batch.status = "blocked"
@@ -581,6 +596,21 @@ def process_preparation_batch(batch, *, runner=subprocess.run, credential_resolv
         if not path or not Path(path).is_file():
             item.execution_status = "blocked"; item.blocker = "Needs attention: source path unavailable"; item.save(update_fields=["execution_status", "blocker"])
             blockers.append(f"{item.asset}: source path unavailable"); continue
+        if not item.selected_input_hash:
+            item.execution_status = "validating"
+            item.save(update_fields=["execution_status"])
+            try:
+                item.selected_input_path = str(Path(path).resolve())
+                item.selected_input_hash = _sha256_file(item.selected_input_path)
+                item.save(update_fields=["selected_input_path", "selected_input_hash"])
+                current["selected_input_path"] = item.selected_input_path
+                current["selected_input_hash"] = item.selected_input_hash
+            except OSError as exc:
+                item.execution_status = "blocked"
+                item.blocker = f"Needs attention: source file could not be hashed ({exc})"
+                item.save(update_fields=["execution_status", "blocker"])
+                blockers.append(f"{item.asset}: source file could not be hashed")
+                continue
         secret_ref = config.get("secret_reference")
         if not config.get("host") or not config.get("media_directory") or not secret_ref:
             item.execution_status = "blocked"; item.blocker = "Needs attention: target host, media directory, or secret reference is unavailable"; item.save(update_fields=["execution_status", "blocker"])

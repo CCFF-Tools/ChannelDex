@@ -4,12 +4,13 @@
 <div class="page-heading"><h1>Media Preparation</h1><p class="lede">Queue episode videos for one show and destination. Review the intake before creating preparation work. <a href="{% url 'help' %}">How this fits the full workflow</a>.</p></div>
 {% if connected.show %}<section class="help-panel" aria-label="Show context"><h2>Preparing for {{ connected.show.title }}</h2><p>{% if connected.episode %}Episode: {{ connected.episode.title }}{% endif %}{% if connected.asset %} · Asset: {{ connected.asset.file_name }}{% endif %}{% if connected.target %} · Destination: {{ connected.target.name }}{% endif %}</p></section>{% endif %}
 <section class="list-card" aria-label="Media queue status"><strong>Queue status</strong> <span>Queued <strong data-queue-count="queued">{{ queue.counts.queued|default:0 }}</strong></span> <span>Processing <strong data-queue-count="processing">0</strong></span> <span>Ready <strong data-queue-count="ready">{{ queue.counts.ready|default:0 }}</strong></span> <span>Need attention <strong data-queue-count="attention">0</strong></span></section>
-<form method="post" enctype="multipart/form-data" class="stacked-form list-card upload-dropzone" id="media-queue-form">{% csrf_token %}
+<form method="post" class="stacked-form list-card" id="media-queue-form">{% csrf_token %}
 {% if error or connected.error %}<p role="alert" class="errorlist">{{ error|default:connected.error }} Select the files again to review and submit.</p>{% endif %}
 <div class="field"><label for="queue-show">Show</label><select id="queue-show" name="show" required><option value="">Choose a show</option>{% for show in shows %}<option value="{{ show.pk }}"{% if connected.show.pk == show.pk %} selected{% endif %}>{{ show.title }}</option>{% endfor %}</select></div>
 <div class="field"><label for="queue-target">Destination device</label><select id="queue-target" name="target" required><option value="">Choose a device</option>{% for target in targets %}<option value="{{ target.pk }}"{% if connected.target.pk == target.pk %} selected{% endif %}>{{ target.name }}</option>{% endfor %}</select></div>
 <input type="hidden" name="episode" value="{{ connected.episode.pk|default:'' }}"><input type="hidden" name="asset" value="{{ connected.asset.pk|default:'' }}"><input type="hidden" name="item" value="{{ connected.item }}"><input type="hidden" name="order" value="{{ connected.order }}">
-<label class="drop-label" for="queue-files">Drop episode videos here or browse files</label><input id="queue-files" name="source_files" type="file" multiple required accept="video/*,.mxf,.mkv"><p class="helptext">Choose a show first, then identify each episode. A filename suggests a title; confirm each new episode or select an existing episode.</p>
+<button type="button" class="button-link" id="choose-media">Choose local media files</button> <span id="choose-media-status" class="helptext" role="status" aria-live="polite"></span><p class="helptext">ChannelDex records the selected paths and reads/hashes media in place; it does not copy source media. Only basenames are shown here.</p>
+<div id="queue-paths"></div>
 <div id="queue-rows"></div><label><input type="checkbox" name="encode_before_transfer" checked> Encode before transfer</label><p class="helptext">Uncheck only for externally encoded media qualified for this destination. Existing qualification checks still apply.</p>
 <input type="hidden" name="submission_token" value="{{ submission_token }}"><fieldset class="intake-options"><legend>Next step</legend><div class="intake-option"><input id="next-action-plan" type="radio" name="next_action" value="prepare_and_plan"{% if connected.show %} checked{% endif %}><label for="next-action-plan"><span class="intake-option-title">Prepare and plan premieres</span><span class="intake-option-description">Queue the media and review premiere/replay cycles before confirmation.</span></label></div><div class="intake-option"><input id="next-action-only" type="radio" name="next_action" value="prepare_only"{% if not connected.show %} checked{% endif %}><label for="next-action-only"><span class="intake-option-title">Prepare media only</span><span class="intake-option-description">Queue preparation and transfer without creating schedule cycles.</span></label></div></fieldset><button class="primary" type="submit" name="action" value="review_intake">Review intake</button><p>Queue preparation &amp; transfer after this review. Schedule delivery and activation remain separate gates.</p></form>
 {% if connected.reviewed %}<section class="help-panel" aria-label="Intake review"><h2>Review intake</h2><p>{{ connected.show.title }} · {% if connected.target %}{{ connected.target.name }}{% endif %} · {{ connected.review.action }}</p><ol>{% for row in connected.review_rows %}<li>{{ row.name }} → {% if row.episode_id %}episode {{ row.episode_id }}{% else %}new episode: {{ row.new_title }}{% endif %} · position {{ row.position|add:1 }} · {% if row.encode_before_transfer %}encode before transfer{% else %}already encoded{% endif %}</li>{% endfor %}</ol><p>Confirming creates the preparation batch and Approval 1 job once.{% if connected.review.action == 'prepare_and_plan' %} It also creates the exact premiere and replay cycles shown below. Any later queue, recurrence, or assignment change requires a fresh review.{% endif %}</p><form method="post">{% csrf_token %}<input type="hidden" name="action" value="confirm_intake"><input type="hidden" name="review_token" value="{{ connected.review.token }}">{% if connected.review.action == 'prepare_and_plan' %}<fieldset><legend>First premiere date</legend>{% for candidate in connected.premiere_candidates %}<div class="intake-option"><input id="premiere-{{ candidate.date|date:'Y-m-d' }}" type="radio" name="first_premiere_date" value="{{ candidate.date|date:'Y-m-d' }}"{% if candidate.recommended %} checked{% endif %}{% if candidate.occupied or not candidate.proposal %} disabled{% endif %}><label for="premiere-{{ candidate.date|date:'Y-m-d' }}"><span class="intake-option-title">{{ candidate.date|date:'l, F j, Y' }} at {{ candidate.slot.start_time|time:'g:i a' }} Eastern</span><span class="intake-option-description">{{ candidate.reason }}</span></label>{% if candidate.proposal %}<details><summary>Review this complete run</summary>{% for cycle in candidate.proposal.cycles %}<p><strong>{{ cycle.title }}</strong> · premiere {{ cycle.premiere_date }}</p><ul>{% for occurrence in cycle.occurrences %}<li>{{ occurrence.role|title }}: {{ occurrence.date }} at {{ occurrence.time }} Eastern</li>{% endfor %}</ul>{% endfor %}</details>{% endif %}</div>{% empty %}<p role="alert">No valid premiere dates are configured. Review this show's weekly times.</p>{% endfor %}</fieldset>{% endif %}<button class="primary" type="submit">Confirm and queue preparation</button></form></section>{% endif %}
@@ -20,11 +21,15 @@
 </section>
 <script>
 (() => {
-  const input = document.getElementById('queue-files'), rows = document.getElementById('queue-rows'), show = document.getElementById('queue-show');
+  const rows = document.getElementById('queue-rows'), pathsBox = document.getElementById('queue-paths'), chooser = document.getElementById('choose-media'), status = document.getElementById('choose-media-status'), show = document.getElementById('queue-show');
   const episodes = JSON.parse(document.getElementById('queue-episodes').textContent), form = document.getElementById('media-queue-form');
+  let selected = [];
   function draw() {
     rows.replaceChildren();
-    [...input.files].forEach((file, index) => {
+    pathsBox.replaceChildren();
+    selected.forEach((path, index) => {
+      const hidden = document.createElement('input'); hidden.type = 'hidden'; hidden.name = 'source_paths'; hidden.value = path; pathsBox.append(hidden);
+      const file = {name: path.split('/').pop()};
       const row = document.createElement('fieldset'), legend = document.createElement('legend');
       legend.textContent = `${index + 1}. ${file.name}`; row.append(legend);
       const label = document.createElement('label'), select = document.createElement('select');
@@ -39,10 +44,17 @@
       rows.append(row);
     });
   }
-  input.addEventListener('change', draw); show.addEventListener('change', draw);
-  form.addEventListener('dragover', event => { event.preventDefault(); form.classList.add('dragging'); });
-  form.addEventListener('dragleave', () => form.classList.remove('dragging'));
-  form.addEventListener('drop', event => { event.preventDefault(); form.classList.remove('dragging'); if (event.dataTransfer.files.length) { input.files = event.dataTransfer.files; draw(); } });
+  chooser.addEventListener('click', async () => {
+    status.textContent = 'Opening file chooser…';
+    try {
+      const csrf = form.querySelector('[name=csrfmiddlewaretoken]').value;
+      const response = await fetch('{% url "browse-path" %}', {method: 'POST', headers: {'X-CSRFToken': csrf, 'Content-Type': 'application/x-www-form-urlencoded'}, body: new URLSearchParams({kind: 'files'})});
+      const result = await response.json();
+      if (response.ok && result.paths) { selected = result.paths; draw(); status.textContent = `${selected.length} file${selected.length === 1 ? '' : 's'} selected`; }
+      else { status.textContent = result.error || 'The local file chooser failed.'; }
+    } catch (error) { status.textContent = 'The local file chooser is unavailable.'; }
+  });
+  show.addEventListener('change', draw);
 })();
 </script>
 {% endblock %}

@@ -4,7 +4,6 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
-from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import Client, TestCase, override_settings
 from django.utils import timezone
 
@@ -43,11 +42,15 @@ class ConnectedWorkflowTests(TestCase):
         return today + timedelta(days=(7 - today.weekday()) % 7)
 
     def _review(self, action="prepare_and_plan", files=1):
-        uploads = [SimpleUploadedFile(f"episode-{index + 1}.mp4", b"video" + bytes([index])) for index in range(files)]
+        uploads = []
+        for index in range(files):
+            path = Path(self.data_dir.name) / f"episode-{index + 1}.mp4"
+            path.write_bytes(b"video" + bytes([index]))
+            uploads.append(str(path))
         data = {
             "action": "review_intake", "next_action": action,
             "show": self.show.pk, "target": self.target.pk,
-            "source_files": uploads, "encode_before_transfer": "on",
+            "source_paths": uploads, "encode_before_transfer": "on",
         }
         for index in range(files):
             data[f"episode_id_{index}"] = "new"
@@ -57,11 +60,15 @@ class ConnectedWorkflowTests(TestCase):
         return MediaIntakeReview.objects.get()
 
     def test_review_stages_files_without_starting_work_then_confirms_once(self):
-        review = self._review(files=2)
+        with patch("pubtv.operations.media_queue._sha256_file", side_effect=AssertionError("review must not hash")) as digest:
+            review = self._review(files=2)
+        digest.assert_not_called()
         self.assertFalse(PreparationBatch.objects.exists())
         self.assertFalse(PreparationJob.objects.exists())
+        self.assertFalse((Path(self.data_dir.name) / "imports").exists())
         self.assertEqual([row["position"] for row in review.payload["rows"]], [0, 1])
         self.assertTrue(all(Path(row["path"]).is_file() for row in review.payload["rows"]))
+        self.assertTrue(all(self.data_dir.name not in row["name"] for row in review.payload["rows"]))
 
         first_date = self._first_monday().isoformat()
         response = Client().post("/media/", {
@@ -84,12 +91,17 @@ class ConnectedWorkflowTests(TestCase):
         self.assertEqual(PreparationJob.objects.count(), 1)
         self.assertEqual(WeeklyEpisodeAssignment.objects.count(), 2)
 
+
     def test_prepare_only_does_not_create_schedule_cycles(self):
         review = self._review(action="prepare_only")
         response = Client().post("/media/", {"action": "confirm_intake", "review_token": review.token})
         self.assertRedirects(response, "/media/")
         self.assertEqual(PreparationJob.objects.count(), 1)
         self.assertFalse(WeeklyEpisodeAssignment.objects.exists())
+        item = PreparationBatch.objects.get().items.get()
+        source = Path(review.payload["rows"][0]["path"])
+        self.assertEqual(item.selected_input_path, str(source.resolve()))
+        self.assertEqual(item.selected_input_hash, "")
 
     def test_changed_staged_file_rejects_confirmation_atomically(self):
         review = self._review(action="prepare_only")
@@ -120,10 +132,12 @@ class ConnectedWorkflowTests(TestCase):
         self.assertFalse(WeeklyEpisodeAssignment.objects.exists())
 
     def test_invalid_review_does_not_leave_pending_review(self):
+        invalid = Path(self.data_dir.name) / "notes.txt"
+        invalid.write_text("not video")
         response = Client().post("/media/", {
             "action": "review_intake", "next_action": "prepare_only",
             "show": self.show.pk, "target": self.target.pk,
-            "source_files": [SimpleUploadedFile("notes.txt", b"not video")],
+            "source_paths": [str(invalid)],
             "episode_id_0": "new", "new_title_0": "Invalid",
         })
 
@@ -132,6 +146,16 @@ class ConnectedWorkflowTests(TestCase):
         self.assertFalse(MediaIntakeReview.objects.exists())
         self.assertFalse(PreparationJob.objects.exists())
 
+    def test_unavailable_local_path_is_user_visible_400(self):
+        response = Client().post("/media/", {
+            "action": "review_intake", "next_action": "prepare_only",
+            "show": self.show.pk, "target": self.target.pk,
+            "source_paths": [str(Path(self.data_dir.name) / "missing.mp4")],
+            "episode_id_0": "new", "new_title_0": "Missing",
+        })
+        self.assertEqual(response.status_code, 400)
+        self.assertContains(response, "file is unavailable", status_code=400)
+
     def test_show_context_prefills_the_media_intake(self):
         response = Client().get(f"/media/?show={self.show.pk}")
         self.assertContains(response, f'value="{self.show.pk}" selected')
@@ -139,11 +163,13 @@ class ConnectedWorkflowTests(TestCase):
 
     def test_review_with_missing_active_premiere_slot_returns_validation_page(self):
         candidate_date = self._first_monday()
+        source = Path(self.data_dir.name) / "episode.mp4"
+        source.write_bytes(b"video")
         with patch("pubtv.operations.premiere_planning._active_premiere_dates", return_value=[candidate_date + timedelta(days=1)]):
             response = Client().post("/media/", {
                 "action": "review_intake", "next_action": "prepare_and_plan",
                 "show": self.show.pk, "target": self.target.pk,
-                "source_files": [SimpleUploadedFile("episode.mp4", b"video")],
+                "source_paths": [str(source)],
                 "episode_id_0": "new", "new_title_0": "Missing slot",
             })
         self.assertEqual(response.status_code, 200)

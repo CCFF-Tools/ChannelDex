@@ -184,6 +184,16 @@ Consecutive premiere proposals require explicit confirmation, preserve reviewed
 order, and reject conflicts rather than moving episodes around them. Schedule
 media versions are explicit reviewed choices; readiness never initiates delivery.
 Controller activation remains a separate attended action behind existing gates.
+
+## Accepted: orchestrate proven media tools (2026-10-04)
+
+ChannelDex coordinates the media workflow without replacing tools that already
+perform their specialties reliably. It records local source paths without
+uploading or copying the source media, delegates encoding to AME or FFmpeg, and
+uses its qualified FTP adapter for straightforward transfers. ChannelDex owns
+the decoded NMG/BIN generation and mutation needed to remove the WinLGX/Windows
+dependency, along with workflow state, review gates, provenance, and audit.
+Automation should link these steps rather than reimplementing media processing.
 ### Device diagnostics remain observational (accepted)
 
 Device diagnostics may use an explicitly submitted, unsaved configuration for a short-timeout FTP login/listing and local tool/evidence checks. They must not write to the target, encode media, upload schedules, or change qualification status. Observed and approved fingerprints are shown separately; mismatches are stale and require explicit review. Future automatic preparation and unattended delivery remain proposed.

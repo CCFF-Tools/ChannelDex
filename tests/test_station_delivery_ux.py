@@ -5,13 +5,12 @@ import plistlib
 from datetime import datetime
 from unittest.mock import Mock, patch
 
-from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import IntegrityError
 from django.test import Client, TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
 
 from pubtv.operations.models import (AuditEvent, Device, Episode, MediaAsset, Occurrence,
-                                     PreparationBatch, PreparationBatchItem, PreparationJob,
+                                     PreparationBatch, PreparationBatchItem, PreparationJob, MediaIntakeReview,
                                      SchedulePublicationBatch, Show, Station, UltraNexusTargetSettings)
 from pubtv.ultranexus.encoding import discover_ame, discover_ffmpeg
 from pubtv.ultranexus.secrets import KeychainSecretStore, device_secret_reference
@@ -127,6 +126,17 @@ class StationDeliveryUXTests(TestCase):
         assert "(7)" not in failed["error"]
 
     @patch("pubtv.operations.views.subprocess.run")
+    def test_browse_files_returns_multiple_existing_paths(self, run):
+        with tempfile.TemporaryDirectory() as directory:
+            first, second = Path(directory) / "one.mp4", Path(directory) / "two.mxf"
+            first.write_bytes(b"1"); second.write_bytes(b"2")
+            run.return_value = Mock(returncode=0, stdout=f"{first}\n{second}\n")
+            response = Client().post("/settings/browse/", {"kind": "files"})
+        assert response.status_code == 200
+        assert response.json()["paths"] == [str(first.resolve()), str(second.resolve())]
+        assert "multiple selections allowed" in run.call_args.args[0][2]
+
+    @patch("pubtv.operations.views.subprocess.run")
     def test_browse_application_uses_plist_executable_and_trailing_slash(self, run):
         with tempfile.TemporaryDirectory() as directory:
             app = Path(directory) / "Adobe Media Encoder 2026" / "Adobe Media Encoder 2026.app"
@@ -153,16 +163,20 @@ class StationDeliveryUXTests(TestCase):
         occurrence = Occurrence.objects.create(station=station, show=show, episode=episode,
             item_type="episode", label="Episode 1", starts_at=timezone.now(), planned_duration_seconds=1800)
         with tempfile.TemporaryDirectory() as directory, self.settings(DATA_DIR=Path(directory)):
-            response = Client().post("/prepare/", {"source_files": [SimpleUploadedFile("episode.mp4", b"video")],
+            source = Path(directory) / "episode.mp4"
+            source.write_bytes(b"video")
+            client = Client()
+            response = client.post("/prepare/", {"action": "review_intake", "next_action": "prepare_only", "source_paths": [str(source)],
                 "target": device.pk, "show": show.pk, "episode_id_0": episode.pk,
                 "submission_token": str(uuid.uuid4()), "encode_before_transfer": "on"})
-            self.assertEqual(response.status_code, 302)
+            self.assertEqual(response.status_code, 200)
+            review = MediaIntakeReview.objects.get()
+            self.assertEqual(client.post("/prepare/", {"action": "confirm_intake", "review_token": review.token}).status_code, 302)
             item = PreparationBatchItem.objects.get(asset__episode=episode)
             source_path = Path(item.selected_input_path)
-            self.assertTrue(source_path.exists())
+            self.assertEqual(source_path, source.resolve())
             self.assertTrue(PreparationJob.objects.filter(batch=item.batch).exists())
-            self.assertEqual(stat.S_IMODE(source_path.stat().st_mode), 0o600)
-            self.assertEqual(stat.S_IMODE(source_path.parent.stat().st_mode), 0o700)
+            self.assertFalse((Path(directory) / "imports").exists())
             self.assertIsNone(item.occurrence_id)
             occurrence.refresh_from_db()
             self.assertIsNone(occurrence.asset_id)
