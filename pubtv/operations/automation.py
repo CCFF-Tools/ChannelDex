@@ -561,6 +561,11 @@ def process_preparation_batch(batch, *, runner=subprocess.run, credential_resolv
                 if ame and _gate_passed(batch.target, "ame_scripting"):
                     if not config.get("ame_preset"):
                         raise RuntimeError("qualified AME preset path is unavailable")
+                    preset_path = Path(config["ame_preset"])
+                    preset_hash = str(config.get("ame_preset_sha256") or "").lower()
+                    if (not preset_path.is_file() or len(preset_hash) != 64
+                            or _sha256_file(preset_path) != preset_hash):
+                        raise RuntimeError("qualified AME preset is missing or its SHA-256 changed")
                     if ame_process_checker(ame):
                         raise RuntimeError("Adobe Media Encoder is already running; refusing to disturb unrelated work")
                     encoder_backend = "adobe_media_encoder"
@@ -633,7 +638,14 @@ def process_preparation_batch(batch, *, runner=subprocess.run, credential_resolv
                     item.save(update_fields=["execution_status"])
                 adapter.progress_callback = transfer_progress
             attempt = TransferAttempt.objects.create(item=item, target=batch.target, status="started")
-            transfer = adapter.upload(str(output), remote_path, overwrite=False)
+            transfer_options = {"overwrite": False}
+            if isinstance(adapter, StdlibFTPAdapter):
+                owner_token = f"item-{item.pk}-{batch.approval_1_hash[:16]}"
+                transfer_options["owner_token"] = owner_token
+                attempt.evidence = {"owner_token": owner_token,
+                                    "staging_path": adapter._staging_path(remote_path, owner_token)}
+                attempt.save(update_fields=["evidence"])
+            transfer = adapter.upload(str(output), remote_path, **transfer_options)
             if transfer.sha256.lower() != digest.lower():
                 raise RuntimeError("remote transfer verification hash does not match the approved local bytes")
             item.execution_status = "verifying"
@@ -662,7 +674,8 @@ def process_preparation_batch(batch, *, runner=subprocess.run, credential_resolv
                 attempt.status = "succeeded"
                 attempt.external_reference = transfer.remote_path
                 attempt.artifact_hash = transfer.sha256
-                attempt.evidence = {"reused": transfer.reused, "verified_sha256": transfer.sha256}
+                attempt.evidence = {**attempt.evidence, "reused": transfer.reused,
+                                    "verified_sha256": transfer.sha256}
                 attempt.save(update_fields=["status", "external_reference", "artifact_hash", "evidence"])
                 item.resulting_inspection = inspection
                 item.resulting_binding = binding
@@ -710,6 +723,8 @@ def process_preparation_job(job, **kwargs):
 
 def generate_nmg_artifact(batch):
     """Generate one immutable, locally validated selected-change NMG revision."""
+    if batch.status == "cancelled":
+        raise ValueError("Cancelled publications cannot generate artifacts")
     if batch.workflow_mode != "selected_changes":
         raise ValueError("Full-week NMG generation remains disabled pending qualification.")
     cycle_blockers = publication_cycle_provenance_blockers(batch)
@@ -880,6 +895,8 @@ def generate_nmg_artifact(batch):
         with transaction.atomic():
             Device.objects.select_for_update().get(pk=batch.target_id)
             locked = SchedulePublicationBatch.objects.select_for_update().get(pk=batch.pk)
+            if locked.status == "cancelled":
+                raise ValueError("Publication cancelled during generation")
             current_settings = UltraNexusTargetSettings.objects.select_for_update().filter(
                 target_id=batch.target_id, is_current=True
             ).first()
@@ -909,6 +926,8 @@ def generate_nmg_artifact(batch):
 
 
 def generate_bin_artifact(batch):
+    if batch.status == "cancelled":
+        raise ValueError("Cancelled publications cannot generate artifacts")
     cycle_blockers = publication_cycle_provenance_blockers(batch)
     if cycle_blockers:
         raise ValueError("Cycle selection is stale: " + "; ".join(cycle_blockers))
@@ -1038,6 +1057,8 @@ def generate_bin_artifact(batch):
         with transaction.atomic():
             Device.objects.select_for_update().get(pk=batch.target_id)
             locked = SchedulePublicationBatch.objects.select_for_update().get(pk=batch.pk)
+            if locked.status == "cancelled":
+                raise ValueError("Publication cancelled during generation")
             if settings_record_snapshot(UltraNexusTargetSettings.objects.filter(target=batch.target, is_current=True).first()) != settings_snapshot:
                 raise ValueError("Target settings changed during BIN generation")
             revision = (locked.artifact_revisions.filter(artifact_type="bin").order_by("-revision").values_list("revision", flat=True).first() or 0) + 1
@@ -1167,7 +1188,7 @@ def publication_snapshot(batch):
     cycles = [{"assignment": _assignment_snapshot(choice.assignment),
                "asset": _asset_snapshot(choice.asset), "reviewed_snapshot": choice.reviewed_snapshot}
               for choice in batch.cycle_selections.select_related("assignment__show__station", "asset")]
-    return {"target_id": batch.target_id, "target_settings": target_settings_snapshot(batch.target),
+    result = {"target_id": batch.target_id, "target_settings": target_settings_snapshot(batch.target),
             "workflow_mode": batch.workflow_mode,
             "reconciliation_mode": batch.reconciliation_mode,
             "requested_activation_at": batch.requested_activation_at.isoformat() if batch.requested_activation_at else None,
@@ -1177,6 +1198,9 @@ def publication_snapshot(batch):
             "occurrences": [{"id": s.occurrence_id, "revision": s.occurrence_revision,
                              "operation": s.operation, "source_bin_slot": s.source_bin_slot,
                              "source_bin_record_hash": s.source_bin_record_hash.lower()} for s in selections]}
+    if batch.approval_2_snapshot.get("review_hash"):
+        result["review_hash"] = batch.approval_2_snapshot["review_hash"]
+    return result
 
 
 # Descriptive aliases keep callers decoupled from the storage field names.

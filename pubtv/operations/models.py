@@ -1035,7 +1035,7 @@ class ScheduleDeliveryOperation(models.Model):
     STATES = [(x, x.replace("_", " ").title()) for x in (
         "prepared", "staged", "promotion_started", "schedule_transferred",
         "activation_requested", "activation_acknowledged", "activation_observed",
-        "ambiguous", "rollback_started", "rollback_ambiguous", "failed", "rolled_back")]
+        "ambiguous", "rollback_started", "rollback_ambiguous", "failed", "rolled_back", "cancelled")]
     ACTIVE = ("prepared", "staged", "promotion_started", "schedule_transferred",
               "activation_requested", "activation_acknowledged", "ambiguous",
               "rollback_started", "rollback_ambiguous")
