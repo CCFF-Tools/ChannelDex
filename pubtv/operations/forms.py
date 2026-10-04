@@ -9,7 +9,6 @@ from .models import (
     RecurrenceSlot, Show, Station, UploadedScheduleRevision,
     WeeklyEpisodeAssignment,
     PreparationBatch, SchedulePublicationBatch, MediaInspection, ResearchGate,
-    UltraNexusTargetSettings,
 )
 
 
@@ -177,17 +176,9 @@ class AutomationPublicationForm(forms.Form):
 
 class UltraNexusSettingsForm(forms.Form):
     settings_version = forms.IntegerField(required=False, min_value=0, widget=forms.HiddenInput())
-    controller_family = forms.CharField(required=False, initial="UltraNEXUS-HD")
-    firmware_version = forms.CharField(required=False, initial="7.0.3.48")
-    output_number = forms.IntegerField(required=False, min_value=1, initial=1)
-    media_profile = forms.CharField(required=False, initial="Nexus Mono")
-    profile_identity_hash = forms.CharField(required=False, help_text="SHA-256 of the accepted target media-profile evidence.")
-    ame_preset_sha256 = forms.CharField(required=False, help_text="SHA-256 of the exact accepted AME preset.")
-    ffmpeg_profile_sha256 = forms.CharField(required=False, help_text="SHA-256 of the exact FFmpeg argument profile.")
-    nmg_template_sha256 = forms.CharField(required=False, help_text="SHA-256 of the qualified NMG resource+schedule template records.")
-    bin_template_sha256 = forms.CharField(required=False, help_text="SHA-256 of the qualified BIN resource+schedule template records.")
-    qualification_status = forms.ChoiceField(choices=UltraNexusTargetSettings.QUALIFICATION_STATUS, initial="open", required=False)
-    qualification_evidence_hash = forms.CharField(required=False, help_text="SHA-256 of the destination qualification evidence.")
+    # Qualification evidence is deliberately read-only.  These values are
+    # retained from the current trusted record by the view and never accepted
+    # from the ordinary editable POST surface.
     host = forms.CharField(required=False, help_text="Controller FTP host or IP address.")
     port = forms.IntegerField(required=False, min_value=1, max_value=65535, initial=21)
     ftp_username = forms.CharField(required=False, widget=forms.HiddenInput())
@@ -196,23 +187,14 @@ class UltraNexusSettingsForm(forms.Form):
     secret_reference = forms.CharField(required=False, widget=forms.HiddenInput())
     reconciliation_mode = forms.ChoiceField(choices=SchedulePublicationBatch.RECONCILIATION_MODES, initial="preserve", required=False)
     base_nmg_path = forms.CharField(required=False)
-    base_nmg_hash = forms.CharField(required=False)
     base_bin_path = forms.CharField(required=False, help_text="Private local copy of the qualified controller schedule.bin.")
-    base_bin_hash = forms.CharField(required=False, help_text="Approved SHA-256 of that exact BIN.")
     command_port = forms.IntegerField(required=False, min_value=1, max_value=65535, initial=23)
     command_username = forms.CharField(required=False, widget=forms.HiddenInput())
     command_secret_reference = forms.CharField(required=False, widget=forms.HiddenInput())
-    bin_resource_template_reference = forms.IntegerField(required=False, min_value=1)
-    bin_schedule_template_slot = forms.IntegerField(required=False, min_value=0, max_value=2999)
     ame_executable = forms.CharField(required=False)
     ame_preset = forms.CharField(required=False, help_text="Path to the reviewed Nexus Mono .epr preset.")
     ffmpeg_executable = forms.CharField(required=False, help_text="Exact qualified FFmpeg executable path.")
-    ffmpeg_build_sha256 = forms.CharField(required=False, help_text="SHA-256 of that executable.")
     ffmpeg_qualification_manifest = forms.CharField(required=False, help_text="Private AME/FFmpeg comparison manifest path.")
-    ffmpeg_qualification_sha256 = forms.CharField(required=False, help_text="SHA-256 of the reviewed comparison manifest.")
-    nmg_resource_template_reference = forms.IntegerField(required=False, min_value=1, help_text="Qualified Nexus Mono resource reference to clone.")
-    nmg_schedule_template_base = forms.IntegerField(required=False, min_value=46586, help_text="Qualified aligned schedule record byte offset to clone.")
-    capability_flags = forms.CharField(required=False, help_text="Comma-separated qualified capability names.")
     # Friendly aliases used by Station Settings. Legacy ftp/command fields
     # remain accepted and are populated together by the view.
     username = forms.CharField(required=False, label="Controller username")

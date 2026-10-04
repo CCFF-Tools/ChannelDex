@@ -6,5 +6,5 @@
 {% for day in days %}
   <h2>{{ day.grouper }}</h2>
   {% for o in day.list %}<article class="list-card agenda-item"><div><strong>{{ o.starts_at|date:'g:i a' }}</strong> · <span class="badge">{{ o.schedule_context }}</span> · {{ o.get_item_type_display }} · {{ o.label }}{% if o.show %} · {{ o.show.title }}{% endif %}{% if o.episode %} · {{ o.episode.title }}{% endif %} · {{ o.readiness.label }}</div><div class="item-actions"><a class="button-link primary" href="{% url 'occurrence-workbench' o.pk %}">Open workbench</a><a class="button-link" href="{% url 'occurrence-edit' o.pk %}">Edit plan</a></div></article>{% endfor %}
-{% empty %}<div class="empty-state"><p>No upcoming planned items.</p><a class="button-link primary" href="{% url 'occurrence-create' %}">Add schedule item</a></div>{% endfor %}
+{% empty %}<div class="empty-state"><p>No upcoming planned items.</p><a class="button-link primary" href="{% url 'occurrence-create' %}">Add to schedule</a></div>{% endfor %}
 {% endblock %}

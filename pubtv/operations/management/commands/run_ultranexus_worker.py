@@ -9,6 +9,7 @@ from django.db.models import Q
 from django.utils import timezone
 
 from pubtv.operations.automation import process_due_job_state, process_preparation_job
+from pubtv.operations.services import reconcile_passed_premieres
 from pubtv.operations.models import PreparationJob, PublicationJob
 
 
@@ -81,8 +82,10 @@ class Command(BaseCommand):
         )
         poll_seconds = max(0.25, options["poll_seconds"])
         try:
+            reconcile_passed_premieres()
             while True:
                 processed = False
+                processed = bool(reconcile_passed_premieres())
                 preparation = self._claim_preparation()
                 if preparation:
                     process_preparation_job(preparation)

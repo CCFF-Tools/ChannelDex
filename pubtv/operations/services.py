@@ -423,17 +423,69 @@ def preparation_readiness(occurrence):
     complete = sum(1 for value in values.values() if value not in ("", None, "no", False))
     return {"complete": complete, "total": len(required), "label": f"{complete}/{len(required)} preparation facts", "ready": complete == len(required)}
 
+
+def pending_episode_reason(episode, now=None):
+    """Return the operator-facing reason a pending episode is still queued."""
+    now = now or timezone.now()
+    assignment = episode.weeklyepisodeassignment_set.filter(
+        selection_type="premiere", episode_id=episode.pk,
+    ).order_by("premiere_date", "week_start", "pk").first()
+    if not assignment:
+        return "review required"
+    occurrence = episode.occurrences.filter(schedule_role="premiere").order_by("starts_at").first()
+    if not occurrence:
+        return "upcoming"
+    if occurrence.starts_at >= now:
+        return "upcoming"
+    active_coverage = UploadedOccurrenceCoverage.objects.filter(
+        occurrence=occurrence,
+        occurrence_revision=occurrence.revision,
+        upload__state="active",
+    )
+    stale_coverage = UploadedOccurrenceCoverage.objects.filter(
+        occurrence=occurrence,
+    ).exclude(occurrence_revision=occurrence.revision).exists() or UploadedOccurrenceCoverage.objects.filter(
+        occurrence=occurrence, upload__state__in=("superseded", "invalidated"),
+    ).exists()
+    if not active_coverage.exists():
+        return "stale upload" if stale_coverage else "missing upload"
+    if not occurrence.programming.filter(device_id__in=active_coverage.values("upload__device_id")).exists():
+        return "missing programming"
+    return "review required"
+
+
+def reconcile_passed_premieres(now=None):
+    """Advance all eligible premiere episodes once; safe for repeated workers."""
+    now = now or timezone.now()
+    changed = 0
+    for occurrence in Occurrence.objects.filter(
+        item_type="episode", status="planned", schedule_role="premiere", starts_at__lt=now,
+    ).select_related("episode", "station", "weekly_assignment", "recurrence_slot"):
+        changed += int(advance_passed_premiere(occurrence, now=now))
+    return changed
+
 @transaction.atomic
 def advance_passed_premiere(occurrence, now=None):
     """Classify a passed premiere only with exact active upload coverage."""
     now = now or timezone.now()
+    occurrence = Occurrence.objects.select_for_update().select_related(
+        "episode", "station", "weekly_assignment", "recurrence_slot",
+    ).get(pk=occurrence.pk)
     if occurrence.item_type != "episode" or occurrence.status != "planned" or occurrence.starts_at >= now:
         return False
     if not occurrence.episode or occurrence.episode.status != "pending": return False
+    if occurrence.schedule_role != "premiere":
+        return False
     local_date = timezone.localtime(occurrence.starts_at, ZoneInfo(occurrence.station.timezone)).date()
     week_start = local_date - timedelta(days=local_date.weekday())
     assignment = occurrence.weekly_assignment
     if not assignment or assignment.show_id != occurrence.episode.show_id or assignment.episode_id != occurrence.episode_id or assignment.week_start != week_start or assignment.selection_type != "premiere": return False
+    if occurrence.recurrence_slot_id:
+        slot = occurrence.recurrence_slot
+        if not slot.is_premiere or slot.weekday != local_date.weekday() or (slot.active_from and local_date < slot.active_from) or (slot.active_until and local_date > slot.active_until):
+            return False
+        if assignment.premiere_date and assignment.premiere_date != local_date:
+            return False
     covered = any(
         coverage.occurrence.programming.filter(device_id=coverage.upload.device_id).exists()
         for coverage in UploadedOccurrenceCoverage.objects.filter(
@@ -441,4 +493,10 @@ def advance_passed_premiere(occurrence, now=None):
         ).select_related("upload", "occurrence")
     )
     if not covered: return False
-    return Episode.objects.filter(pk=occurrence.episode_id, status="pending").update(status="previously_scheduled") == 1
+    episode = Episode.objects.select_for_update().filter(pk=occurrence.episode_id, status="pending").first()
+    if not episode:
+        return False
+    episode.status = "previously_scheduled"
+    episode.save(update_fields=["status"])
+    audit("advance", "Episode", episode, f"Premiere passed with active exact-revision upload for {occurrence}")
+    return True

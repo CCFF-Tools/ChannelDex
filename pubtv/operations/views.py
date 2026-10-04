@@ -9,12 +9,14 @@ from django.views.decorators.http import require_POST
 import os
 import signal
 import threading
+import hashlib
+from ftplib import FTP
 from django.core.exceptions import ValidationError
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
 from .forms import OccurrenceForm, StationForm, CarryForwardSettingsForm, DeviceForm, ShowForm, ShowSlotDurationForm, EpisodeForm, ProducerForm, EpisodeMilestoneForm, AssetForm, DeliveryForm, SlotForm, AssignmentForm, AssetPreparationForm, AssetTargetTransferForm, ProgrammingForm, UploadForm, AiringForm, AutomationPreparationForm, AutomationPublicationForm, UltraNexusSettingsForm
 from .models import Episode, EpisodeWorkflowMilestone, Occurrence, Show, Station, Device, Producer, MediaAsset, Delivery, RecurrenceSlot, WeeklyEpisodeAssignment, Preparation, AssetPreparation, AssetTargetTransfer, OccurrenceProgramming, UploadedOccurrenceCoverage, UploadedScheduleRevision, AiringEvidence, AuditEvent, UltraNexusTargetSettings, PreparationBatch, PreparationBatchItem, PreparationJob, SchedulePublicationBatch, ScheduleDeliveryOperation, OccurrenceRevisionSelection, ResearchGate, TransferAttempt
-from .services import schedule_alerts, audit, materialize_assignment, ensure_carry_forward_week, next_premiere_date, suggested_pending_episode, confirm_preparation_fact, create_upload_snapshot, revise_airing, sign_upload_preview, load_upload_preview, commit_upload_preview, preparation_readiness, calendar_capacity
+from .services import schedule_alerts, audit, materialize_assignment, ensure_carry_forward_week, next_premiere_date, suggested_pending_episode, confirm_preparation_fact, create_upload_snapshot, revise_airing, sign_upload_preview, load_upload_preview, commit_upload_preview, preparation_readiness, calendar_capacity, pending_episode_reason
 from .automation import approve_snapshot, canonical_hash, invalidate_snapshot, preparation_batch_snapshot, publication_snapshot, preview_schedule, approve_preparation_batch, schedule_ready_binding, generate_nmg_artifact, generate_bin_artifact, publication_artifact_blockers
 from .publication_delivery import stage_publication, activate_publication, observe_activation, rollback_publication
 from .publication_review import capture_controller_snapshot, publication_review, validate_review_token, cancel_publication
@@ -27,6 +29,89 @@ import re
 import subprocess
 import uuid
 from django.conf import settings as django_settings
+
+
+def _file_evidence(path, approved_hash=""):
+    """Return safe local evidence for a diagnostic; never approves it."""
+    result = {"path": str(path or ""), "readable": False, "observed_hash": "", "approved_hash": approved_hash or "", "stale": False}
+    if not path:
+        return result
+    try:
+        digest = hashlib.sha256()
+        with open(path, "rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        result["readable"] = True
+        result["observed_hash"] = digest.hexdigest()
+        result["stale"] = bool(approved_hash and result["observed_hash"].lower() != approved_hash.lower())
+    except (OSError, ValueError):
+        result["error"] = "File is unavailable or unreadable."
+    return result
+
+
+def _run_device_diagnostics(target, posted, current, only=None):
+    """Probe only the displayed settings; no upload, encoding, or approval."""
+    def value(name, fallback=""):
+        return posted.get(name) if name in posted else getattr(current, name, fallback) if current else fallback
+
+    config = dict(current.settings) if current else {}
+    config.update({key: posted.get(key, config.get(key, "")) for key in ("ame_executable", "ame_preset", "ffmpeg_executable", "ffmpeg_qualification_manifest")})
+    username = posted.get("username") or config.get("ftp_username") or (current.command_username if current else "")
+    findings = []
+    if only in (None, "ftp"):
+        ftp = {"name": "FTP login and directory access", "status": "unknown"}
+        password = posted.get("password", "")
+        connection = None
+        try:
+            if not password and current and (current.secret_reference or current.command_secret_reference):
+                reference = current.secret_reference or current.command_secret_reference
+                service, account = reference.split(":", 1)
+                password = KeychainSecretStore().get(type(device_secret_reference(target.pk))(service, account))
+            if not value("host") or not username or not password:
+                ftp.update(status="blocked", detail="Host, username, or Keychain password is unavailable.")
+            else:
+                connection = FTP()
+                connection.connect(value("host"), int(value("port", 21) or 21), timeout=3)
+                connection.login(username, password)
+                connection.nlst(value("media_directory", ""))
+                connection.quit()
+                ftp.update(status="pass", detail="Login and directory listing succeeded; no files were changed.", details=["Connection opened with a 3-second timeout.", "Directory listing completed.", "No STOR, DELE, rename, or other write command was issued."])
+        except Exception:
+            try:
+                connection.close()
+            except Exception:
+                pass
+            ftp.update(status="fail", detail="Login or directory listing failed.", details=["The failure was redacted to avoid exposing credentials or server details."])
+        findings.append(ftp)
+
+    if only in (None, "ame"):
+        ame_path = config.get("ame_executable")
+        preset_path = config.get("ame_preset")
+        ame = _file_evidence(ame_path)
+        preset = _file_evidence(preset_path, current.ame_preset_sha256 if current else "")
+        ame_ok = ame["readable"] and preset["readable"] and not preset["stale"]
+        findings.append({"name": "AME executable and preset", "status": "observed" if ame_ok else "fail", "detail": "Executable and preset are readable; this does not qualify encoding.", "details": [f"Executable: {'found' if ame['readable'] else 'missing'}.", f"Preset: {'found' if preset['readable'] else 'missing'}.", f"Approved fingerprint: {'matches' if preset['readable'] and not preset['stale'] and preset['approved_hash'] else 'not confirmed'}.", "No encoding or qualification action was performed."]})
+
+    if only in (None, "ffmpeg"):
+        ffmpeg_path = config.get("ffmpeg_executable")
+        ffprobe_path = str(Path(ffmpeg_path).with_name("ffprobe")) if ffmpeg_path else ""
+        versions = {}
+        for name, path in (("FFmpeg", ffmpeg_path), ("ffprobe", ffprobe_path)):
+            try:
+                completed = subprocess.run((path, "-version"), check=False, capture_output=True, text=True, timeout=3)
+                versions[name] = (completed.stdout or completed.stderr).splitlines()[0][:160] if completed.returncode == 0 else "unavailable"
+            except (OSError, subprocess.SubprocessError, ValueError):
+                versions[name] = "unavailable"
+        findings.append({"name": "FFmpeg and ffprobe", "status": "pass" if all(v != "unavailable" for v in versions.values()) else "fail", "detail": "Version probes completed without encoding.", "details": [f"{name}: {version}" for name, version in versions.items()]})
+
+    if only in (None, "evidence"):
+        evidence = []
+        for label, path, approved in (("base NMG", value("base_nmg_path"), current.base_nmg_hash if current else ""), ("base BIN", value("base_bin_path"), current.base_bin_hash if current else ""), ("qualification manifest", config.get("ffmpeg_qualification_manifest"), config.get("ffmpeg_qualification_sha256", ""))):
+            evidence.append({"name": label, **_file_evidence(path, approved)})
+        evidence_ok = bool(evidence) and all(item["path"] and item["readable"] and item["approved_hash"] and not item["stale"] for item in evidence)
+        unconfirmed = any(item["path"] and item["readable"] and not item["approved_hash"] for item in evidence)
+        findings.append({"name": "Evidence-file integrity", "status": "pass" if evidence_ok else "blocked" if unconfirmed else "fail", "detail": "Observed files are compared with approved fingerprints; missing approvals and mismatches remain unconfirmed.", "details": [f"{item['name']}: {'missing' if not item['path'] else 'unreadable' if not item['readable'] else 'approved fingerprint missing' if not item['approved_hash'] else 'stale mismatch' if item['stale'] else 'readable and matching'}" for item in evidence]})
+    return findings
 
 
 @require_POST
@@ -179,6 +264,10 @@ def settings_view(request):
     return render(request, "settings.html", {"station": station, "devices": Device.objects.all().order_by("name"), "carry_forward_form": carry_forward_form})
 
 
+def help_page(request):
+    return render(request, "help.html")
+
+
 def device_settings(request, pk):
     target = get_object_or_404(Device, pk=pk)
     current = UltraNexusTargetSettings.objects.filter(target=target, is_current=True).first()
@@ -205,6 +294,14 @@ def device_settings(request, pk):
         initial["ame_executable"] = detected.get("ame") or ""
     if not initial.get("ffmpeg_executable"):
         initial["ffmpeg_executable"] = detected.get("ffmpeg") or ""
+    diagnostic_actions = {
+        "diagnostics": None, "test_ftp": "ftp", "test_ame": "ame",
+        "test_ffmpeg": "ffmpeg", "test_evidence": "evidence",
+    }
+    if request.method == "POST" and request.POST.get("action") in diagnostic_actions:
+        diagnostics = _run_device_diagnostics(target, request.POST, current, diagnostic_actions[request.POST.get("action")])
+        form = UltraNexusSettingsForm(request.POST or initial)
+        return render(request, "device_settings.html", {"target": target, "form": form, "current": current, "diagnostics": diagnostics})
     if request.method == "POST":
         form = UltraNexusSettingsForm(request.POST)
         if form.is_valid():
@@ -217,12 +314,8 @@ def device_settings(request, pk):
             if expected_version != displayed_version:
                 form.add_error(None, "These device settings changed in another window. Reload and review them before saving.")
                 return render(request, "device_settings.html", {"target": target, "form": form, "current": current})
-            values["reconciliation_mode"] = values.get("reconciliation_mode") or (
-                current.reconciliation_mode if current else "preserve"
-            )
-            values["qualification_status"] = values.get("qualification_status") or (
-                current.qualification_status if current else "open"
-            )
+            values["schedule_path"] = current.schedule_path if current and current.schedule_path else "/internal/schedule/schedule.bin"
+            values["reconciliation_mode"] = current.reconciliation_mode if current else "preserve"
             values["command_port"] = values.get("command_port") or (
                 current.command_port if current else 23
             )
@@ -243,7 +336,7 @@ def device_settings(request, pk):
             if values.get("password"):
                 reference = new_device_secret_reference(target.pk)
             settings_data = dict(current.settings) if current else {}
-            for key in ("ftp_username", "ame_executable", "ame_preset", "ffmpeg_executable", "ffmpeg_build_sha256", "ffmpeg_qualification_manifest", "ffmpeg_qualification_sha256", "nmg_resource_template_reference", "nmg_schedule_template_base", "bin_resource_template_reference", "bin_schedule_template_slot", "capability_flags"):
+            for key in ("ftp_username", "ame_executable", "ame_preset", "ffmpeg_executable", "ffmpeg_qualification_manifest"):
                 if key in request.POST:
                     settings_data[key] = values.get(key, "")
                 elif not current:
@@ -252,16 +345,10 @@ def device_settings(request, pk):
             settings_data["command_username"] = username or settings_data.get("command_username", "")
             model_values = {field.name: getattr(current, field.name, "") for field in UltraNexusTargetSettings._meta.fields if field.name not in {"id", "target", "version", "settings", "is_current", "created_at", "created_by", "settings_hash"}} if current else {}
             for name in model_values:
-                if name in request.POST or name in {"command_port", "reconciliation_mode", "qualification_status"}:
+                if name in request.POST and name in values:
                     model_values[name] = values[name]
             model_values.update({"secret_reference": reference.service + ":" + reference.account, "command_secret_reference": reference.service + ":" + reference.account, "command_username": username or model_values.get("command_username", "")})
-            capability_value = (
-                values.get("capability_flags", "")
-                if "capability_flags" in request.POST
-                else (current.capability_flags if current else [])
-            )
-            if isinstance(capability_value, str):
-                capability_value = [x.strip() for x in capability_value.split(",") if x.strip()]
+            capability_value = current.capability_flags if current else []
             model_values["capability_flags"] = list(capability_value or [])
             settings_data["capability_flags"] = model_values.get("capability_flags", [])
             hash_payload = {**settings_data, **{key: str(model_values.get(key, "")) for key in ("host", "port", "media_directory", "schedule_path", "secret_reference", "reconciliation_mode", "base_nmg_path", "base_nmg_hash", "base_bin_path", "base_bin_hash", "command_port", "command_username", "command_secret_reference", "controller_family", "firmware_version", "output_number", "media_profile", "profile_identity_hash", "ame_preset_sha256", "ffmpeg_profile_sha256", "nmg_template_sha256", "bin_template_sha256", "qualification_status", "qualification_evidence_hash")}, "capability_flags": model_values.get("capability_flags", [])}
@@ -430,7 +517,7 @@ def automation_dashboard(request):
         if action == "create_delivery_publication":
             item = get_object_or_404(PreparationBatchItem.objects.select_related("batch", "occurrence"), pk=request.POST.get("item"))
             if not item.occurrence_id:
-                messages.info(request, "Select confirmed premiere cycles in Prepare schedule.")
+                messages.info(request, "Select confirmed premiere cycles in Review schedule.")
                 return redirect("schedule-prepare")
             if not (item.resulting_binding_id or item.execution_status == "ready"):
                 messages.error(request, "Media preparation must be ready before creating a schedule publication.")
@@ -823,6 +910,9 @@ def show_detail(request, show_id):
         )),
         key=lambda item: (item.intended_air_order is None, item.intended_air_order or 0, item.pk),
     )
+    for episode in episodes:
+        episode.queue_reason = pending_episode_reason(episode) if episode.status == "pending" else ""
+    pending = [episode for episode in episodes if episode.status == "pending"]
     return render(request, "show_detail.html", {"show": show, "pending": pending, "episodes": episodes})
 
 def episode_queue_reorder(request, show_id):
@@ -890,7 +980,7 @@ def occurrence_create(request):
         occurrence.full_clean(); occurrence.save(skip_revision=True)
         audit("create", "Occurrence", occurrence, "Schedule plan created")
         messages.success(request, "Occurrence created."); return redirect("occurrence-workbench", pk=occurrence.pk)
-    return render(request, "occurrence_form.html", {"form": form, "title": "Add schedule item"})
+    return render(request, "occurrence_form.html", {"form": form, "title": "Add to schedule"})
 
 def occurrence_edit(request, pk):
     occurrence = get_object_or_404(Occurrence, pk=pk)

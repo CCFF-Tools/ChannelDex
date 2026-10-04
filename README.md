@@ -111,7 +111,7 @@ silently.
 ### 3. Complete the broadcast day
 
 Use **Schedule → Day** or **Week** to review reserved and available time. Add
-programs, IDs, PSAs, filler, live events, or other items with **Add schedule item**.
+programs, IDs, PSAs, filler, live events, or other items with **Add to schedule**.
 Program start times remain fixed.
 
 The calendar distinguishes:
@@ -192,3 +192,6 @@ untouched backup before attempting a manual restore.
 
 For implementation details, local source setup, tests, packaging, and the product
 contracts, see the [developer guide](docs/DEVELOPMENT.md).
+## Device diagnostics
+
+The device settings page separates editable connection and local encoding tool paths from trusted qualification evidence. Its explicit diagnostics action uses the displayed unsaved values for bounded, read-only FTP login and directory listing, AME/FFmpeg availability, and evidence-file fingerprint checks. Results are observational; a matching fingerprint does not approve or qualify a target, and results become stale when settings change. Automatic encoding, upload, playout control, and unattended delivery remain proposed future work.

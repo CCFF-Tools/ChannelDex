@@ -169,7 +169,7 @@ and their linked replays in the reviewed episode order. Existing cycles, includi
 No program, are conflicts. A signed preview and transactional confirmation protect
 against stale edits. Planning does not consume the pending queue or claim airing.
 
-Schedule → Prepare schedule reviews confirmed cycles and explicitly chosen media
+Schedule → Review schedule reviews confirmed cycles and explicitly chosen media
 versions for a target. Future planned occurrences are included automatically;
 past, cancelled, and already covered entries are identified separately. Plans can
 wait for media. Readiness completion never uploads or activates a schedule.
@@ -229,3 +229,6 @@ evidence. Only old verified managed schedule artifact files are eligible; media,
 external evidence, metadata and audit history are not pruned. References and
 hashes are checked again immediately before deletion, with durable intent and
 success/failure audit entries. Referenced sets can make actual retention exceed 20.
+## Current operator boundary
+
+The device page supports explicit read-only diagnostics for connection, AME/FFmpeg availability, and local evidence integrity. Diagnostics are bounded and use the displayed configuration only after the operator clicks the action; they never qualify a target or perform encoding/upload/playout. Automatic preparation and unattended delivery remain later proposed capabilities.

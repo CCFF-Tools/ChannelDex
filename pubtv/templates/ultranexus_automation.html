@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block page_title %}Schedule delivery{% endblock %}
 {% block content %}
-<div class="page-heading"><p class="eyebrow">Schedule / UltraNEXUS</p><h1>Schedule delivery</h1><p class="lede">Review confirmed cycles and their prepared media, then deliver the schedule with attended activation.</p><p><a class="button-link primary" href="{% url 'schedule-prepare' %}">Prepare schedule</a> <a class="button-link" href="{% url 'media-queue' %}">Media Preparation</a></p></div>
+<div class="page-heading"><p class="eyebrow">Schedule / UltraNEXUS</p><h1>Schedule delivery</h1><p class="lede">Review confirmed cycles and their prepared media, then deliver the schedule with attended activation.</p><p><a class="button-link primary" href="{% url 'schedule-prepare' %}">Review schedule</a> <a class="button-link" href="{% url 'media-queue' %}">Media Preparation</a></p></div>
 <ol class="delivery-progress" aria-label="Schedule delivery stages"><li>Review changes</li><li>Generate and validate</li><li>Stage upload</li><li>Confirm activation</li><li>Record independent confirmation</li></ol>
 <section class="list-card">
   <h2>Publication batch</h2>
@@ -36,5 +36,5 @@
   </article>{% endwith %}{% empty %}<p>No publication batches.</p>{% endfor %}
 </section>
 
-<details class="advanced"><summary>Advanced selected changes and qualification</summary><p>Use explicit occurrence selection for manual controller reconciliation. Confirmed premiere cycles use Prepare schedule above.</p><form method="post" class="stacked-form">{% csrf_token %}<input type="hidden" name="action" value="create_publication">{{ publication_form.as_p }}<button type="submit">Create selected changes</button></form><h2>Research gates</h2>{% for gate in research_gates %}<p><strong>{{ gate.key }}</strong>: {{ gate.status }}{% if gate.evidence %} – {{ gate.evidence }}{% endif %}</p>{% empty %}<p>No qualification evidence recorded. Controller delivery remains blocked.</p>{% endfor %}</details>
+<details class="advanced"><summary>Advanced selected changes and qualification</summary><p>Use explicit occurrence selection for manual controller reconciliation. Confirmed premiere cycles use Review schedule above.</p><form method="post" class="stacked-form">{% csrf_token %}<input type="hidden" name="action" value="create_publication">{{ publication_form.as_p }}<button type="submit">Create selected changes</button></form><h2>Research gates</h2>{% for gate in research_gates %}<p><strong>{{ gate.key }}</strong>: {{ gate.status }}{% if gate.evidence %} – {{ gate.evidence }}{% endif %}</p>{% empty %}<p>No qualification evidence recorded. Controller delivery remains blocked.</p>{% endfor %}</details>
 {% endblock %}
