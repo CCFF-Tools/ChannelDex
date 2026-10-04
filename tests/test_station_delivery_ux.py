@@ -37,7 +37,7 @@ class StationDeliveryUXTests(TestCase):
 
     def test_workspaces_have_separate_media_and_schedule_actions(self):
         response = Client().get("/schedule/delivery/")
-        self.assertContains(response, "Prepare schedule")
+        self.assertContains(response, "Review schedule")
         self.assertContains(response, "Confirm activation")
         self.assertNotContains(response, "Schedule insertion")
         media = Client().get("/media/")
@@ -84,7 +84,7 @@ class StationDeliveryUXTests(TestCase):
         second = UltraNexusTargetSettings.objects.get(target=device, is_current=True)
         assert second.version == 2 and second.secret_reference == first.secret_reference
         assert second.base_bin_hash == first.base_bin_hash and second.settings["ame_executable"] == first.settings["ame_executable"]
-        assert second.capability_flags == ["media_transfer", "schedule_bin_delivery"]
+        assert second.capability_flags == []
         assert second.settings_hash
 
     def test_keychain_change_uses_isolated_reference_and_cleans_it_on_commit_failure(self):

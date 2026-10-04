@@ -24,3 +24,4 @@ staticfiles/
 .DS_Store
 packaging/build/
 packaging/dist/
+/ultranexus/

@@ -340,7 +340,7 @@ class UploadAndHistoryWorkflowTests(TestCase):
         )
         self.occurrence = Occurrence.objects.create(
             station=self.station, show=self.show, episode=self.episode, weekly_assignment=self.assignment,
-            item_type="episode", label="Premiere", starts_at=datetime(2026, 1, 5, 12, tzinfo=dt_timezone.utc), planned_duration_seconds=1800,
+            item_type="episode", schedule_role="premiere", label="Premiere", starts_at=datetime(2026, 1, 5, 12, tzinfo=dt_timezone.utc), planned_duration_seconds=1800,
         )
         self.device = Device.objects.create(name="Ultra-Nexus HD")
         OccurrenceProgramming.objects.create(occurrence=self.occurrence, device=self.device)

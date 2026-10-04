@@ -44,7 +44,7 @@ class CoreRulesTests(TestCase):
   def test_passed_premiere_requires_active_upload_and_is_idempotent(self):
     station = Station.objects.create(); show = Show.objects.create(station=station, title="Show", code="show")
     episode = Episode.objects.create(show=show, title="Premiere")
-    occurrence = Occurrence.objects.create(station=station, show=show, episode=episode, item_type="episode", label="Premiere", starts_at=datetime(2020, 1, 5, tzinfo=dt_timezone.utc), planned_duration_seconds=60)
+    occurrence = Occurrence.objects.create(station=station, show=show, episode=episode, item_type="episode", schedule_role="premiere", label="Premiere", starts_at=datetime(2020, 1, 5, tzinfo=dt_timezone.utc), planned_duration_seconds=60)
     assignment = WeeklyEpisodeAssignment.objects.create(show=show, week_start=datetime(2019, 12, 30).date(), episode=episode, selection_type="premiere")
     Occurrence.objects.filter(pk=occurrence.pk).update(weekly_assignment=assignment); occurrence.refresh_from_db()
     device = Device.objects.create(name="Ultra-Nexus HD")

@@ -183,3 +183,6 @@ Consecutive premiere proposals require explicit confirmation, preserve reviewed
 order, and reject conflicts rather than moving episodes around them. Schedule
 media versions are explicit reviewed choices; readiness never initiates delivery.
 Controller activation remains a separate attended action behind existing gates.
+### Device diagnostics remain observational (accepted)
+
+Device diagnostics may use an explicitly submitted, unsaved configuration for a short-timeout FTP login/listing and local tool/evidence checks. They must not write to the target, encode media, upload schedules, or change qualification status. Observed and approved fingerprints are shown separately; mismatches are stale and require explicit review. Future automatic preparation and unattended delivery remain proposed.

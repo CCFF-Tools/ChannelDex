@@ -464,7 +464,7 @@ class RequestedUsabilityTests(TestCase):
         detail = self.client.get(f"/shows/{self.show.pk}/")
 
         self.assertContains(day, 'class="schedule-toolbar"')
-        self.assertContains(day, "Add schedule item")
+        self.assertContains(day, "Add to schedule")
         self.assertContains(shows, 'class="weekly-slot-role"')
         self.assertContains(shows, "<time>7:00 a.m.</time>", html=True)
         self.assertNotContains(detail, "This works without JavaScript")

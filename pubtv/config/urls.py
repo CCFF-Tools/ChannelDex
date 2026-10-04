@@ -4,6 +4,7 @@ from pubtv.operations import media_queue, premiere_planning, schedule_preparatio
 
 urlpatterns = [
     path("", views.dashboard, name="dashboard"),
+    path("help/", views.help_page, name="help"),
     path("today/", views.dashboard, name="today"),
     path("schedule-today/", views.scheduling_today, name="scheduling-today"),
     path("schedule/", views.schedule_view, name="schedule"),

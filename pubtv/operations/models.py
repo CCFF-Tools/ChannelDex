@@ -816,6 +816,30 @@ class PreparationBatch(models.Model):
             raise ValidationError("Approval 1 requires a snapshot, hash, and approval time.")
 
 
+class MediaIntakeReview(models.Model):
+    """Durable review context for the connected intake flow.
+
+    The review stores only owner-selected identifiers and display metadata;
+    private source paths remain on preparation items and are never exposed in
+    signed planner or schedule URLs.
+    """
+    STATUS = [("pending", "Pending"), ("confirmed", "Confirmed"), ("cancelled", "Cancelled")]
+    token = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    target = models.ForeignKey(Device, on_delete=models.PROTECT, related_name="media_intake_reviews")
+    show = models.ForeignKey(Show, on_delete=models.PROTECT, related_name="media_intake_reviews")
+    episode = models.ForeignKey(Episode, null=True, blank=True, on_delete=models.PROTECT, related_name="media_intake_reviews")
+    asset = models.ForeignKey(MediaAsset, null=True, blank=True, on_delete=models.PROTECT, related_name="media_intake_reviews")
+    order = models.PositiveIntegerField(default=0)
+    action = models.CharField(max_length=32, default="prepare_only")
+    payload = models.JSONField(default=dict, blank=True)
+    status = models.CharField(max_length=12, choices=STATUS, default="pending")
+    created_at = models.DateTimeField(default=timezone.now)
+    created_by = models.CharField(max_length=120, default="owner")
+
+    class Meta:
+        ordering = ["order", "pk"]
+
+
 class PreparationBatchItem(models.Model):
     APPROVAL_STATUS = [(x, x.replace("_", " ").title()) for x in ("pending", "approved", "rejected", "stale")]
     batch = models.ForeignKey(PreparationBatch, on_delete=models.CASCADE, related_name="items")

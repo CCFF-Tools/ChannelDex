@@ -74,6 +74,14 @@ def media_readiness(asset, target):
     return {"state": "ready" if binding else "waiting", "label": "Ready" if binding else "Waiting for media", "binding": binding}
 
 
+def prepared_asset_suggestions(assignment, target):
+    """Return exact prepared assets first; never infer a newer unrelated file."""
+    return list(MediaAsset.objects.filter(
+        episode_id=assignment.episode_id,
+        preparation_batch_items__batch__target=target,
+    ).distinct().order_by("-preparation_batch_items__pk", "-pk"))
+
+
 def preview_schedule_preparation(target, selections, *, now=None):
     now = now or timezone.now()
     rows, included, excluded, blockers, snapshots = [], [], [], [], []
@@ -212,7 +220,11 @@ def schedule_prepare(request):
             KeyError, Device.DoesNotExist, WeeklyEpisodeAssignment.DoesNotExist, MediaAsset.DoesNotExist) as exc:
         context["error"] = str(exc) if isinstance(exc, SchedulePreparationError) else "The proposal or selection is invalid or expired. Select all cycles and media versions again."
     assignments = WeeklyEpisodeAssignment.objects.filter(selection_type__in=("premiere", "rerun"), episode__isnull=False).select_related("show", "episode").order_by("-week_start", "pk")
-    context["cycle_options"] = [(a, MediaAsset.objects.filter(episode=a.episode).order_by("-pk")) for a in assignments]
+    requested_target = Device.objects.filter(pk=request.GET.get("target")).first() if request.method == "GET" else None
+    if requested_target:
+        context["target"] = requested_target
+    context["cycle_options"] = [(a, prepared_asset_suggestions(a, requested_target) if requested_target else MediaAsset.objects.filter(episode=a.episode).order_by("-pk")) for a in assignments]
+    context["connected_assignments"] = request.GET.getlist("assignment")
     return render(request, "schedule_preparation.html", context)
 
 

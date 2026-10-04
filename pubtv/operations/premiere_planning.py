@@ -6,6 +6,7 @@ the rows to be created; it never creates schedule or media records.
 """
 
 from datetime import date, timedelta
+from zoneinfo import ZoneInfo
 import hashlib
 import json
 
@@ -13,12 +14,38 @@ from django.core.exceptions import ValidationError
 from django.core.signing import BadSignature, TimestampSigner
 from django.db import IntegrityError, transaction
 from django.shortcuts import get_object_or_404, redirect, render
+from django.utils import timezone
 
 from .models import Episode, RecurrenceSlot, Show, Station, WeeklyEpisodeAssignment
 from .services import active_premiere_slot, audit, materialize_assignment, occurrences_for_cycle
 
 
 _SIGNER = TimestampSigner(salt="pubtv-bulk-premiere-planner")
+
+
+def premiere_candidates(show, *, start=None, page=1, page_size=12):
+    """Return the next valid premiere boundaries with occupied explanations."""
+    start = start or timezone.localdate(timezone=ZoneInfo("America/Detroit"))
+    try:
+        page = max(1, int(page))
+    except (TypeError, ValueError):
+        page = 1
+    candidates, cursor = [], start
+    limit = page * page_size
+    while len(candidates) < limit and (cursor - start).days < 370:
+        slot = active_premiere_slot(show, cursor)
+        if slot is not None:
+            assignment = WeeklyEpisodeAssignment.objects.filter(show=show, week_start=cursor - timedelta(days=cursor.weekday())).first()
+            candidates.append({"date": cursor, "slot": slot, "occupied": bool(assignment),
+                "occupied_by": assignment, "reason": "Already assigned" if assignment else "Available"})
+        cursor += timedelta(days=1)
+    offset = (page - 1) * page_size
+    page_candidates = candidates[offset:offset + page_size]
+    recommended = False
+    for candidate in page_candidates:
+        candidate["recommended"] = not recommended and not candidate["occupied"]
+        recommended = recommended or candidate["recommended"]
+    return page_candidates
 
 
 def _fingerprint(show, episodes, assignments, slots, *, first_date, episode_ids):
@@ -193,11 +220,22 @@ def bulk_premiere_planner(request, show_id):
     station = Station.objects.first()
     show = get_object_or_404(Show, pk=show_id, station=station)
     episodes = list(show.episodes.filter(status="pending").order_by("intended_air_order", "intended_premiere_date", "legacy_received_at", "pk"))
-    selected_ids = request.POST.getlist("episode_ids")
+    selected_ids = request.POST.getlist("episode_ids") or request.GET.getlist("episode_ids")
     if selected_ids:
         order = {str(value): index for index, value in enumerate(selected_ids)}
         episodes.sort(key=lambda episode: order.get(str(episode.pk), len(order) + episode.pk))
-    context = {"show": show, "episodes": episodes, "first_premiere_date": request.POST.get("first_premiere_date", ""), "selected_ids": selected_ids}
+    first_value = request.POST.get("first_premiere_date") or request.GET.get("first_premiere_date", "")
+    try:
+        candidate_start = date.fromisoformat(first_value) if first_value else timezone.localdate(timezone=ZoneInfo("America/Detroit"))
+    except ValueError:
+        candidate_start = timezone.localdate(timezone=ZoneInfo("America/Detroit"))
+    try:
+        candidate_page = int(request.GET.get("page", "1"))
+    except ValueError:
+        candidate_page = 1
+    context = {"show": show, "episodes": episodes, "first_premiere_date": first_value, "selected_ids": selected_ids,
+               "candidates": premiere_candidates(show, start=candidate_start, page=candidate_page), "candidate_page": candidate_page,
+               "intake_context": {key: request.GET.get(key, "") for key in ("item", "episode", "asset", "target", "order")}}
     if request.method == "POST":
         if request.POST.get("action") == "confirm":
             try:
