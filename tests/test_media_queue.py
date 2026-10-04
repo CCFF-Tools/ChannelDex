@@ -7,12 +7,12 @@ from unittest.mock import patch
 
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.management import call_command
-from django.test import TestCase, override_settings
+from django.test import Client, TestCase, override_settings
 
 from pubtv.operations.automation import process_preparation_job
-from pubtv.operations.media_queue import create_media_queue_batch, queue_summary, retry_media_queue_item
+from pubtv.operations.media_queue import cancel_media_queue_batch, create_media_queue_batch, queue_summary, retry_media_queue_item
 from pubtv.operations.models import (Device, Episode, Occurrence, PreparationBatch,
-    PreparationBatchItem, PreparationJob, RecurrenceSlot, ResearchGate, Show, Station,
+    PreparationBatchItem, PreparationJob, RecurrenceSlot, ResearchGate, Show, Station, AuditEvent,
     TransferAttempt, UltraNexusTargetSettings, MediaBinding)
 from pubtv.ultranexus.ftp import StdlibFTPAdapter, TransferResult
 
@@ -318,6 +318,60 @@ class MediaQueueAcceptanceTests(TestCase):
         self.assertEqual(running.status, "failed"); self.assertEqual(active.execution_status, "blocked")
         self.assertIn("explicit item retry", active.blocker)
         process.assert_called_once(); self.assertEqual(process.call_args.args[0].batch_id, second.pk)
+
+    def test_cancelling_batch_retains_records_and_is_idempotent(self):
+        batch, _ = create_media_queue_batch(target=self.target, show=self.show, rows=self.rows(["Cancel me"]), submission_token=uuid.uuid4())
+        cancelled, changed = cancel_media_queue_batch(batch.pk)
+        self.assertTrue(changed)
+        self.assertEqual(cancelled.status, "cancelled")
+        self.assertEqual(batch.items.count(), 1)
+        self.assertEqual(batch.jobs.get().status, "cancelled")
+        self.assertTrue(AuditEvent.objects.filter(entity="PreparationBatch", entity_id=batch.pk, action="cancel").exists())
+        _same, changed_again = cancel_media_queue_batch(batch.pk)
+        self.assertFalse(changed_again)
+
+    def test_cancelling_completed_batch_is_rejected(self):
+        batch, _ = create_media_queue_batch(target=self.target, show=self.show, rows=self.rows(["Done"]), submission_token=uuid.uuid4())
+        batch.status = "complete"
+        batch.save(update_fields=["status"])
+        with self.assertRaisesMessage(ValueError, "Only approved, blocked, or failed"):
+            cancel_media_queue_batch(batch.pk)
+
+    def test_cancel_endpoint_is_post_only_and_preserves_cancelled_history(self):
+        batch, _ = create_media_queue_batch(target=self.target, show=self.show, rows=self.rows(["Endpoint cancel"]), submission_token=uuid.uuid4())
+        client = Client()
+        self.assertEqual(client.get(f"/media/batches/{batch.pk}/cancel/").status_code, 405)
+        response = client.post(f"/media/batches/{batch.pk}/cancel/")
+        self.assertRedirects(response, "/media/")
+        batch.refresh_from_db()
+        self.assertEqual(batch.status, "cancelled")
+        summary = queue_summary()
+        self.assertNotIn("cancelled", {key: value for key, value in summary["counts"].items() if value})
+        self.assertTrue(any(row["batch_id"] == batch.pk and row["state"] == "cancelled" for row in summary["items"]))
+
+    def test_running_batch_cannot_be_cancelled_or_mutated(self):
+        batch, _ = create_media_queue_batch(target=self.target, show=self.show, rows=self.rows(["Running"]), submission_token=uuid.uuid4())
+        batch.status = "in_progress"
+        batch.save(update_fields=["status"])
+        job = batch.jobs.get()
+        job.status = "running"
+        job.save(update_fields=["status"])
+        with self.assertRaisesMessage(ValueError, "In-progress work cannot be removed safely"):
+            cancel_media_queue_batch(batch.pk)
+        batch.refresh_from_db(); job.refresh_from_db()
+        self.assertEqual(batch.status, "in_progress")
+        self.assertEqual(job.status, "running")
+        self.assertNotContains(Client().get("/media/"), f"/media/batches/{batch.pk}/cancel/")
+
+    def test_cancelled_batch_item_cannot_be_retried(self):
+        batch, _ = create_media_queue_batch(target=self.target, show=self.show, rows=self.rows(["Cancelled retry"]), submission_token=uuid.uuid4())
+        cancel_media_queue_batch(batch.pk)
+        item = batch.items.get()
+        item.execution_status = "failed"
+        item.save(update_fields=["execution_status"])
+        with self.assertRaisesMessage(ValueError, "Cancelled media batches cannot be retried"):
+            retry_media_queue_item(item.pk)
+        self.assertEqual(batch.jobs.count(), 1)
 
     def test_episode_planning_does_not_rewrite_media_hashes_or_queue_order(self):
         from pubtv.operations.premiere_planning import build_bulk_premiere_preview, confirm_bulk_premiere_plan

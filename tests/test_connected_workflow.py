@@ -1,6 +1,7 @@
 from datetime import timedelta, time
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 from django.core.files.uploadedfile import SimpleUploadedFile
@@ -135,3 +136,15 @@ class ConnectedWorkflowTests(TestCase):
         response = Client().get(f"/media/?show={self.show.pk}")
         self.assertContains(response, f'value="{self.show.pk}" selected')
         self.assertContains(response, f'value="{self.target.pk}" selected')
+
+    def test_review_with_missing_active_premiere_slot_returns_validation_page(self):
+        candidate_date = self._first_monday()
+        with patch("pubtv.operations.premiere_planning._active_premiere_dates", return_value=[candidate_date + timedelta(days=1)]):
+            response = Client().post("/media/", {
+                "action": "review_intake", "next_action": "prepare_and_plan",
+                "show": self.show.pk, "target": self.target.pk,
+                "source_files": [SimpleUploadedFile("episode.mp4", b"video")],
+                "episode_id_0": "new", "new_title_0": "Missing slot",
+            })
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "No active premiere slot is configured")
