@@ -453,13 +453,17 @@ def browse_path(request):
     kind = request.POST.get("kind", "file")
     if kind not in {"file", "application"}:
         return JsonResponse({"error": "Unsupported chooser kind"}, status=400)
-    script = 'POSIX path of (choose application)' if kind == "application" else 'POSIX path of (choose file)'
+    script = ('POSIX path of (choose file with prompt "Choose an application" '
+              'of type {"com.apple.application-bundle"})' if kind == "application"
+              else 'POSIX path of (choose file)')
     try:
         result = subprocess.run(("osascript", "-e", script), check=False, capture_output=True, text=True, timeout=120)
     except (OSError, subprocess.TimeoutExpired):
-        return JsonResponse({"path": "", "available": False, "cancelled": False, "error": "The local picker is unavailable."})
+        return JsonResponse({"path": "", "available": False, "cancelled": False, "resolved": False, "error": "The local picker is unavailable."})
     if result.returncode != 0:
-        return JsonResponse({"path": "", "available": True, "cancelled": True, "error": ""})
+        cancelled = re.search(r"(?<!\d)-128(?!\d)", result.stderr or "") is not None
+        return JsonResponse({"path": "", "available": True, "cancelled": cancelled, "resolved": False,
+                             "error": "" if cancelled else "The local picker failed."})
     selected = result.stdout.strip()
     resolved = _resolve_application_executable(selected) if kind == "application" and selected else (selected if selected and Path(selected).exists() else "")
     if resolved:
