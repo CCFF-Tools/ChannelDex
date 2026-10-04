@@ -6,6 +6,7 @@ from django.db.models import Count, F, Max, Q, Prefetch
 from django.http import HttpResponse, HttpResponseBadRequest, JsonResponse, FileResponse
 from django.views.decorators.clickjacking import xframe_options_sameorigin
 from django.views.decorators.http import require_POST
+from django.views.decorators.csrf import csrf_protect
 import os
 import signal
 import threading
@@ -484,29 +485,47 @@ def _resolve_application_executable(selected):
     return ""
 
 
+@csrf_protect
 def browse_path(request):
     """Open a local Finder chooser; safe JSON response and editable fallback."""
     if request.method != "POST":
         return JsonResponse({"error": "POST required"}, status=405)
     kind = request.POST.get("kind", "file")
-    if kind not in {"file", "application"}:
+    if kind not in {"file", "files", "application"}:
         return JsonResponse({"error": "Unsupported chooser kind"}, status=400)
-    script = ('POSIX path of (choose file with prompt "Choose an application" '
-              'of type {"com.apple.application-bundle"})' if kind == "application"
-              else 'POSIX path of (choose file)')
+    if kind == "application":
+        script = 'POSIX path of (choose file with prompt "Choose an application" of type {"com.apple.application-bundle"})'
+    elif kind == "files":
+        script = 'set chosenFiles to choose file with prompt "Choose media files" with multiple selections allowed\nset output to ""\nrepeat with selectedFile in chosenFiles\n\tset output to output & (POSIX path of selectedFile) & linefeed\nend repeat\nreturn output'
+    else:
+        script = 'POSIX path of (choose file)'
     try:
         result = subprocess.run(("osascript", "-e", script), check=False, capture_output=True, text=True, timeout=120)
     except (OSError, subprocess.TimeoutExpired):
-        return JsonResponse({"path": "", "available": False, "cancelled": False, "resolved": False, "error": "The local picker is unavailable."})
+        return JsonResponse({"path": "", "paths": [], "available": False, "cancelled": False, "resolved": False, "error": "The local picker is unavailable."})
     if result.returncode != 0:
         cancelled = re.search(r"(?<!\d)-128(?!\d)", result.stderr or "") is not None
-        return JsonResponse({"path": "", "available": True, "cancelled": cancelled, "resolved": False,
+        return JsonResponse({"path": "", "paths": [], "available": True, "cancelled": cancelled, "resolved": False,
                              "error": "" if cancelled else "The local picker failed."})
-    selected = result.stdout.strip()
+    selected_paths = [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
+    if kind == "files":
+        paths = []
+        for selected in selected_paths:
+            candidate = Path(selected).expanduser()
+            try:
+                candidate = candidate.resolve(strict=True)
+            except (OSError, RuntimeError):
+                continue
+            if candidate.is_file():
+                paths.append(str(candidate))
+        if paths:
+            return JsonResponse({"path": paths[0], "paths": paths, "available": True, "cancelled": False, "resolved": True, "error": ""})
+        return JsonResponse({"path": "", "paths": [], "available": True, "cancelled": False, "resolved": False, "error": "The selected files are unavailable."})
+    selected = selected_paths[0] if selected_paths else ""
     resolved = _resolve_application_executable(selected) if kind == "application" and selected else (selected if selected and Path(selected).exists() else "")
     if resolved:
-        return JsonResponse({"path": resolved, "available": True, "cancelled": False, "resolved": True, "error": ""})
-    return JsonResponse({"path": "", "available": True, "cancelled": False, "resolved": False, "error": "The selected application executable could not be resolved."})
+        return JsonResponse({"path": resolved, "paths": [resolved], "available": True, "cancelled": False, "resolved": True, "error": ""})
+    return JsonResponse({"path": "", "paths": [], "available": True, "cancelled": False, "resolved": False, "error": "The selected application executable could not be resolved."})
 
 
 def _automation_context(request, *, form_p=None, form_s=None, message=""):
