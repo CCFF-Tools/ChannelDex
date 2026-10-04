@@ -24,7 +24,7 @@ from .automation import approve_snapshot, canonical_hash, preparation_batch_snap
 from .models import AuditEvent, Device, Episode, MediaAsset, MediaIntakeReview, PreparationBatch, PreparationBatchItem, PreparationJob, Show, UltraNexusTargetSettings
 
 
-QUEUE_STATES = ("queued", "encoding", "validating", "transferring", "verifying", "ready", "blocked", "failed")
+QUEUE_STATES = ("queued", "encoding", "validating", "transferring", "verifying", "ready", "blocked", "failed", "cancelled")
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024 * 1024
 
 
@@ -155,12 +155,13 @@ def queue_summary():
     counts = {state: 0 for state in QUEUE_STATES}
     rows = []
     for item in items:
-        state = "queued" if item.execution_status == "pending" else item.execution_status
+        state = "cancelled" if item.batch.status == "cancelled" else ("queued" if item.execution_status == "pending" else item.execution_status)
         if state == "ready" and not schedule_ready_binding(item.asset, item.batch.target):
             state = "blocked"
         if state not in QUEUE_STATES:
             state = "blocked"
-        counts[state] = counts.get(state, 0) + 1
+        if state != "cancelled":
+            counts[state] = counts.get(state, 0) + 1
         rows.append({"id": item.pk, "batch_id": item.batch_id, "target_id": item.batch.target_id, "target": item.batch.target.name, "episode": getattr(item.asset.episode, "title", ""), "file_name": item.asset.file_name, "state": state, "blocker": item.blocker})
     return {"counts": counts, "items": rows, "updated_at": timezone.now().isoformat()}
 
@@ -246,12 +247,16 @@ def _intake_premiere_proposal(review, first_date):
     cycles = []
     tz = ZoneInfo(review.show.station.timezone)
     for row, premiere_date in zip(rows, dates):
-        premiere_slot = next(
+        premiere_slot = next((
             slot for slot in slots
             if slot.is_premiere and slot.weekday == premiere_date.weekday()
             and (not slot.active_from or slot.active_from <= premiere_date)
             and (not slot.active_until or premiere_date <= slot.active_until)
-        )
+        ), None)
+        if premiere_slot is None:
+            raise ValidationError(
+                f"No active premiere slot is configured for {premiere_date.strftime('%A, %B %-d, %Y')}."
+            )
         cycle_start = datetime.combine(premiere_date, premiere_slot.start_time, tzinfo=tz)
         cycle_end = cycle_start + timedelta(days=7)
         occurrences = []
@@ -315,7 +320,9 @@ def _store_intake_premiere_proposals(review):
             continue
         try:
             proposal = _intake_premiere_proposal(review, candidate["date"])
-        except ValidationError:
+        except ValidationError as exc:
+            candidate["reason"] = str(exc)
+            candidate["proposal"] = None
             continue
         proposals[candidate["date"].isoformat()] = proposal
         candidate["proposal"] = proposal
@@ -485,6 +492,8 @@ def retry_media_queue_item(item_id):
     with transaction.atomic():
         item = PreparationBatchItem.objects.select_for_update().select_related("batch").get(pk=item_id)
         PreparationBatch.objects.select_for_update().get(pk=item.batch_id)
+        if item.batch.status == "cancelled":
+            raise ValueError("Cancelled media batches cannot be retried.")
         if item.execution_status not in {"failed", "blocked"}:
             raise ValueError("Only failed or blocked items can be retried explicitly.")
         if PreparationJob.objects.filter(batch=item.batch, status__in=("queued", "running")).exists():
@@ -514,4 +523,43 @@ def media_item_retry(request, item_id):
         messages.error(request, str(exc))
     else:
         messages.success(request, "This item was queued for an explicit retry.")
+    return redirect("media-queue")
+
+
+def cancel_media_queue_batch(batch_id, *, actor="owner"):
+    """Cancel a media batch while retaining its durable records and audit trail."""
+    allowed = {"approved", "blocked", "failed"}
+    with transaction.atomic():
+        batch = PreparationBatch.objects.select_for_update().get(pk=batch_id)
+        if batch.status == "cancelled":
+            return batch, False
+        if batch.status == "in_progress":
+            raise ValueError("In-progress work cannot be removed safely.")
+        if batch.status not in allowed:
+            raise ValueError("Only approved, blocked, or failed media batches can be removed from the active queue.")
+        if batch.jobs.filter(status="running").exists():
+            raise ValueError("In-progress work cannot be removed safely while a preparation job is running.")
+        batch.status = "cancelled"
+        batch.save(update_fields=["status"])
+        batch.jobs.filter(status="queued").update(
+            status="cancelled", finished_at=timezone.now(), error="Cancelled by owner"
+        )
+        AuditEvent.objects.create(
+            actor=actor, action="cancel", entity="PreparationBatch", entity_id=batch.pk,
+            summary="Media queue batch cancelled by owner",
+        )
+        return batch, True
+
+
+def media_batch_cancel(request, batch_id):
+    if request.method != "POST":
+        return JsonResponse({"error": "POST required"}, status=405)
+    try:
+        _batch, cancelled = cancel_media_queue_batch(batch_id)
+    except PreparationBatch.DoesNotExist:
+        return JsonResponse({"error": "Batch not found"}, status=404)
+    except ValueError as exc:
+        messages.error(request, str(exc))
+    else:
+        messages.success(request, "This media batch was cancelled." if cancelled else "This media batch was already cancelled.")
     return redirect("media-queue")
