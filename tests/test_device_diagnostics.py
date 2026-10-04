@@ -108,6 +108,19 @@ class DeviceSettingsContractTests(TestCase):
         ftp_cls.assert_not_called()
         self.assertEqual(run.call_count, 2)
 
+    def test_diagnostics_uses_selected_adobe_media_encoder_path(self):
+        with TemporaryDirectory() as directory:
+            executable = Path(directory) / "Adobe Media Encoder"
+            preset = Path(directory) / "reviewed.epr"
+            executable.write_bytes(b"executable")
+            preset.write_bytes(b"preset")
+            device = Device.objects.create(name="WinLGX")
+            result = _run_device_diagnostics(device, {
+                "ame_executable": str(executable), "ame_preset": str(preset),
+            }, None, only="ame")
+        self.assertEqual(result[0]["name"], "Adobe Media Encoder executable and preset")
+        self.assertIn("Executable: found.", result[0]["details"])
+
     def test_device_page_shows_fixed_constraints_and_focused_tests(self):
         device = Device.objects.create(name="WinLGX")
         UltraNexusTargetSettings.objects.create(
@@ -119,9 +132,10 @@ class DeviceSettingsContractTests(TestCase):
 
         self.assertContains(response, "Fixed schedule path")
         self.assertContains(response, "Test FTP login and directory")
-        self.assertContains(response, "Test AME application and preset")
+        self.assertContains(response, "Test Adobe Media Encoder application and preset")
         self.assertContains(response, "Test FFmpeg and ffprobe")
         self.assertContains(response, "Test evidence-file integrity")
+        self.assertContains(response, 'class="browse-feedback"')
         self.assertNotContains(response, 'name="schedule_path"')
         self.assertNotContains(response, 'name="reconciliation_mode"')
 

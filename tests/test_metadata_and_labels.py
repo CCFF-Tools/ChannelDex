@@ -4,7 +4,7 @@ from django.db import connection
 from django.db.migrations.executor import MigrationExecutor
 from django.test import SimpleTestCase, TestCase, TransactionTestCase
 
-from pubtv.operations.forms import PreparationForm, ProducerForm, ShowForm
+from pubtv.operations.forms import PreparationForm, ProducerForm, ShowForm, UltraNexusSettingsForm
 from pubtv.operations.models import (
     AiringEvidence,
     Device,
@@ -39,6 +39,14 @@ class MetadataFormsTests(SimpleTestCase):
         self.assertIn("source_available_at", form.fields)
         self.assertEqual(form.fields["source_available_at"].label, "Source available at")
         self.assertEqual(form.fields["ame_preset"].label, "Adobe Media Encoder preset")
+
+    def test_device_settings_use_explicit_media_tool_labels(self):
+        form = UltraNexusSettingsForm()
+        self.assertEqual(form.fields["ame_executable"].label, "Adobe Media Encoder executable")
+        self.assertEqual(form.fields["ame_preset"].label, "Adobe Media Encoder preset")
+        self.assertEqual(form.fields["ffmpeg_executable"].label, "FFmpeg executable")
+        self.assertEqual(form.fields["ffmpeg_qualification_manifest"].label, "FFmpeg qualification manifest")
+        self.assertIn("Adobe Media Encoder/FFmpeg", form.fields["ffmpeg_qualification_manifest"].help_text)
 
 
 class HumanReadableLabelsTests(TestCase):
