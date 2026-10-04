@@ -16,7 +16,7 @@ from .models import (ActivationEvidence, ArtifactRevision, Device, ResearchGate,
                      ScheduleDeliveryOperation, SchedulePublicationBatch)
 from .automation import (canonical_hash, publication_artifact_blockers,
                          publication_snapshot, restricted_target_blockers,
-                         settings_record_snapshot, _keychain_password)
+                         settings_record_snapshot, _keychain_password, invalidate_snapshot)
 from .services import create_upload_snapshot
 from pubtv.ultranexus.bin import BinImage
 from pubtv.ultranexus.command import ControllerCommandTransport, CommandError, LOADSCH_PATH
@@ -33,7 +33,8 @@ def _preflight(batch: SchedulePublicationBatch):
     if batch.status == "cancelled":
         raise ValueError("Cancelled publications cannot be staged or activated")
     current = batch.target.ultranexus_settings.filter(is_current=True).first()
-    target_blockers = restricted_target_blockers(current)
+    target_blockers = [item for item in restricted_target_blockers(current)
+                       if "base_bin_hash" not in item and "base_nmg_hash" not in item]
     if target_blockers:
         raise ValueError("Qualified target contract is incomplete: " + "; ".join(target_blockers))
     if batch.workflow_mode != "selected_changes" or batch.reconciliation_mode != "preserve":
@@ -44,6 +45,8 @@ def _preflight(batch: SchedulePublicationBatch):
         raise ValueError("Approval 2 is required")
     if publication_snapshot(batch) != batch.approval_2_snapshot or publication_artifact_blockers(batch):
         raise ValueError("Approval 2 is stale or its artifacts changed")
+    if not batch.controller_snapshot_id or batch.controller_snapshot_hash != batch.controller_snapshot.snapshot_hash:
+        raise ValueError("A fresh batch-bound controller BIN pull is required")
     from .publication_review import publication_review
     review = publication_review(batch)
     if review.get("blockers") or review.get("review_hash") != batch.approval_2_snapshot.get("review_hash"):
@@ -96,7 +99,7 @@ def stage_publication(batch_id: int, *, expected_hash: str, actor="owner",
             raise ValueError("Another schedule operation requires review")
         operation = ScheduleDeliveryOperation.objects.create(
             publication_batch=batch, target=batch.target, artifact=artifact,
-            approval_hash=batch.approval_2_hash, base_hash=current.base_bin_hash,
+            approval_hash=batch.approval_2_hash, base_hash=batch.controller_snapshot.payload.get("captured_sha256", ""),
             actor=actor,
         )
     root = Path(django_settings.DATA_DIR) / "ultranexus" / "rollback"
@@ -105,22 +108,33 @@ def stage_publication(batch_id: int, *, expected_hash: str, actor="owner",
     try:
         adapter = _ftp(current, ftp_factory=ftp_factory, secret_resolver=secret_resolver)
         adapter.adapter.download(LOADSCH_PATH, str(rollback))
-        if sha256_file(rollback) != current.base_bin_hash:
+        if sha256_file(rollback) != operation.base_hash:
             raise ValueError("Remote schedule differs from the approved known-good base")
-        BinImage.from_file(rollback, expected_sha256=current.base_bin_hash)
+        BinImage.from_file(rollback, expected_sha256=operation.base_hash)
         staged = stage_schedule(adapter, artifact.file_reference, LOADSCH_PATH)
         if adapter.read_hash(staged) != artifact.content_hash:
             raise ValueError("Staged remote schedule differs from the approved BIN")
         operation.rollback_path = str(rollback)
-        operation.rollback_hash = current.base_bin_hash
+        operation.rollback_hash = operation.base_hash
         operation.staging_path = staged
         operation.state = "staged"
-        operation.result = {"candidate_sha256": artifact.content_hash, "remote_base_sha256": current.base_bin_hash}
+        operation.result = {"candidate_sha256": artifact.content_hash, "remote_base_sha256": operation.base_hash}
         operation.save(update_fields=["rollback_path", "rollback_hash", "staging_path", "state", "result", "updated_at"])
         return operation
-    except Exception:
-        operation.state = "ambiguous"
-        operation.result = {"review_required": "Inspect staging and remote schedule before another attempt"}
+    except Exception as exc:
+        # Any live-BIN drift invalidates the reviewed batch. Recovery requires
+        # a fresh pull, regeneration, and a new Approval 2; never rebase.
+        batch.approval_2_status = "stale"
+        batch.status = "blocked"
+        batch.save(update_fields=["approval_2_status", "status"])
+        known_drift = isinstance(exc, ValueError) and str(exc) in {
+            "Remote schedule differs from the approved known-good base",
+            "Staged remote schedule differs from the approved BIN",
+        }
+        operation.state = "failed" if known_drift else "ambiguous"
+        operation.result = ({"blocked": "Remote schedule or staged bytes do not match the approved hashes"}
+                            if known_drift else
+                            {"review_required": "Inspect staging and remote schedule before another attempt"})
         operation.save(update_fields=["state", "result", "updated_at"])
         raise
 
@@ -157,7 +171,7 @@ def activate_publication(operation_id: int, *, expected_hash: str, actor="owner"
         current, artifact = _preflight(operation.publication_batch)
         if (artifact.pk != operation.artifact_id or expected_hash.lower() != artifact.content_hash or
                 operation.approval_hash != operation.publication_batch.approval_2_hash or
-                operation.base_hash != current.base_bin_hash):
+                operation.base_hash != operation.rollback_hash):
             raise ValueError("Staged approval or candidate changed")
         if sha256_file(operation.rollback_path) != operation.rollback_hash:
             raise ValueError("Known-good rollback artifact changed")

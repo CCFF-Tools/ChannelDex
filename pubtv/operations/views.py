@@ -15,7 +15,7 @@ from django.core.exceptions import ValidationError
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
 from .forms import OccurrenceForm, StationForm, CarryForwardSettingsForm, DeviceForm, ShowForm, ShowSlotDurationForm, EpisodeForm, ProducerForm, EpisodeMilestoneForm, AssetForm, DeliveryForm, SlotForm, AssignmentForm, AssetPreparationForm, AssetTargetTransferForm, ProgrammingForm, UploadForm, AiringForm, AutomationPreparationForm, AutomationPublicationForm, UltraNexusSettingsForm
-from .models import Episode, EpisodeWorkflowMilestone, Occurrence, Show, Station, Device, Producer, MediaAsset, Delivery, RecurrenceSlot, WeeklyEpisodeAssignment, Preparation, AssetPreparation, AssetTargetTransfer, OccurrenceProgramming, UploadedOccurrenceCoverage, UploadedScheduleRevision, AiringEvidence, AuditEvent, UltraNexusTargetSettings, PreparationBatch, PreparationBatchItem, PreparationJob, SchedulePublicationBatch, ScheduleDeliveryOperation, OccurrenceRevisionSelection, ResearchGate, TransferAttempt
+from .models import Episode, EpisodeWorkflowMilestone, Occurrence, Show, Station, Device, Producer, MediaAsset, Delivery, RecurrenceSlot, WeeklyEpisodeAssignment, Preparation, AssetPreparation, AssetTargetTransfer, OccurrenceProgramming, UploadedOccurrenceCoverage, UploadedScheduleRevision, AiringEvidence, AuditEvent, UltraNexusTargetSettings, PreparationBatch, PreparationBatchItem, PreparationJob, SchedulePublicationBatch, ScheduleDeliveryOperation, OccurrenceRevisionSelection, ResearchGate, TransferAttempt, PublicationJob
 from .services import schedule_alerts, audit, materialize_assignment, ensure_carry_forward_week, next_premiere_date, suggested_pending_episode, confirm_preparation_fact, create_upload_snapshot, revise_airing, sign_upload_preview, load_upload_preview, commit_upload_preview, preparation_readiness, calendar_capacity, pending_episode_reason
 from .automation import approve_snapshot, canonical_hash, invalidate_snapshot, preparation_batch_snapshot, publication_snapshot, preview_schedule, approve_preparation_batch, schedule_ready_binding, generate_nmg_artifact, generate_bin_artifact, publication_artifact_blockers
 from .publication_delivery import stage_publication, activate_publication, observe_activation, rollback_publication
@@ -258,6 +258,10 @@ def settings_view(request):
         audit(
             "update", "Station", station,
             "Automatic episode carry-forward enabled" if station.carry_forward_unassigned_episodes else "Automatic episode carry-forward disabled",
+        )
+        audit(
+            "update", "Station", station,
+            "Automatic controller schedule pull enabled" if station.auto_pull_controller_schedule else "Automatic controller schedule pull disabled; manual controller pull required",
         )
         messages.success(request, "Schedule carry-forward setting updated.")
         return redirect("settings")
@@ -663,6 +667,8 @@ def automation_dashboard(request):
                         batch.approval_2_status = "stale"
                         batch.save(update_fields=["approval_2_status"])
                     else:
+                        batch.review_diff = final_review.get("diff", {})
+                        batch.save(update_fields=["review_diff"])
                         final_snapshot = publication_snapshot(batch)
                         final_snapshot["review_hash"] = final_review["review_hash"]
                         approve_snapshot(batch, final_snapshot, approval=2)
@@ -702,11 +708,13 @@ def automation_dashboard(request):
             return redirect("schedule-delivery")
         if action == "generate_bin":
             batch = get_object_or_404(SchedulePublicationBatch, pk=request.POST.get("batch"))
-            try:
-                artifact = generate_bin_artifact(batch)
-                messages.success(request, f"Generated and validated BIN revision {artifact.revision}: {artifact.content_hash}")
-            except (ValueError, ValidationError) as exc:
-                messages.error(request, str(exc))
+            key = f"generate-bin-{batch.pk}-{batch.controller_snapshot_hash or 'unpulled'}"
+            job, created = PublicationJob.objects.get_or_create(
+                idempotency_key=key, defaults={"publication_batch": batch, "kind": "generate_bin"})
+            if not created and job.status in {"failed", "cancelled"}:
+                job.status = "queued"; job.error = ""; job.finished_at = None
+                job.save(update_fields=["status", "error", "finished_at"])
+            messages.success(request, f"BIN generation queued (job {job.pk}); worker status is visible in the job record.")
             return redirect("schedule-delivery")
         if action == "stage_publication":
             batch = get_object_or_404(SchedulePublicationBatch, pk=request.POST.get("batch"))

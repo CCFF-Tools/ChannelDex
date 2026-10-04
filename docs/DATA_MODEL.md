@@ -146,3 +146,6 @@ legacy SchedulePublicationBatch.preparation_item link remains for historical
 records; new cycle publication does not use it to constrain media reuse. A unique
 nullable review token prevents duplicate confirmation from creating publications.
 No migrations delete or rewrite existing evidence.
+## Accepted 2026-10-04 fresh controller BIN contract
+
+`Station.auto_pull_controller_schedule` defaults true and changes are audited. Each publication binds an immutable `ControllerSnapshot` containing the live `/internal/schedule/schedule.bin` bytes, SHA-256, trigger, actor, settings revision/hash, qualification context, target path, and capture time. Manual pulls are always available; identical pulls remain separate audit records. `SchedulePublicationBatch` stores the bound snapshot hash, mutation-plan hash, review diff, and generation kind. BIN and NMG `ArtifactRevision` records are labeled `scope=change_set` and carry the captured controller hash; legacy static base paths/hashes remain qualification/history only.

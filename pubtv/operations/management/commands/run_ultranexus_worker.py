@@ -92,7 +92,7 @@ class Command(BaseCommand):
                     processed = True
                 publication = self._claim_publication()
                 if publication:
-                    process_due_job_state(publication)
+                    process_due_job_state(publication, already_claimed=True)
                     processed = True
                 if options["once"]:
                     if not processed:

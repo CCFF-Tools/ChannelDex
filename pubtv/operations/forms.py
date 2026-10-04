@@ -129,7 +129,7 @@ class StationForm(forms.ModelForm):
 class CarryForwardSettingsForm(forms.ModelForm):
     class Meta:
         model = Station
-        fields = ["carry_forward_unassigned_episodes"]
+        fields = ["carry_forward_unassigned_episodes", "auto_pull_controller_schedule"]
         labels = {
             "carry_forward_unassigned_episodes": "Keep the most recent episode in its weekly slots until another episode is explicitly planned",
         }
@@ -138,6 +138,10 @@ class CarryForwardSettingsForm(forms.ModelForm):
                 "Applies only to current and future unassigned weeks. Automatically created plans are labeled, "
                 "an explicit episode or No program choice overrides them, and turning this off does not erase existing plans."
             ),
+        }
+        labels = {
+            "carry_forward_unassigned_episodes": "Keep the most recent episode in its weekly slots until another episode is explicitly planned",
+            "auto_pull_controller_schedule": "Automatically pull the live controller schedule before publication preparation",
         }
 
 

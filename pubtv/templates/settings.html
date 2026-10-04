@@ -47,6 +47,14 @@
       {{ carry_forward_form.carry_forward_unassigned_episodes.errors }}
       <p class="helptext">{{ carry_forward_form.carry_forward_unassigned_episodes.help_text }}</p>
     </div>
+    <div class="field checkbox-field{% if carry_forward_form.auto_pull_controller_schedule.errors %} has-error{% endif %}">
+      <label for="{{ carry_forward_form.auto_pull_controller_schedule.id_for_label }}">
+        {{ carry_forward_form.auto_pull_controller_schedule }}
+        <span>{{ carry_forward_form.auto_pull_controller_schedule.label }}</span>
+      </label>
+      {{ carry_forward_form.auto_pull_controller_schedule.errors }}
+      <p class="helptext">{{ carry_forward_form.auto_pull_controller_schedule.help_text }}</p>
+    </div>
     <button class="primary" type="submit">Save schedule default</button>
   </form>
 </section>

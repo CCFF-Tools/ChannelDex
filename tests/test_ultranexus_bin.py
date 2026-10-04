@@ -61,6 +61,15 @@ class BinTests(unittest.TestCase):
         struct.pack_into("<I", b, CHECKSUM_OFFSET, stored_checksum(b))
         with self.assertRaises(BinFormatError): BinImage(bytes(b))
 
+        sparse = bytearray(fixture())
+        record = bytes(sparse[s:s + SCHEDULE_STRIDE])
+        sparse[s:s + SCHEDULE_STRIDE] = b"\0" * SCHEDULE_STRIDE
+        sparse[s + SCHEDULE_STRIDE:s + 2 * SCHEDULE_STRIDE] = record
+        struct.pack_into("<I", sparse, CHECKSUM_OFFSET, stored_checksum(sparse))
+        parsed = BinImage(bytes(sparse))
+        self.assertEqual([row.slot for row in parsed.schedules], [1])
+        self.assertEqual(parsed.data[s:s + SCHEDULE_STRIDE], b"\0" * SCHEDULE_STRIDE)
+
     def test_weekday_epoch(self):
         self.assertEqual(week_seconds(1, 3, 14, 15), 357255)
         with self.assertRaises(ValueError): week_seconds(7, 0, 0, 0)
