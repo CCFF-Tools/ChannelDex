@@ -64,6 +64,32 @@ class LauncherTests(unittest.TestCase):
             launcher.main()
         umask.assert_called_once_with(0o077)
 
+    def test_main_continues_when_staged_import_is_recoverably_invalid(self):
+        from pubtv.config import launcher
+        with tempfile.TemporaryDirectory() as temp_dir, \
+                patch.dict(os.environ, {"PUBTV_DATA_DIR": temp_dir}, clear=False), \
+                patch.object(launcher, "apply_staged_import", side_effect=launcher.PortableDatabaseError("bad staged file")), \
+                patch.object(launcher, "_load_application", return_value=object()), \
+                patch.object(launcher, "_open_browser_when_ready"), \
+                patch.object(launcher, "supervise_worker"):
+            launcher.main()
+
+    def test_main_rolls_back_failed_activated_database_before_retry(self):
+        from pubtv.config import launcher
+        events = []
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(os.environ, {"PUBTV_DATA_DIR": temp_dir}, clear=False), \
+                patch.object(launcher, "apply_staged_import", return_value=True), patch.object(launcher, "rollback_activation", side_effect=lambda path: events.append("rollback") or True) as rollback, \
+                patch.object(launcher, "finalize_activation") as finalize, patch.object(launcher, "_load_application", side_effect=[RuntimeError("migration"), object()]) as load, \
+                patch.object(launcher, "_open_browser_when_ready"), patch.object(launcher, "supervise_worker"), patch("django.db.connections.close_all", side_effect=lambda: events.append("close")) as close:
+            launcher.main()
+        self.assertEqual(load.call_count, 2); close.assert_called_once_with(); rollback.assert_called_once_with(Path(temp_dir)); finalize.assert_called_once_with(Path(temp_dir))
+        self.assertEqual(events, ["close", "rollback"])
+
+    def test_main_propagates_load_failure_without_activation(self):
+        from pubtv.config import launcher
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(os.environ, {"PUBTV_DATA_DIR": temp_dir}, clear=False), patch.object(launcher, "apply_staged_import", return_value=False), patch.object(launcher, "_load_application", side_effect=RuntimeError("migration")):
+            with self.assertRaises(RuntimeError): launcher.main()
+
     def test_supervisor_runs_gunicorn_on_calling_thread_and_cleans_up_worker(self):
         from pubtv.config import launcher
 

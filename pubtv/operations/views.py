@@ -1,9 +1,9 @@
 from datetime import datetime, timedelta, date
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from django.contrib import messages
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError, transaction, connection
 from django.db.models import Count, F, Max, Q, Prefetch
-from django.http import HttpResponse, HttpResponseBadRequest, JsonResponse
+from django.http import HttpResponse, HttpResponseBadRequest, JsonResponse, FileResponse
 from django.views.decorators.clickjacking import xframe_options_sameorigin
 from django.views.decorators.http import require_POST
 import os
@@ -25,6 +25,7 @@ from .schedule_preparation import schedule_prepare
 from pubtv.ultranexus.exceptions import UltraNexusError, CapabilityError
 from pubtv.ultranexus.secrets import device_secret_reference, new_device_secret_reference, KeychainSecretStore
 from pubtv.ultranexus.encoding import discover_executables
+from .database_portability import export_database, stage_import, PortableDatabaseError
 from pathlib import Path
 import re
 import subprocess
@@ -266,7 +267,44 @@ def settings_view(request):
         )
         messages.success(request, "Schedule carry-forward setting updated.")
         return redirect("settings")
-    return render(request, "settings.html", {"station": station, "devices": Device.objects.all().order_by("name"), "carry_forward_form": carry_forward_form})
+    pending_import = Path(django_settings.DATA_DIR) / ".staged-channeldex-import.sqlite3"
+    return render(request, "settings.html", {"station": station, "devices": Device.objects.all().order_by("name"), "carry_forward_form": carry_forward_form, "pending_import": pending_import.exists()})
+
+
+@require_POST
+def database_export(request):
+    """Download a consistent SQLite snapshot; credentials and media are not in the DB."""
+    audit("export", "DatabasePortability", summary="Portable database export requested")
+    data_dir = Path(django_settings.DATA_DIR)
+    export_dir = data_dir / ".exports"
+    export_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    destination = export_dir / "channeldex-export.sqlite3"
+    try:
+        export_database(connection.settings_dict["NAME"], destination)
+    except (PortableDatabaseError, OSError) as exc:
+        return HttpResponse(str(exc), status=400)
+    response = FileResponse(destination.open("rb"), as_attachment=True, filename="channeldex-export.sqlite3", content_type="application/vnd.sqlite3")
+    response["X-ChannelDex-Portable-Format"] = "1"
+    return response
+
+
+@require_POST
+def database_import(request):
+    """Stage, validate, and defer activation until the next packaged launch."""
+    upload = request.FILES.get("database")
+    if not upload:
+        messages.error(request, "Choose a ChannelDex export first.")
+        return redirect("settings")
+    try:
+        # Use Django's resolved connection (including the test database), not
+        # the configured file path, when checking migration compatibility.
+        staged, _metadata = stage_import(upload, django_settings.DATA_DIR, active_database=connection.settings_dict["NAME"])
+    except PortableDatabaseError as exc:
+        messages.error(request, str(exc))
+        return redirect("settings")
+    audit("stage", "DatabasePortability", summary=f"Portable database staged for next launch: {staged.name}")
+    messages.success(request, "Database validated and staged. Quit and reopen ChannelDex to activate it; the current database will be retained as a recovery copy.")
+    return redirect("settings")
 
 
 def help_page(request):

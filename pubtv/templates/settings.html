@@ -59,4 +59,21 @@
   </form>
 </section>
 {% endif %}
+
+<section class="list-card">
+  <h2>Database portability</h2>
+  {% if pending_import %}<p class="alerts"><strong>Import pending:</strong> quit and reopen ChannelDex to activate the validated database.</p>{% endif %}
+  <p>Export a self-contained ChannelDex database snapshot and save it to a network share if you wish. It contains application records only—not your secret key, credentials, or media files.</p>
+  <form method="post" action="{% url 'database-export' %}">
+    {% csrf_token %}
+    <button class="primary" type="submit">Export database</button>
+  </form>
+  <h3>Import a database</h3>
+  <p>Choose a <code>.sqlite3</code> file exported by a compatible ChannelDex version. The file is copied locally, checked against the current database schema, and staged; quit and reopen ChannelDex to activate it. Do not open one database concurrently from multiple ChannelDex instances.</p>
+  <form method="post" action="{% url 'database-import' %}" enctype="multipart/form-data" class="stacked-form">
+    {% csrf_token %}
+    <div class="field"><label for="database-file">ChannelDex export</label><input id="database-file" name="database" type="file" accept=".sqlite3,application/vnd.sqlite3" required></div>
+    <button type="submit">Validate and stage import</button>
+  </form>
+</section>
 {% endblock %}

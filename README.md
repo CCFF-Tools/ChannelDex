@@ -238,6 +238,16 @@ The station form has `Name` (must be `PUB-TV`) and `Timezone` (accepted value
   preparation** controls a publication-preparation prerequisite. It does not
   mean unattended activation; attended confirmation remains required.
 
+### Database portability
+
+Settings can export a consistent, self-contained SQLite snapshot for saving to
+a network share. To import one, choose the file in Settings; ChannelDex copies
+and validates it locally against the current compatible ChannelDex schema, then
+activates it only after you quit and reopen the packaged app. The current
+database is retained as a recovery copy. Do not open one database concurrently
+from multiple ChannelDex instances; a network share is not a live multi-writer
+database.
+
 ### Add device
 
 The device form has one field, `Name`: the exact playback or schedule-upload
