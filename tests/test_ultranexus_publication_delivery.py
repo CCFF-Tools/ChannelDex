@@ -175,8 +175,18 @@ class AttendedDeliveryTests(TestCase):
         self.batch = SchedulePublicationBatch.objects.create(target=self.target)
         self.batch.occurrence_selections.create(occurrence=self.occurrence,
                                                  occurrence_revision=self.occurrence.revision)
+        from pubtv.operations.publication_review import capture_controller_snapshot
+        snapshot = capture_controller_snapshot(
+            self.batch,
+            adapter=FakeFTPAdapter("controller.test", port=21, username="test", password="test"),
+        )
         item = {"occurrence_id": self.occurrence.pk, "occurrence_revision": self.occurrence.revision,
                 "operation": "add"}
+        mutation_plan = {"scope": "change_set", "controller_snapshot_hash": snapshot.snapshot_hash,
+                         "items": [item], "affected_intervals": []}
+        self.batch.mutation_plan = mutation_plan
+        self.batch.mutation_plan_hash = canonical_hash(mutation_plan)
+        self.batch.save(update_fields=["mutation_plan", "mutation_plan_hash"])
         ArtifactRevision.objects.create(
             publication_batch=self.batch, artifact_type="nmg", revision=1,
             file_reference=str(self.nmg_path), content_hash=self.nmg_hash,
@@ -188,12 +198,13 @@ class AttendedDeliveryTests(TestCase):
         ArtifactRevision.objects.create(
             publication_batch=self.batch, artifact_type="bin", revision=1,
             file_reference=str(self.candidate_path), content_hash=self.candidate_hash,
-            manifest={"items": [item], "introduced_resource_references": [101]},
+            manifest={"items": [item], "introduced_resource_references": [101],
+                      "mutation_plan_hash": self.batch.mutation_plan_hash},
             validation={"status": "passed", "target_id": self.target.pk,
                         "source_nmg_hash": self.nmg_hash, "occurrences": [item]},
+            scope="change_set", base_controller_bin_hash=self.base_hash,
         )
-        from pubtv.operations.publication_review import capture_controller_snapshot, publication_review
-        capture_controller_snapshot(self.batch, adapter=FakeFTPAdapter("controller.test", port=21, username="test", password="test"))
+        from pubtv.operations.publication_review import publication_review
         review = publication_review(self.batch)
         self.assertFalse(review.get("blockers"), review)
         self.batch.approval_2_snapshot = {**publication_snapshot(self.batch), "review_hash": review["review_hash"]}

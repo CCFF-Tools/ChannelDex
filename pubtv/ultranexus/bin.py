@@ -128,15 +128,12 @@ class BinImage:
         return tuple(out)
     def _scan_schedules(self):
         out=[]
-        saw_blank=False
         for slot in range(SCHEDULE_CAPACITY):
             o=SCHEDULE_BASE+slot*SCHEDULE_STRIDE; rec=self.data[o:o+SCHEDULE_STRIDE]; ident, ref=_u32(rec,0),_u32(rec,4)
             if not ident and not ref:
-                saw_blank=True
                 if rec != b"\0"*SCHEDULE_STRIDE: raise BinFormatError(f"unrecognized schedule blank slot {slot}")
                 continue
             if not ident or not ref: raise BinFormatError(f"partial schedule record at slot {slot}")
-            if saw_blank: raise BinFormatError(f"sparse schedule table at slot {slot} is fail-closed")
             title=_field(rec,0x57,64,"schedule title"); comment=_field(rec,0x97,32,"schedule comment")
             vals=(_u32(rec,0x1b),_u32(rec,0x1f),_u32(rec,0x33),_u32(rec,0x13e),_u32(rec,0x3b),_u32(rec,0x13a),_u32(rec,0x3f),_u32(rec,0x143))
             if vals[0]!=vals[1] or vals[2]!=vals[3] or vals[4]!=vals[5] or vals[6]!=vals[7]: raise BinFormatError(f"schedule duplicate mismatch at slot {slot}")

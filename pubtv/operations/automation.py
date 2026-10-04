@@ -156,19 +156,73 @@ def preview_schedule(occurrences, *, target=None, research_passed=False, workflo
     return {"rows": rows, "blockers": blockers, "research_gates": gates, "ready": not blockers}
 
 
-def process_due_job_state(job, *, now=None):
+def process_due_job_state(job, *, now=None, already_claimed=False):
     """Advance a queued publication job once; repeated calls are harmless.
 
     This accepts the optional PublicationJob model without coupling the UI to a
     worker implementation. Jobs remain blocked until both research and Approval 2.
     """
     now = now or timezone.now()
+    # Helpers are also called directly by tests and recovery tooling. Claim a
+    # queued row here when the worker has not already claimed it; terminal
+    # rows are immutable and duplicate invocations become no-ops.
+    from .models import PublicationJob
+    if isinstance(job, PublicationJob):
+        with transaction.atomic():
+            locked_job = PublicationJob.objects.select_for_update().select_related("publication_batch").get(pk=job.pk)
+            if locked_job.status in {"succeeded", "failed", "cancelled"}:
+                return locked_job
+            requested = locked_job.publication_batch.requested_activation_at
+            if requested and requested > now:
+                return locked_job
+            if locked_job.status == "running" and not already_claimed:
+                return locked_job
+            if locked_job.status == "queued":
+                locked_job.status = "running"
+                locked_job.started_at = now
+                locked_job.save(update_fields=["status", "started_at"])
+            job = locked_job
     if getattr(job, "status", None) in {"succeeded", "failed", "cancelled"}:
         return job
     requested = getattr(getattr(job, "publication_batch", None), "requested_activation_at", None)
     if requested and requested > now:
         return job
     publication = getattr(job, "publication_batch", None)
+    if publication and getattr(job, "kind", "") in {"prepare_publication", "generate_bin"}:
+        # The local worker owns execution; this helper is intentionally
+        # conservative and never falls back to configured static BIN bytes.
+        from .models import Station
+        auto_pull = Station.objects.order_by("pk").values_list("auto_pull_controller_schedule", flat=True).first()
+        if auto_pull:
+            try:
+                from .publication_review import pull_current_controller_schedule
+                snapshot = pull_current_controller_schedule(publication, automatic=True)
+                publication.refresh_from_db()
+                job.result = {"controller_snapshot_hash": snapshot.snapshot_hash}
+            except Exception as exc:
+                job.status = "failed"; job.error = str(exc); job.finished_at = now
+                job.save(update_fields=["status", "error", "finished_at"])
+                return job
+        if not publication.controller_snapshot_id:
+            job.status = "failed"; job.error = "Successful manual controller pull is required"; job.finished_at = now
+            job.save(update_fields=["status", "error", "finished_at"])
+            return job
+        if getattr(job, "kind", "") == "generate_bin":
+            try:
+                artifact = generate_bin_artifact(publication)
+                job.status = "succeeded"; job.result = {"artifact_id": artifact.pk}; job.finished_at = now
+            except Exception as exc:
+                job.status = "failed"; job.error = str(exc); job.finished_at = now
+            job.save(update_fields=["status", "error", "result", "finished_at"])
+            return job
+        # Preparation is complete once the exact live snapshot is captured;
+        # Approval 2 remains a later human action.
+        job.status = "succeeded"
+        job.result = {**(job.result or {}), "controller_snapshot_hash": publication.controller_snapshot_hash,
+                      "prepared": True}
+        job.finished_at = now
+        job.save(update_fields=["status", "result", "finished_at"])
+        return job
     if publication and (publication.approval_2_status != "approved" or publication.approval_2_hash == ""):
         if hasattr(job, "status"):
             job.status = "failed"; job.error = "Approval 2 is required"
@@ -912,6 +966,7 @@ def generate_nmg_artifact(batch):
             artifact = ArtifactRevision.objects.create(
                 publication_batch=locked, artifact_type="nmg", revision=revision,
                 file_reference=str(output), content_hash=manifest["sha256"], manifest=manifest,
+                scope="change_set", base_controller_bin_hash=((locked.controller_snapshot.payload if locked.controller_snapshot_id else {}) or {}).get("captured_sha256", ""),
                 validation={"status": "passed", "layout": image.header.version, "audit": audit},
             )
             if locked.approval_2_status == "approved":
@@ -935,14 +990,20 @@ def generate_bin_artifact(batch):
     if batch.workflow_mode != "selected_changes" or batch.reconciliation_mode != "preserve":
         raise ValueError("Restricted BIN creation supports selected preserved changes only")
     target_settings, config = _target_config(batch.target)
-    target_blockers = restricted_target_blockers(target_settings)
+    target_blockers = [item for item in restricted_target_blockers(target_settings)
+                       if "base_bin_hash" not in item and "base_nmg_hash" not in item]
     if target_blockers:
         raise ValueError("Target qualification is incomplete: " + "; ".join(target_blockers))
     settings_snapshot = settings_record_snapshot(target_settings)
     if config.get("schedule_path") != "/internal/schedule/schedule.bin":
         raise ValueError("Qualified controller schedule path must be reviewed and saved")
-    if not config.get("base_bin_path") or not config.get("base_bin_hash"):
-        raise ValueError("An exact qualified controller BIN base is required")
+    snapshot = batch.controller_snapshot if batch.controller_snapshot_id else None
+    if not snapshot or batch.controller_snapshot_hash != snapshot.snapshot_hash:
+        raise ValueError("A fresh batch-bound controller BIN pull is required")
+    captured_path = snapshot.source_reference
+    captured_hash = snapshot.payload.get("captured_sha256", "")
+    if not captured_path or not captured_hash:
+        raise ValueError("Controller snapshot is incomplete")
     nmg_artifact = batch.artifact_revisions.filter(artifact_type="nmg").order_by("-revision").first()
     if not nmg_artifact or nmg_artifact.manifest.get("target_settings") != settings_snapshot:
         raise ValueError("Generate a current NMG artifact before its paired BIN")
@@ -950,7 +1011,7 @@ def generate_bin_artifact(batch):
         raise ValueError("NMG artifact bytes changed")
     nmg = NMGImage.from_file(nmg_artifact.file_reference, expected_sha256=nmg_artifact.content_hash)
     nmg.validate_restricted()
-    base = BinImage.from_file(config["base_bin_path"], expected_sha256=config["base_bin_hash"])
+    base = BinImage.from_file(captured_path, expected_sha256=captured_hash)
     image = base
     items = nmg_artifact.manifest.get("items", [])
     selections = list(batch.occurrence_selections.order_by("occurrence__starts_at", "pk"))
@@ -985,15 +1046,17 @@ def generate_bin_artifact(batch):
     if bin_template_hash != target_settings.bin_template_sha256.lower():
         raise ValueError("Qualified BIN template identity changed")
     new_events = []
+    affected_ranges = []
+    data = bytearray(image.data)
     for selection, item in zip(selections, items):
-        if selection.operation == "delete":
-            continue
         ref = item.get("resource_reference")
+        if selection.operation != "delete" and not ref:
+            raise ValueError("Selected NMG resource reference is missing")
         nmg_resource = next((r for r in nmg.resources() if r.reference == ref), None)
-        if nmg_resource is None:
+        if selection.operation != "delete" and nmg_resource is None:
             raise ValueError("Selected NMG resource is missing")
         current = next((r for r in image.resources if r.reference == ref), None)
-        if current is None:
+        if selection.operation != "delete" and current is None:
             source = nmg.data[nmg_resource.base:nmg_resource.base + BIN_RESOURCE_STRIDE]
             if image.data[template.offset + 0x3e:template.offset + 0x43] != source[0x3e:0x43]:
                 raise ValueError("NMG and BIN technical templates are not profile-compatible")
@@ -1008,44 +1071,83 @@ def generate_bin_artifact(batch):
                 width=struct.unpack_from("<H", source, 0x150)[0],
                 height=struct.unpack_from("<H", source, 0x152)[0],
             )
+            data = bytearray(image.data)
             current = next(r for r in image.resources if r.reference == ref)
-        if (current.filename, current.media_id) != (nmg_resource.filename, nmg_resource.media_id):
+        if selection.operation != "delete" and (current.filename, current.media_id) != (nmg_resource.filename, nmg_resource.media_id):
             raise ValueError("BIN resource identity differs from reviewed NMG")
         lineage = item.get("nmg_occurrence_id")
         matched = [s for s in nmg.schedules() if s.occurrence_id == lineage and not s.title.startswith("Switchback")]
-        if len(matched) != 1 or matched[0].reference != ref:
+        if selection.operation != "delete" and (len(matched) != 1 or matched[0].reference != ref):
             raise ValueError("Selected NMG schedule event is missing or ambiguous")
+        if selection.operation == "delete":
+            start = BIN_SCHEDULE_BASE + selection.source_bin_slot * BIN_SCHEDULE_STRIDE
+            data[start:start + BIN_SCHEDULE_STRIDE] = b"\0" * BIN_SCHEDULE_STRIDE
+            continue
         event = matched[0]
-        new_events.append(nmg.data[event.base:event.base + BIN_SCHEDULE_STRIDE])
-    retained = [base.data[s.offset:s.offset + BIN_SCHEDULE_STRIDE] for s in base.schedules if s.slot not in removed]
-    all_events = retained + new_events
-    if len(all_events) > 3000:
-        raise ValueError("BIN schedule capacity exhausted")
-    # Keep retained records in their original order. A global sort would move
-    # unrelated controller records for an ordinary selected insertion.
-    data = bytearray(image.data)
-    for index, raw in enumerate(all_events):
-        offset = BIN_SCHEDULE_BASE + index * BIN_SCHEDULE_STRIDE
-        data[offset:offset + BIN_SCHEDULE_STRIDE] = raw
-    tail = BIN_SCHEDULE_BASE + len(all_events) * BIN_SCHEDULE_STRIDE
-    data[tail:BIN_SCHEDULE_BASE + 3000 * BIN_SCHEDULE_STRIDE] = b"\0" * (3000 - len(all_events)) * BIN_SCHEDULE_STRIDE
+        raw = nmg.data[event.base:event.base + BIN_SCHEDULE_STRIDE]
+        target_slot = selection.source_bin_slot
+        if selection.operation == "add":
+            blank = next((i for i in range(3000)
+                          if data[BIN_SCHEDULE_BASE + i * BIN_SCHEDULE_STRIDE:
+                                 BIN_SCHEDULE_BASE + (i + 1) * BIN_SCHEDULE_STRIDE] == b"\0" * BIN_SCHEDULE_STRIDE), None)
+            if blank is None:
+                raise ValueError("BIN schedule capacity exhausted")
+            target_slot = blank
+        start = BIN_SCHEDULE_BASE + target_slot * BIN_SCHEDULE_STRIDE
+        data[start:start + BIN_SCHEDULE_STRIDE] = raw
+        new_events.append(raw)
+        affected_ranges.append((event.start, event.end))
     image, audit = image._schedule_result(data, "selected-changes")
-    parity = validate_nmg_bin_parity(nmg, image)
-    expected = {(s.reference, s.day, s.start, s.in_point, s.out_point) for s in image.executable_schedules}
-    for raw in new_events:
-        key = (struct.unpack_from("<I", raw, 4)[0], raw[0x1a],
-               struct.unpack_from("<I", raw, 0x1b)[0],
-               struct.unpack_from("<I", raw, 0x3b)[0], struct.unpack_from("<I", raw, 0x3f)[0])
-        if key not in expected:
-            raise ValueError("Selected NMG event did not survive BIN serialization")
+    affected = []
+    excluded_slots = {s.source_bin_slot for s in selections
+                       if s.operation != "add" and s.source_bin_slot is not None}
+    affected_slots = set()
+    for selection, item in zip(selections, items):
+        if selection.operation == "delete":
+            continue
+        event = next((s for s in nmg.schedules() if s.occurrence_id == item.get("nmg_occurrence_id")
+                      and not s.title.startswith("Switchback")), None)
+        found = next((s for s in image.executable_schedules
+                      if event and s.reference == event.reference and s.occurrence == event.occurrence_id), None)
+        nmg_raw = nmg.data[event.base:event.base + BIN_SCHEDULE_STRIDE] if event else b""
+        nmg_storage = (nmg_raw[0xb7:0xb7 + 32].split(b"\0", 1)[0].decode("ascii")
+                       if event else "")
+        expected_contract = (
+            event.reference, event.occurrence_id, event.day, event.start, event.end,
+            event.duration, struct.unpack_from("<I", nmg_raw, 0x3b)[0],
+            struct.unpack_from("<I", nmg_raw, 0x3f)[0], event.title, event.filename,
+            nmg_storage, event.comment,
+        ) if event else None
+        actual_contract = (
+            found.reference, found.occurrence, found.day, found.start, found.end,
+            found.duration, found.in_point, found.out_point, found.title,
+            found.filename, found.storage, found.comment,
+        ) if found else None
+        if event is None or found is None or actual_contract != expected_contract:
+            raise ValueError("Affected NMG event did not survive BIN serialization")
+        affected.append((found.start, found.end))
+        affected_slots.add(found.slot)
+    live = [(s.start, s.end, s.slot) for s in image.executable_schedules
+            if s.slot not in excluded_slots and s.slot not in affected_slots]
+    for start, end in affected:
+        if any(start < other_end and other_start < end
+               for other_start, other_end, _slot in live):
+            raise ValueError("Affected NMG/BIN event overlaps retained live event")
+    parity = {"status": "passed", "scope": "change_set", "semantics": "affected-only",
+              "event_count": len(affected), "affected_intervals": affected}
     introduced_resources = sorted({resource.reference for resource in image.resources}
                                   - {resource.reference for resource in base.resources})
-    manifest = {**image.manifest(), "base_sha256": config["base_bin_hash"],
+    manifest = {**image.manifest(), "base_sha256": captured_hash,
+                "base_controller_bin_hash": captured_hash, "scope": "change_set",
                 "source_nmg_hash": nmg_artifact.content_hash, "items": items,
                 "target_settings": settings_snapshot, "audit": audit,
                 "removed_source_slots": sorted(removed),
                 "introduced_resource_references": introduced_resources,
                 "template_sha256": bin_template_hash, "parity": parity}
+    mutation_plan = {"scope": "change_set", "controller_snapshot_hash": snapshot.snapshot_hash,
+                     "items": items, "affected_intervals": affected}
+    mutation_plan_hash = canonical_hash(mutation_plan)
+    manifest["mutation_plan_hash"] = mutation_plan_hash
     root = Path(django_settings.DATA_DIR) / "ultranexus" / "schedules"
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     temporary = output = None
@@ -1061,6 +1163,12 @@ def generate_bin_artifact(batch):
                 raise ValueError("Publication cancelled during generation")
             if settings_record_snapshot(UltraNexusTargetSettings.objects.filter(target=batch.target, is_current=True).first()) != settings_snapshot:
                 raise ValueError("Target settings changed during BIN generation")
+            if (locked.controller_snapshot_id != snapshot.pk or
+                    locked.controller_snapshot_hash != snapshot.snapshot_hash):
+                raise ValueError("Controller snapshot changed during BIN generation")
+            locked.mutation_plan = mutation_plan
+            locked.mutation_plan_hash = mutation_plan_hash
+            locked.save(update_fields=["mutation_plan", "mutation_plan_hash"])
             revision = (locked.artifact_revisions.filter(artifact_type="bin").order_by("-revision").values_list("revision", flat=True).first() or 0) + 1
             output = root / f"publication-{batch.pk}-r{revision}-{manifest['sha256']}-{uuid.uuid4().hex}.bin"
             if output.exists():
@@ -1069,6 +1177,7 @@ def generate_bin_artifact(batch):
             artifact = ArtifactRevision.objects.create(
                 publication_batch=locked, artifact_type="bin", revision=revision,
                 file_reference=str(output), content_hash=manifest["sha256"], manifest=manifest,
+                scope="change_set", base_controller_bin_hash=captured_hash,
                 validation={"status": "passed", "target_id": batch.target_id,
                             "source_nmg_hash": nmg_artifact.content_hash,
                             "occurrences": items, "audit": audit, "parity": parity},
@@ -1160,6 +1269,12 @@ def publication_artifact_blockers(batch):
                 blockers.append("BIN occurrence revisions do not match the publication batch")
             if artifact.validation.get("target_id") != batch.target_id:
                 blockers.append("BIN target does not match the publication batch")
+            captured_hash = ((batch.controller_snapshot.payload if batch.controller_snapshot_id else {})
+                             or {}).get("captured_sha256", "")
+            if not captured_hash or artifact.base_controller_bin_hash != captured_hash:
+                blockers.append("BIN was generated from a different controller snapshot")
+            if artifact.manifest.get("mutation_plan_hash") != batch.mutation_plan_hash:
+                blockers.append("BIN mutation plan no longer matches the publication batch")
             if not selected_nmg or artifact.validation.get("source_nmg_hash") != selected_nmg.content_hash:
                 blockers.append("BIN validation is not linked to the selected NMG revision")
     return blockers
@@ -1167,8 +1282,8 @@ def publication_artifact_blockers(batch):
 
 def publication_snapshot(batch):
     selections = batch.occurrence_selections.select_related("occurrence").order_by("occurrence__starts_at", "pk")
-    controller = batch.target.controller_snapshots.order_by("-revision").first()
-    controller_hash = controller.snapshot_hash if controller else ""
+    controller = (batch.controller_snapshot if batch.controller_snapshot_id else None) or batch.target.controller_snapshots.order_by("-revision").first()
+    controller_hash = batch.controller_snapshot_hash or (controller.snapshot_hash if controller else "")
     artifacts = []
     for artifact_type in ("nmg", "bin"):
         artifact = batch.artifact_revisions.filter(artifact_type=artifact_type).order_by("-revision").values(
@@ -1193,6 +1308,8 @@ def publication_snapshot(batch):
             "reconciliation_mode": batch.reconciliation_mode,
             "requested_activation_at": batch.requested_activation_at.isoformat() if batch.requested_activation_at else None,
             "controller_snapshot_hash": controller_hash,
+            "mutation_plan_hash": batch.mutation_plan_hash,
+            "preparation_kind": batch.preparation_kind,
             "artifacts": artifacts,
             "media": media, "cycles": cycles,
             "occurrences": [{"id": s.occurrence_id, "revision": s.occurrence_revision,

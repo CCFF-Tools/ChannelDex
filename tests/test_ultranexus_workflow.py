@@ -34,7 +34,7 @@ class UltraNexusWorkflowServiceTests(TestCase):
 
 try:
     from django.test import Client, override_settings
-    from pubtv.operations.models import ArtifactRevision, Device, Episode, MediaAsset, MediaBinding, MediaInspection, Occurrence, PreparationBatch, PreparationBatchItem, PreparationJob, ResearchGate, SchedulePublicationBatch, Show, Station, TransferAttempt, UltraNexusTargetSettings, UploadedOccurrenceCoverage
+    from pubtv.operations.models import ArtifactRevision, ControllerSnapshot, Device, Episode, MediaAsset, MediaBinding, MediaInspection, Occurrence, PreparationBatch, PreparationBatchItem, PreparationJob, ResearchGate, SchedulePublicationBatch, Show, Station, TransferAttempt, UltraNexusTargetSettings, UploadedOccurrenceCoverage
     from pubtv.operations.automation import approve_preparation_batch, generate_bin_artifact, generate_nmg_artifact, invalidate_snapshot, preview_schedule, process_preparation_batch, publication_artifact_blockers, publication_snapshot, schedule_ready_binding
     from pubtv.ultranexus.ftp import TransferResult
     from pubtv.ultranexus.nmg import MAGIC, RESOURCE_BASE, SCHEDULE_BASE, SCHEDULE_STRIDE, VERSION_OFFSET
@@ -368,9 +368,27 @@ try:
                 if generated[program + 0x57:program + 0x61].startswith(b"Switchback"):
                     program += SCHEDULE_STRIDE
                 self.assertEqual(struct.unpack_from("<I", generated, program + 0x1b)[0], 630000)
+                captured_hash = hashlib.sha256(bin_bytes).hexdigest()
+                snapshot = ControllerSnapshot.objects.create(
+                    target=self.device, revision=1, snapshot_hash=captured_hash,
+                    source_reference=str(bin_path),
+                    payload={"captured_sha256": captured_hash, "captured_manifest": {}},
+                )
+                batch.controller_snapshot = snapshot
+                batch.controller_snapshot_hash = snapshot.snapshot_hash
+                batch.save(update_fields=["controller_snapshot", "controller_snapshot_hash"])
                 bin_artifact = generate_bin_artifact(batch)
                 self.assertEqual(bin_artifact.validation["parity"]["status"], "passed")
+                self.assertEqual(bin_artifact.validation["parity"]["semantics"], "affected-only")
+                batch.refresh_from_db()
+                self.assertEqual(bin_artifact.manifest["mutation_plan_hash"], batch.mutation_plan_hash)
+                self.assertEqual(batch.mutation_plan["controller_snapshot_hash"], snapshot.snapshot_hash)
                 self.assertEqual(bin_artifact.manifest["introduced_resource_references"], [88])
+                candidate = Path(bin_artifact.file_reference).read_bytes()
+                self.assertEqual(
+                    candidate[BIN_SCHEDULE_BASE:BIN_SCHEDULE_BASE + SCHEDULE_STRIDE],
+                    bin_bytes[BIN_SCHEDULE_BASE:BIN_SCHEDULE_BASE + SCHEDULE_STRIDE],
+                )
                 blockers = publication_artifact_blockers(batch)
                 self.assertNotIn("NMG occurrence revisions do not match the publication batch", blockers)
                 self.assertEqual(publication_snapshot(batch)["artifacts"][0]["revision"], 2)

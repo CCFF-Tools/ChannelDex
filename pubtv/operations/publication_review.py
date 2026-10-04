@@ -90,12 +90,15 @@ def _publication_binding(batch):
     return value
 
 
-def capture_controller_snapshot(batch, *, adapter=None):
+def capture_controller_snapshot(batch, *, adapter=None, trigger="manual", actor="owner", bind=True):
     """Download only the qualified schedule path and persist an immutable snapshot."""
     current = batch.target.ultranexus_settings.filter(is_current=True).first()
     if batch.status == "cancelled":
         raise ValueError("Cancelled publications cannot capture a new review")
-    blockers = restricted_target_blockers(current)
+    # A live pull is the source of truth. Legacy static base hashes are
+    # qualification/history only and must never block or seed this capture.
+    blockers = [item for item in restricted_target_blockers(current)
+                if "base_bin_hash" not in item and "base_nmg_hash" not in item]
     if blockers:
         raise ValueError("Qualified target contract is incomplete: " + "; ".join(blockers))
     if current.schedule_path != LOADSCH_PATH:
@@ -115,23 +118,62 @@ def capture_controller_snapshot(batch, *, adapter=None):
                "captured_sha256": sha256_file(path), "captured_manifest": _manifest(actual),
                "captured_settings": settings_record_snapshot(current),
                "captured_settings_hash": canonical_hash(settings_record_snapshot(current)),
-               "expected_base_hash": current.base_bin_hash}
+               "expected_base_hash": current.base_bin_hash,
+               "trigger": trigger, "actor": actor, "source_bytes": path.stat().st_size,
+               "settings_revision": current.version, "settings_hash": current.settings_hash,
+               "qualification": {"controller_family": current.controller_family,
+                                 "firmware_version": current.firmware_version,
+                                 "output_number": current.output_number,
+                                 "schedule_path": current.schedule_path}}
     digest = canonical_hash(payload)
     payload["snapshot_hash"] = digest
     with transaction.atomic():
         Device.objects.select_for_update().get(pk=batch.target_id)
+        locked_batch = SchedulePublicationBatch.objects.select_for_update().get(pk=batch.pk)
         latest = ControllerSnapshot.objects.select_for_update().filter(target=batch.target).order_by("-revision").first()
         revision = (latest.revision if latest else 0) + 1
-        return ControllerSnapshot.objects.create(target=batch.target, revision=revision,
-            snapshot_hash=digest, payload=payload, source_reference=str(path))
+        snapshot = ControllerSnapshot.objects.create(target=batch.target, revision=revision,
+            snapshot_hash=digest, payload=payload, source_reference=str(path),
+            trigger=trigger, actor=actor, settings_revision=current.version,
+            settings_hash=current.settings_hash, target_path=current.schedule_path,
+            source_bytes=path.stat().st_size, qualification=payload["qualification"])
+        if bind:
+            previous_hash = locked_batch.controller_snapshot_hash
+            locked_batch.controller_snapshot = snapshot
+            locked_batch.controller_snapshot_hash = snapshot.snapshot_hash
+            locked_batch.save(update_fields=["controller_snapshot", "controller_snapshot_hash"])
+            if (previous_hash and previous_hash != snapshot.snapshot_hash and
+                    locked_batch.approval_2_status == "approved"):
+                from .automation import invalidate_snapshot
+                invalidate_snapshot(locked_batch, approval=2, reason="controller schedule pull changed")
+            # Keep the caller usable for immediate review rendering while all
+            # persisted decisions above came from the locked, freshly loaded row.
+            batch.controller_snapshot = snapshot
+            batch.controller_snapshot_hash = snapshot.snapshot_hash
+            batch.approval_2_status = locked_batch.approval_2_status
+        return snapshot
+
+
+def pull_current_controller_schedule(batch, *, adapter=None, actor="owner", automatic=False):
+    """Manual Pull and automatic preparation entry point; always creates a
+    new immutable, batch-bound snapshot, including identical bytes."""
+    return capture_controller_snapshot(batch, adapter=adapter,
+        trigger="automatic" if automatic else "manual", actor=actor, bind=True)
 
 
 def publication_review(batch, snapshot=None):
     """Return the exact actual/proposed diff and media readiness for rendering."""
-    snapshot = snapshot or batch.target.controller_snapshots.order_by("-revision").first()
+    if snapshot is None and not batch.controller_snapshot_id:
+        legacy = batch.target.controller_snapshots.exists()
+        message = ("Controller capture predates parsed BIN capture; capture again"
+                   if legacy else "Publication has no batch-bound controller capture; capture the live schedule before review")
+        return {"blockers": [message]}
+    snapshot = snapshot or (batch.controller_snapshot if batch.controller_snapshot_id else None)
     artifact = batch.artifact_revisions.filter(artifact_type="bin").order_by("-revision").first()
     if not snapshot or not artifact:
         return {"blockers": ["Controller BIN capture and generated BIN are required before Approval 2"]}
+    if batch.controller_snapshot_hash and batch.controller_snapshot_hash != snapshot.snapshot_hash:
+        return {"blockers": ["Publication is not bound to its captured controller snapshot"]}
     actual = snapshot.payload.get("captured_manifest")
     current_settings = batch.target.ultranexus_settings.filter(is_current=True).first()
     blockers = []
@@ -151,8 +193,8 @@ def publication_review(batch, snapshot=None):
         return {"blockers": ["Controller capture or proposed BIN is missing, changed, or invalid"]}
     if _manifest(actual_image) != actual:
         return {"blockers": ["Controller capture manifest does not match its bytes"]}
-    if not current_settings or captured_hash.lower() != current_settings.base_bin_hash.lower():
-        blockers.append("Controller BIN differs from the qualified approved base; review cannot auto-rebase")
+    # The captured live BIN is authoritative for this publication. A static
+    # configured base is legacy qualification evidence, never a rebase input.
     if current_settings and snapshot.payload.get("captured_settings_hash") != canonical_hash(settings_record_snapshot(current_settings)):
         blockers.append("Target settings changed after controller capture")
     current_publication_hash = canonical_hash(_publication_binding(batch))

@@ -186,3 +186,6 @@ Controller activation remains a separate attended action behind existing gates.
 ### Device diagnostics remain observational (accepted)
 
 Device diagnostics may use an explicitly submitted, unsaved configuration for a short-timeout FTP login/listing and local tool/evidence checks. They must not write to the target, encode media, upload schedules, or change qualification status. Observed and approved fingerprints are shown separately; mismatches are stale and require explicit review. Future automatic preparation and unattended delivery remain proposed.
+### Accepted — 2026-10-04 fresh controller BIN
+
+The live controller schedule is authoritative per publication. Static base BIN/NMG fields are retained only for legacy qualification/history. Pulls are immutable and auditable, and all approval, staging, and retry operations are bound to the exact snapshot hash.

@@ -48,15 +48,18 @@ class PublicationReviewTests(TestCase):
         self.assertEqual(len(diff['adds']),1)
         self.assertFalse(diff['deletes'])
 
-    def test_changed_controller_base_is_preserved_but_blocks_review(self):
+    def test_changed_legacy_controller_base_is_preserved_without_blocking_fresh_review(self):
         from pubtv.ultranexus.delivery import RecoverableFTPAdapter
         FakeFTPConnection.files['/internal/schedule/schedule.bin'] = self.candidate_path.read_bytes()
         adapter = RecoverableFTPAdapter(FakeFTPAdapter('test', port=21, username='test', password='test'))
         snapshot = capture_controller_snapshot(self.batch, adapter=adapter)
         self.assertTrue(Path(snapshot.source_reference).is_file())
-        self.assertTrue(any('differs' in x for x in publication_review(self.batch)['blockers']))
+        self.assertFalse(any('differs' in x for x in publication_review(self.batch)['blockers']))
 
     def test_legacy_and_missing_snapshots_fail_closed_on_page(self):
+        self.batch.controller_snapshot = None
+        self.batch.controller_snapshot_hash = ""
+        self.batch.save(update_fields=["controller_snapshot", "controller_snapshot_hash"])
         ControllerSnapshot.objects.create(target=self.target, revision=2, snapshot_hash='a'*64, payload={'manual': True})
         self.assertIn('predates', publication_review(self.batch)['blockers'][0])
         self.assertEqual(self.client.get('/schedule/delivery/').status_code, 200)

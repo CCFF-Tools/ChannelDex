@@ -28,6 +28,9 @@ class Station(models.Model):
     name = models.CharField(max_length=120, default="PUB-TV")
     timezone = models.CharField(max_length=64, default="America/Detroit")
     carry_forward_unassigned_episodes = models.BooleanField(default=False)
+    # Controller schedule pulls are enabled by default; disabling this setting
+    # requires an explicitly successful manual pull for every publication.
+    auto_pull_controller_schedule = models.BooleanField(default=True)
     def __str__(self): return self.name
 
 class Show(models.Model):
@@ -909,6 +912,13 @@ class ControllerSnapshot(models.Model):
     snapshot_hash = models.CharField(max_length=128)
     payload = models.JSONField(default=dict)
     source_reference = models.CharField(max_length=240, blank=True)
+    trigger = models.CharField(max_length=16, choices=[("automatic", "Automatic"), ("manual", "Manual")], default="manual")
+    actor = models.CharField(max_length=120, default="owner")
+    settings_revision = models.PositiveIntegerField(null=True, blank=True)
+    settings_hash = models.CharField(max_length=128, blank=True)
+    target_path = models.CharField(max_length=500, default="/internal/schedule/schedule.bin")
+    source_bytes = models.PositiveBigIntegerField(default=0)
+    qualification = models.JSONField(default=dict, blank=True)
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=["target", "revision"], name="unique_controller_snapshot_revision")]
@@ -943,6 +953,12 @@ class SchedulePublicationBatch(models.Model):
     created_at = models.DateTimeField(default=timezone.now)
     created_by = models.CharField(max_length=120, default="owner")
     notes = models.TextField(blank=True)
+    controller_snapshot = models.ForeignKey(ControllerSnapshot, null=True, blank=True, on_delete=models.PROTECT, related_name="publication_batches")
+    controller_snapshot_hash = models.CharField(max_length=128, blank=True)
+    mutation_plan = models.JSONField(default=dict, blank=True)
+    mutation_plan_hash = models.CharField(max_length=128, blank=True)
+    review_diff = models.JSONField(default=dict, blank=True)
+    preparation_kind = models.CharField(max_length=24, default="publication")
 
     def clean(self):
         super().clean()
@@ -1017,6 +1033,8 @@ class ArtifactRevision(models.Model):
     content_hash = models.CharField(max_length=128)
     manifest = models.JSONField(default=dict, blank=True)
     validation = models.JSONField(default=dict, blank=True)
+    scope = models.CharField(max_length=24, default="change_set")
+    base_controller_bin_hash = models.CharField(max_length=128, blank=True)
     created_at = models.DateTimeField(default=timezone.now)
 
     class Meta:
@@ -1100,10 +1118,10 @@ class ResearchGate(models.Model):
 
 
 class PublicationJob(models.Model):
-    KINDS = [(x, x.replace("_", " ").title()) for x in ("preview", "deliver", "verify", "reconcile")]
+    KINDS = [(x, x.replace("_", " ").title()) for x in ("preview", "prepare_publication", "generate_bin", "deliver", "verify", "reconcile")]
     STATUS = [(x, x.replace("_", " ").title()) for x in ("queued", "running", "succeeded", "failed", "cancelled")]
     publication_batch = models.ForeignKey(SchedulePublicationBatch, on_delete=models.CASCADE, related_name="jobs")
-    kind = models.CharField(max_length=16, choices=KINDS)
+    kind = models.CharField(max_length=24, choices=KINDS)
     status = models.CharField(max_length=16, choices=STATUS, default="queued")
     idempotency_key = models.CharField(max_length=160, unique=True)
     queued_at = models.DateTimeField(default=timezone.now)

@@ -167,3 +167,6 @@ durable status and does not execute jobs. Bulk premiere planning and cycle-based
 publication preparation use reviewed snapshots and transactional confirmation.
 Media approval excludes planning metadata; publication approval includes exact
 occurrence revisions, chosen media versions, and cycle/target provenance.
+## Accepted 2026-10-04 controller schedule source
+
+Publication preparation starts from a batch-bound live controller pull. Automatic mode queues the pull before generation; when disabled, a successful manual pull is required. A changed live pull or staging mismatch stales artifacts and Approval 2; no silent rebase or static-base fallback is permitted. Generation applies one immutable mutation plan to the captured BIN while NMG remains a qualified change-set/reference artifact.
