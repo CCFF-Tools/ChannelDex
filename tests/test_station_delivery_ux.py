@@ -1,6 +1,7 @@
 from pathlib import Path
 import tempfile
 import stat
+import plistlib
 from datetime import datetime
 from unittest.mock import Mock, patch
 
@@ -74,7 +75,7 @@ class StationDeliveryUXTests(TestCase):
     @patch("pubtv.operations.views.KeychainSecretStore.set")
     def test_device_save_shares_reference_and_blank_save_preserves_settings(self, save):
         device = Device.objects.create(name="WinLGX")
-        data = {"settings_version": 0, "host": "controller", "port": 21, "username": "owner", "password": "secret", "schedule_path": "/internal/schedule/schedule.bin", "media_directory": "/Vol1/mpeg", "base_bin_hash": "a" * 64, "base_bin_path": "/tmp/base.bin", "qualification_status": "open", "capability_flags": "media_transfer,schedule_bin_delivery"}
+        data = {"settings_version": 0, "host": "controller", "port": 21, "username": "owner", "password": "secret", "schedule_path": "/internal/schedule/schedule.bin", "media_directory": "/Vol1/mpeg", "ame_executable": "/Applications/Adobe Media Encoder.app/Contents/MacOS/Adobe Media Encoder", "base_bin_hash": "a" * 64, "base_bin_path": "/tmp/base.bin", "qualification_status": "open", "capability_flags": "media_transfer,schedule_bin_delivery"}
         assert Client().post(f"/settings/devices/{device.pk}/", data).status_code == 302
         first = UltraNexusTargetSettings.objects.get(target=device, is_current=True)
         assert first.secret_reference == first.command_secret_reference
@@ -83,7 +84,7 @@ class StationDeliveryUXTests(TestCase):
         assert Client().post(f"/settings/devices/{device.pk}/", second_data).status_code == 302
         second = UltraNexusTargetSettings.objects.get(target=device, is_current=True)
         assert second.version == 2 and second.secret_reference == first.secret_reference
-        assert second.base_bin_hash == first.base_bin_hash and second.settings["ame_executable"] == first.settings["ame_executable"]
+        assert second.base_bin_hash == first.base_bin_hash and second.settings["ame_executable"] == first.settings["ame_executable"] == data["ame_executable"]
         assert second.capability_flags == []
         assert second.settings_hash
 
@@ -116,6 +117,22 @@ class StationDeliveryUXTests(TestCase):
         assert response.json()["path"].endswith("Contents/MacOS/Adobe Media Encoder")
         run.return_value = Mock(returncode=1, stdout="")
         assert Client().post("/settings/browse/", {"kind": "file"}).json()["cancelled"] is True
+
+    @patch("pubtv.operations.views.subprocess.run")
+    def test_browse_application_uses_plist_executable_and_trailing_slash(self, run):
+        with tempfile.TemporaryDirectory() as directory:
+            app = Path(directory) / "Adobe Media Encoder.app"
+            contents = app / "Contents"
+            macos = contents / "MacOS"
+            macos.mkdir(parents=True)
+            executable = macos / "Adobe Media Encoder 2025"
+            executable.touch()
+            with (contents / "Info.plist").open("wb") as stream:
+                plistlib.dump({"CFBundleExecutable": executable.name}, stream)
+            run.return_value = Mock(returncode=0, stdout=str(app) + "/\n")
+            response = Client().post("/settings/browse/", {"kind": "application"})
+        assert response.json()["path"] == str(executable)
+        assert response.json()["resolved"] is True
 
     def test_valid_upload_creates_private_episode_media_without_changing_occurrence(self):
         import uuid

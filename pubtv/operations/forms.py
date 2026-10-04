@@ -195,10 +195,10 @@ class UltraNexusSettingsForm(forms.Form):
     command_port = forms.IntegerField(required=False, min_value=1, max_value=65535, initial=23)
     command_username = forms.CharField(required=False, widget=forms.HiddenInput())
     command_secret_reference = forms.CharField(required=False, widget=forms.HiddenInput())
-    ame_executable = forms.CharField(required=False)
-    ame_preset = forms.CharField(required=False, help_text="Path to the reviewed Nexus Mono .epr preset.")
-    ffmpeg_executable = forms.CharField(required=False, help_text="Exact qualified FFmpeg executable path.")
-    ffmpeg_qualification_manifest = forms.CharField(required=False, help_text="Private AME/FFmpeg comparison manifest path.")
+    ame_executable = forms.CharField(required=False, label="Adobe Media Encoder executable")
+    ame_preset = forms.CharField(required=False, label="Adobe Media Encoder preset", help_text="Path to the reviewed Nexus Mono .epr preset.")
+    ffmpeg_executable = forms.CharField(required=False, label="FFmpeg executable", help_text="Exact qualified FFmpeg executable path.")
+    ffmpeg_qualification_manifest = forms.CharField(required=False, label="FFmpeg qualification manifest", help_text="Private Adobe Media Encoder/FFmpeg comparison manifest path.")
     # Friendly aliases used by Station Settings. Legacy ftp/command fields
     # remain accepted and are populated together by the view.
     username = forms.CharField(required=False, label="Controller username")

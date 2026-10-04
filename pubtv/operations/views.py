@@ -10,6 +10,7 @@ import os
 import signal
 import threading
 import hashlib
+import plistlib
 from ftplib import FTP
 from django.core.exceptions import ValidationError
 from django.shortcuts import get_object_or_404, redirect, render
@@ -90,7 +91,7 @@ def _run_device_diagnostics(target, posted, current, only=None):
         ame = _file_evidence(ame_path)
         preset = _file_evidence(preset_path, current.ame_preset_sha256 if current else "")
         ame_ok = ame["readable"] and preset["readable"] and not preset["stale"]
-        findings.append({"name": "AME executable and preset", "status": "observed" if ame_ok else "fail", "detail": "Executable and preset are readable; this does not qualify encoding.", "details": [f"Executable: {'found' if ame['readable'] else 'missing'}.", f"Preset: {'found' if preset['readable'] else 'missing'}.", f"Approved fingerprint: {'matches' if preset['readable'] and not preset['stale'] and preset['approved_hash'] else 'not confirmed'}.", "No encoding or qualification action was performed."]})
+        findings.append({"name": "Adobe Media Encoder executable and preset", "status": "observed" if ame_ok else "fail", "detail": "Executable and preset are readable; this does not qualify encoding.", "details": [f"Executable: {'found' if ame['readable'] else 'missing'}.", f"Preset: {'found' if preset['readable'] else 'missing'}.", f"Approved fingerprint: {'matches' if preset['readable'] and not preset['stale'] and preset['approved_hash'] else 'not confirmed'}.", "No encoding or qualification action was performed."]})
 
     if only in (None, "ffmpeg"):
         ffmpeg_path = config.get("ffmpeg_executable")
@@ -420,6 +421,31 @@ def device_settings(request, pk):
     return render(request, "device_settings.html", {"target": target, "form": form, "current": current})
 
 
+def _resolve_application_executable(selected):
+    """Resolve a macOS application bundle to its executable without guessing broadly."""
+    selected_path = Path(selected.rstrip("/"))
+    if selected_path.suffix.lower() != ".app":
+        return str(selected_path) if selected_path.exists() else ""
+
+    macos_dir = selected_path / "Contents" / "MacOS"
+    candidates = []
+    try:
+        with (selected_path / "Contents" / "Info.plist").open("rb") as stream:
+            bundle_executable = plistlib.load(stream).get("CFBundleExecutable")
+        if isinstance(bundle_executable, str) and bundle_executable and Path(bundle_executable).name == bundle_executable:
+            candidates.append(bundle_executable)
+    except (OSError, ValueError, KeyError, plistlib.InvalidFileException, TypeError):
+        pass
+    # Older or malformed bundles commonly use the bundle stem. Keep this as a
+    # narrow fallback and never search outside Contents/MacOS.
+    candidates.append(selected_path.stem)
+    for name in candidates:
+        executable = macos_dir / name
+        if executable.exists():
+            return str(executable)
+    return ""
+
+
 def browse_path(request):
     """Open a local Finder chooser; safe JSON response and editable fallback."""
     if request.method != "POST":
@@ -431,13 +457,14 @@ def browse_path(request):
     try:
         result = subprocess.run(("osascript", "-e", script), check=False, capture_output=True, text=True, timeout=120)
     except (OSError, subprocess.TimeoutExpired):
-        return JsonResponse({"path": "", "available": False})
+        return JsonResponse({"path": "", "available": False, "cancelled": False, "error": "The local picker is unavailable."})
     if result.returncode != 0:
-        return JsonResponse({"path": "", "available": True, "cancelled": True})
+        return JsonResponse({"path": "", "available": True, "cancelled": True, "error": ""})
     selected = result.stdout.strip()
-    if kind == "application" and selected.endswith(".app"):
-        selected = str(Path(selected) / "Contents/MacOS" / Path(selected).stem)
-    return JsonResponse({"path": selected if selected and Path(selected).exists() else "", "available": True})
+    resolved = _resolve_application_executable(selected) if kind == "application" and selected else (selected if selected and Path(selected).exists() else "")
+    if resolved:
+        return JsonResponse({"path": resolved, "available": True, "cancelled": False, "resolved": True, "error": ""})
+    return JsonResponse({"path": "", "available": True, "cancelled": False, "resolved": False, "error": "The selected application executable could not be resolved."})
 
 
 def _automation_context(request, *, form_p=None, form_s=None, message=""):
