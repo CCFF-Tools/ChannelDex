@@ -64,6 +64,35 @@ try:
             invalidate_snapshot(batch, approval=1, reason="source changed")
             self.assertEqual(batch.approval_1_status, "stale")
 
+        def test_changed_ame_preset_blocks_before_encoder_or_ftp(self):
+            with TemporaryDirectory() as directory, override_settings(DATA_DIR=directory):
+                source = Path(directory) / "source.mp4"
+                source.write_bytes(b"approved source")
+                preset = Path(directory) / "Nexus Mono.epr"
+                preset.write_bytes(b"changed preset")
+                asset = self.occurrence.asset
+                asset.smb_reference = str(source)
+                asset.save()
+                UltraNexusTargetSettings.objects.create(
+                    target=self.device, version=1, is_current=True, host="controller.test",
+                    media_directory="/Vol1/mpeg", secret_reference="test:owner",
+                    ame_preset_sha256=hashlib.sha256(b"qualified preset").hexdigest(),
+                    settings={"ame_preset": str(preset)},
+                )
+                ResearchGate.objects.create(target=self.device, key="ame_scripting", status="passed")
+                batch = PreparationBatch.objects.create(target=self.device)
+                item = PreparationBatchItem.objects.create(batch=batch, asset=asset)
+                approve_preparation_batch(batch)
+                def forbidden(*args, **kwargs):
+                    self.fail("changed preset must block before encoding or transfer")
+                result = process_preparation_batch(
+                    batch, ame_discoverer=lambda *args: "ame", runner=forbidden,
+                    ftp_factory=forbidden, ame_process_checker=forbidden,
+                )
+                item.refresh_from_db()
+                self.assertFalse(result["complete"])
+                self.assertIn("SHA-256 changed", item.blocker)
+
         def test_gap_is_visible_but_not_a_preview_blocker(self):
             later = Occurrence.objects.create(station=self.station, show=self.occurrence.show, item_type="filler", label="Filler", starts_at=datetime(2026, 1, 1, 13, tzinfo=timezone.utc), planned_duration_seconds=60)
             preview = preview_schedule([self.occurrence, later])

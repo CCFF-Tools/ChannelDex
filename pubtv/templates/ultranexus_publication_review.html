@@ -1,0 +1,21 @@
+{% for blocker in review.blockers %}<p role="alert">{{ blocker }}</p>{% endfor %}
+{% if review.diff %}
+<section aria-label="Exact schedule review">
+<h4>Controller changes for {{ review.target }}</h4>
+<p>Reconciliation: {{ review.mode }}. Activation: {{ review.activation }}.</p>
+<p>Controller SHA-256: <code>{{ review.captured_hash }}</code><br>Proposed BIN SHA-256: <code>{{ review.proposed_hash }}</code></p>
+<p>Selected air dates and times:</p><ul>{% for item in review.occurrences %}<li>{{ item.occurrence__starts_at }} · occurrence {{ item.occurrence_id }} · revision {{ item.occurrence__revision }}</li>{% endfor %}</ul>
+<p>Controller records use weekday 0 = Sunday and the qualified weekly-seconds clock. The selected air dates above identify the affected calendar period.</p>
+<h5>Additions</h5>{% include "ultranexus_review_records.html" with records=review.diff.adds %}
+<h5>Removals</h5>{% include "ultranexus_review_records.html" with records=review.diff.deletes %}
+<h5>Moved events</h5>{% for change in review.diff.moves %}<p>{{ change.before.title }} ({{ change.before.filename }}): day {{ change.before.day }}, {{ change.before.start }}–{{ change.before.end }} → {{ change.after.title }} ({{ change.after.filename }}): day {{ change.after.day }}, {{ change.after.start }}–{{ change.after.end }}</p>{% empty %}<p>None.</p>{% endfor %}
+<h5>Replacements and other record changes</h5>{% for change in review.diff.changes %}<p>{{ change.before.title }} ({{ change.before.filename }}) → {{ change.after.title }} ({{ change.after.filename }}); day {{ change.after.day }}, {{ change.after.start }}–{{ change.after.end }}. <code>{{ change.before.sha256 }}</code> → <code>{{ change.after.sha256 }}</code></p>{% empty %}<p>None.</p>{% endfor %}
+<details><summary>Retained controller events ({{ review.diff.unchanged|length }})</summary>{% include "ultranexus_review_records.html" with records=review.diff.unchanged %}</details>
+<h5>Proposed virtual-channel Switchbacks</h5><ul>{% for gap in review.switchbacks %}<li>{{ gap.title }} · day {{ gap.day }} · {{ gap.start }}–{{ gap.end }}</li>{% empty %}<li>No explicit Switchbacks in the proposed image.</li>{% endfor %}</ul>
+<h5>Controller resources</h5><p>{{ review.diff.resource_changes.adds|length }} added, {{ review.diff.resource_changes.deletes|length }} removed, {{ review.diff.resource_changes.changed|length }} changed.</p>
+{% include "ultranexus_review_records.html" with records=review.diff.resource_changes.adds %}
+{% include "ultranexus_review_records.html" with records=review.diff.resource_changes.deletes %}
+{% for change in review.diff.resource_changes.changed %}<p>{{ change.before.filename }} → {{ change.after.filename }}; <code>{{ change.before.sha256 }}</code> → <code>{{ change.after.sha256 }}</code></p>{% endfor %}
+<h5>Media readiness</h5><ul>{% for media in review.media %}<li>Asset {{ media.asset_id }} · binding {{ media.binding_id }} · {{ media.verification_basis }} · file hash <code>{{ media.inspection_hash|default:'Not locally verified' }}</code>{% if media.legacy_attestation_hash %} · legacy attestation <code>{{ media.legacy_attestation_hash }}</code>{% endif %}</li>{% empty %}<li>No ready media bindings.</li>{% endfor %}</ul>
+</section>
+{% endif %}

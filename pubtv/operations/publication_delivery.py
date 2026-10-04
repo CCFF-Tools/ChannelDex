@@ -30,6 +30,8 @@ DELIVERY_GATES = ("nmg_bin_relationship", "schedule_bin_format", "schedule_bin_a
 
 
 def _preflight(batch: SchedulePublicationBatch):
+    if batch.status == "cancelled":
+        raise ValueError("Cancelled publications cannot be staged or activated")
     current = batch.target.ultranexus_settings.filter(is_current=True).first()
     target_blockers = restricted_target_blockers(current)
     if target_blockers:
@@ -42,6 +44,10 @@ def _preflight(batch: SchedulePublicationBatch):
         raise ValueError("Approval 2 is required")
     if publication_snapshot(batch) != batch.approval_2_snapshot or publication_artifact_blockers(batch):
         raise ValueError("Approval 2 is stale or its artifacts changed")
+    from .publication_review import publication_review
+    review = publication_review(batch)
+    if review.get("blockers") or review.get("review_hash") != batch.approval_2_snapshot.get("review_hash"):
+        raise ValueError("Approval 2 requires the current captured controller review")
     artifact = batch.artifact_revisions.filter(artifact_type="bin").order_by("-revision").first()
     if not artifact or sha256_file(artifact.file_reference) != artifact.content_hash:
         raise ValueError("Reviewed BIN artifact is missing or changed")
@@ -79,8 +85,9 @@ def stage_publication(batch_id: int, *, expected_hash: str, actor="owner",
                       ftp_factory=StdlibFTPAdapter, secret_resolver=_keychain_password):
     """Capture the current remote BIN and stage a candidate; leave live untouched."""
     with transaction.atomic():
+        initial = SchedulePublicationBatch.objects.get(pk=batch_id)
+        Device.objects.select_for_update().get(pk=initial.target_id)
         batch = SchedulePublicationBatch.objects.select_for_update().select_related("target").get(pk=batch_id)
-        Device.objects.select_for_update().get(pk=batch.target_id)
         current, artifact = _preflight(batch)
         if expected_hash.lower() != artifact.content_hash:
             raise ValueError("Candidate hash confirmation does not match")
@@ -140,9 +147,11 @@ def activate_publication(operation_id: int, *, expected_hash: str, actor="owner"
                          socket_factory=socket.create_connection):
     """Promote once, then send exactly one LOADSCH in this confirmation."""
     with transaction.atomic():
+        initial = ScheduleDeliveryOperation.objects.get(pk=operation_id)
+        Device.objects.select_for_update().get(pk=initial.target_id)
+        SchedulePublicationBatch.objects.select_for_update().get(pk=initial.publication_batch_id)
         operation = ScheduleDeliveryOperation.objects.select_for_update().select_related(
             "publication_batch", "target", "artifact").get(pk=operation_id)
-        Device.objects.select_for_update().get(pk=operation.target_id)
         if operation.state != "staged":
             raise ValueError("A staged operation is required")
         current, artifact = _preflight(operation.publication_batch)
@@ -248,8 +257,8 @@ def observe_activation(operation_id: int, *, evidence_file: str, actor="owner"):
         batch.activated_at = timezone.now()
         batch.status = "verified"
         batch.save(update_fields=["activated_at", "status"])
-        selected = [entry.occurrence for entry in batch.occurrence_selections.select_related("occurrence")
-                    if entry.operation != "delete"]
+        selected = [entry.occurrence for entry in batch.occurrence_selections.select_for_update().select_related("occurrence")
+                    if entry.operation != "delete" and entry.occurrence.revision == entry.occurrence_revision]
         if selected:
             create_upload_snapshot(device=operation.target, occurrences=selected,
                                    external_reference=operation.artifact.content_hash, actor=actor)

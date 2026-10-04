@@ -2,6 +2,12 @@
 
 ## UltraNEXUS automation — accepted 2026-09-29
 
+- [x] Close the original-plan local gaps: read-only controller capture and exact
+  signed publication review, guarded pre-commit cancellation, bounded media FTP
+  retry/owned-partial recovery, AME preset hash checks, and explicit audited
+  retention of protected files and the latest 20 unpinned successful sets.
+  See `ULTRANEXUS_PLAN_GAP_CHECK.md`; this does not qualify live hardware.
+
 - [x] Add versioned target settings, immutable evidence records, two approval
   snapshots, durable local jobs, per-item encode bypass, strict inspection,
   qualified AME/FFmpeg selection, verified staged FTP, NMG adapters, and the

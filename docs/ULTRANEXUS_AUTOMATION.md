@@ -98,6 +98,8 @@ python manage.py record_ultranexus_research DEVICE_ID KEY EVIDENCE_FILE --status
 | `ftp_promotion_recovery` | Interrupted staging, rename support, partial discovery, name races, concurrency, and rollback | Automated schedule publication |
 | `resource_registration` | New-resource captures proving library files or registration operations | Publications whose BIN manifest introduces controller library resources; unchanged existing references do not require this gate |
 | `dst_midnight_activation` | Vendor or controlled evidence for DST, midnight crossing, and activation-period rules | Those schedule cases |
+| Full-week replacement (not implemented/enabled) | Paired clear-week/add/move/cancel captures; verify Out 1 replacement while preserving other outputs, configuration and qualified cleared-base bytes | Future authoritative whole-week compiler and reconciliation |
+| Future activation (not implemented/enabled) | Qualified delivery/activation timing window, downtime/late-delivery behavior and competing-editor exclusion | Future timed commitment; a passed record alone does not enable this currently rejected workflow |
 
 The qualified active path is `/internal/schedule/schedule.bin`. Older target
 settings using `/lgx-hdd/schedule/schedule.bin` require review and resave.
@@ -180,7 +182,50 @@ A replacement file is a separate asset and does not silently replace cycle media
 Device connection settings remain in Station Settings, with one username and one
 opaque macOS Keychain reference shared by FTP and command delivery per device.
 Legacy occurrence-linked preparations and publication links remain readable.
-No automatic pruning is introduced. **Open external qualification:** actual AME
+Cleanup is explicit; see the accepted-plan gap check and the retention command
+below. **Open external qualification:** actual AME
 comparisons, destination authentication/transfer/activation/rollback observations,
 and WinLGX reconstruction remain required where the existing gates demand them.
 Local tests and software readiness never substitute for those observations.
+
+## Accepted-plan gap check
+
+`ULTRANEXUS_PLAN_GAP_CHECK.md` maps the original requirements to current source
+and distinguishes completed local software from external qualification. It does
+not expand the accepted scope with optional operational dashboards or new
+controller protocols.
+
+**Accepted local completion:** controller capture downloads only the qualified
+BIN path and preserves the bytes and parsed records. The review displays actual
+and proposed events, retained records, resources, Switchbacks, media evidence,
+target, dates and activation choice. Approval 2 requires the signed token from
+that displayed review. Changed artifacts, captures, settings or occurrence
+revisions require a fresh review; a different controller base blocks publication.
+Legacy imported snapshots must be recaptured for this workflow.
+
+Cancellation before promotion updates only local records. A safely staged
+operation becomes cancelled and releases the local target reservation; its
+remote staging path remains recorded for later reconciliation. Media and rollback
+evidence are retained. In-flight capture/staging, promotion, activation or
+uncertain recovery cannot be cancelled through this action.
+
+Media transfers persist a job-owned staging token before uploading. Transient
+failures use bounded retries on fresh connections. An exact owned partial can be
+verified and promoted, or replaced when incomplete; unrelated remote files are
+never candidates. Promotion remains subject to controller concurrency qualification.
+
+Artifact retention is a dry-run-first maintenance command:
+
+```sh
+python manage.py cleanup_ultranexus_artifacts
+python manage.py cleanup_ultranexus_artifacts --pin BATCH_ID
+python manage.py cleanup_ultranexus_artifacts --unpin BATCH_ID
+python manage.py cleanup_ultranexus_artifacts --execute
+```
+
+It retains at least 20 unpinned successful publication sets per target, plus all
+pinned sets, qualified historical bases, referenced artifacts and rollback
+evidence. Only old verified managed schedule artifact files are eligible; media,
+external evidence, metadata and audit history are not pruned. References and
+hashes are checked again immediately before deletion, with durable intent and
+success/failure audit entries. Referenced sets can make actual retention exceed 20.

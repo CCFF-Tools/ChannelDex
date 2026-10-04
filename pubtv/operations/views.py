@@ -13,10 +13,11 @@ from django.core.exceptions import ValidationError
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
 from .forms import OccurrenceForm, StationForm, CarryForwardSettingsForm, DeviceForm, ShowForm, ShowSlotDurationForm, EpisodeForm, ProducerForm, EpisodeMilestoneForm, AssetForm, DeliveryForm, SlotForm, AssignmentForm, AssetPreparationForm, AssetTargetTransferForm, ProgrammingForm, UploadForm, AiringForm, AutomationPreparationForm, AutomationPublicationForm, UltraNexusSettingsForm
-from .models import Episode, EpisodeWorkflowMilestone, Occurrence, Show, Station, Device, Producer, MediaAsset, Delivery, RecurrenceSlot, WeeklyEpisodeAssignment, Preparation, AssetPreparation, AssetTargetTransfer, OccurrenceProgramming, UploadedOccurrenceCoverage, UploadedScheduleRevision, AiringEvidence, AuditEvent, UltraNexusTargetSettings, PreparationBatch, PreparationBatchItem, PreparationJob, SchedulePublicationBatch, OccurrenceRevisionSelection, ResearchGate, TransferAttempt
+from .models import Episode, EpisodeWorkflowMilestone, Occurrence, Show, Station, Device, Producer, MediaAsset, Delivery, RecurrenceSlot, WeeklyEpisodeAssignment, Preparation, AssetPreparation, AssetTargetTransfer, OccurrenceProgramming, UploadedOccurrenceCoverage, UploadedScheduleRevision, AiringEvidence, AuditEvent, UltraNexusTargetSettings, PreparationBatch, PreparationBatchItem, PreparationJob, SchedulePublicationBatch, ScheduleDeliveryOperation, OccurrenceRevisionSelection, ResearchGate, TransferAttempt
 from .services import schedule_alerts, audit, materialize_assignment, ensure_carry_forward_week, next_premiere_date, suggested_pending_episode, confirm_preparation_fact, create_upload_snapshot, revise_airing, sign_upload_preview, load_upload_preview, commit_upload_preview, preparation_readiness, calendar_capacity
 from .automation import approve_snapshot, canonical_hash, invalidate_snapshot, preparation_batch_snapshot, publication_snapshot, preview_schedule, approve_preparation_batch, schedule_ready_binding, generate_nmg_artifact, generate_bin_artifact, publication_artifact_blockers
 from .publication_delivery import stage_publication, activate_publication, observe_activation, rollback_publication
+from .publication_review import capture_controller_snapshot, publication_review, validate_review_token, cancel_publication
 from .schedule_preparation import schedule_prepare
 from pubtv.ultranexus.exceptions import UltraNexusError, CapabilityError
 from pubtv.ultranexus.secrets import device_secret_reference, new_device_secret_reference, KeychainSecretStore
@@ -406,7 +407,8 @@ def _automation_context(request, *, form_p=None, form_s=None, message=""):
         bins = [item for item in batch.artifact_revisions.all() if item.artifact_type == "bin"]
         operations = list(batch.delivery_operations.all())
         operation = max(operations, key=lambda item: item.pk) if operations else None
-        publication_cards.append({"batch": batch, "readiness": publication_readiness(batch),
+        review = publication_review(batch)
+        publication_cards.append({"batch": batch, "readiness": publication_readiness(batch), "publication_review": review,
                                   "bin_artifact": max(bins, key=lambda item: item.revision) if bins else None,
                                   "operation": operation,
                                   "can_rollback": bool(operation and operation.remote_backup_path and operation.state in {
@@ -500,25 +502,32 @@ def automation_dashboard(request):
                 return redirect("schedule-delivery")
             return render(request, "ultranexus_automation.html", _automation_context(request, form_s=form))
         if action == "set_publication_change":
-            selection = get_object_or_404(OccurrenceRevisionSelection.objects.select_related("publication_batch"),
-                                          pk=request.POST.get("selection"))
-            operation = request.POST.get("operation", "")
-            slot_text = request.POST.get("source_bin_slot", "").strip()
-            selection.operation = operation
             try:
-                selection.source_bin_slot = int(slot_text) if slot_text else None
-            except ValueError:
-                messages.error(request, "BIN slot must be an integer.")
-                return redirect("schedule-delivery")
-            selection.source_bin_record_hash = request.POST.get("source_bin_record_hash", "").strip().lower()
-            try:
-                selection.full_clean()
-                selection.save(update_fields=["operation", "source_bin_slot", "source_bin_record_hash"])
-                if selection.publication_batch.approval_2_status == "approved":
-                    invalidate_snapshot(selection.publication_batch, approval=2, reason="selected controller change revised")
+                with transaction.atomic():
+                    selection_ref = get_object_or_404(OccurrenceRevisionSelection.objects.select_related("publication_batch"),
+                                                      pk=request.POST.get("selection"))
+                    Device.objects.select_for_update().get(pk=selection_ref.publication_batch.target_id)
+                    batch = SchedulePublicationBatch.objects.select_for_update().get(pk=selection_ref.publication_batch_id)
+                    if batch.status == "cancelled":
+                        raise ValueError("Cancelled publications cannot be edited")
+                    if batch.activated_at or batch.delivery_operations.filter(state__in=ScheduleDeliveryOperation.ACTIVE).exists():
+                        raise ValueError("Publication changes are locked after delivery staging")
+                    selection = OccurrenceRevisionSelection.objects.select_for_update().get(pk=selection_ref.pk)
+                    operation = request.POST.get("operation", "")
+                    slot_text = request.POST.get("source_bin_slot", "").strip()
+                    selection.operation = operation
+                    try:
+                        selection.source_bin_slot = int(slot_text) if slot_text else None
+                    except ValueError:
+                        raise ValueError("BIN slot must be an integer")
+                    selection.source_bin_record_hash = request.POST.get("source_bin_record_hash", "").strip().lower()
+                    selection.full_clean()
+                    selection.save(update_fields=["operation", "source_bin_slot", "source_bin_record_hash"])
+                    if batch.approval_2_status == "approved":
+                        invalidate_snapshot(batch, approval=2, reason="selected controller change revised")
                 messages.success(request, "Selected controller change saved. Generate new artifacts before approval.")
-            except ValidationError as exc:
-                messages.error(request, "; ".join(exc.messages))
+            except (ValidationError, ValueError) as exc:
+                messages.error(request, "; ".join(exc.messages) if isinstance(exc, ValidationError) else str(exc))
             return redirect("schedule-delivery")
         if action == "approve_publication":
             batch_id = request.POST.get("batch")
@@ -528,13 +537,22 @@ def automation_dashboard(request):
                 batch = SchedulePublicationBatch.objects.select_for_update().select_related("target").get(pk=batch_id)
                 selection_ids = list(batch.occurrence_selections.values_list("occurrence_id", flat=True))
                 list(Occurrence.objects.select_for_update().filter(pk__in=selection_ids))
-                selections = list(batch.occurrence_selections.select_related(
+                selections = list(batch.occurrence_selections.select_for_update().select_related(
                     "occurrence", "occurrence__station", "occurrence__show",
                     "occurrence__episode", "occurrence__asset",
                 ).order_by("occurrence__starts_at", "pk"))
-                snapshot = publication_snapshot(batch)
-                result = preview_schedule([selection.occurrence for selection in selections if selection.operation != "delete"],
+                try:
+                    review = validate_review_token(batch, request.POST.get("review_token", ""))
+                except ValueError:
+                    snapshot = None
+                else:
+                    snapshot = publication_snapshot(batch)
+                    snapshot["review_hash"] = review["review_hash"]
+                preview_result = preview_schedule([selection.occurrence for selection in selections if selection.operation != "delete"],
                                           target=batch.target, workflow_mode=batch.workflow_mode)
+                if snapshot is None:
+                    preview_result["blockers"].append("controller review snapshot is missing or stale")
+                result = preview_result
                 for selection in selections:
                     if selection.occurrence_revision != selection.occurrence.revision:
                         result["blockers"].append(f"{selection.occurrence.label}: occurrence revision changed")
@@ -542,18 +560,50 @@ def automation_dashboard(request):
                     if selection.operation != "delete" and asset and not schedule_ready_binding(asset, batch.target):
                         result["blockers"].append(f"{selection.occurrence.label}: Approval 1 media preparation is not verified")
                 result["blockers"].extend(publication_artifact_blockers(batch))
-                if not snapshot["controller_snapshot_hash"]:
+                if snapshot is not None and not snapshot["controller_snapshot_hash"]:
                     result["blockers"].append("controller snapshot hash is required")
                 if result["blockers"]:
                     if batch.approval_2_status == "approved":
                         batch.approval_2_status = "stale"
                         batch.save(update_fields=["approval_2_status"])
                 else:
-                    approve_snapshot(batch, snapshot, approval=2)
+                    # Re-read the signed review immediately before persisting Approval 2;
+                    # selection edits are serialized on the same batch/device boundary.
+                    try:
+                        final_review = validate_review_token(batch, request.POST.get("review_token", ""))
+                    except ValueError as exc:
+                        result["blockers"].append(str(exc))
+                        batch.approval_2_status = "stale"
+                        batch.save(update_fields=["approval_2_status"])
+                    else:
+                        final_snapshot = publication_snapshot(batch)
+                        final_snapshot["review_hash"] = final_review["review_hash"]
+                        approve_snapshot(batch, final_snapshot, approval=2)
             if result["blockers"]:
                 messages.error(request, "Approval 2 blocked: " + "; ".join(result["blockers"]))
             else:
                 messages.success(request, "Approval 2 recorded. No schedule coverage is created by approval.")
+            return redirect("schedule-delivery")
+        if action == "review_publication":
+            batch = get_object_or_404(SchedulePublicationBatch, pk=request.POST.get("batch"))
+            try:
+                snapshot = capture_controller_snapshot(batch)
+                review = publication_review(batch, snapshot)
+                if review.get("blockers"):
+                    messages.error(request, "Controller review blocked: " + "; ".join(review["blockers"]))
+                else:
+                    messages.success(request, "Controller BIN captured. Review the exact diff and media hashes before Approval 2.")
+            except (ValueError, ValidationError, OSError, UltraNexusError) as exc:
+                messages.error(request, "Controller review failed: " + str(exc))
+            return redirect("schedule-delivery")
+        if action == "cancel_publication":
+            batch = get_object_or_404(SchedulePublicationBatch, pk=request.POST.get("batch"))
+            try:
+                cancel_publication(batch.pk)
+            except ValueError as exc:
+                messages.error(request, str(exc))
+            else:
+                messages.success(request, "Publication cancelled. Prepared media and audit records were retained.")
             return redirect("schedule-delivery")
         if action == "generate_nmg":
             batch = get_object_or_404(SchedulePublicationBatch, pk=request.POST.get("batch"))

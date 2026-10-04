@@ -141,10 +141,14 @@ class AttendedDeliveryTests(TestCase):
         self.nmg_path = Path(self.directory.name) / "review.nmg"
         self.base_path.write_bytes(base)
         self.candidate_path.write_bytes(candidate)
-        self.nmg_path.write_bytes(b"review")
+        from pubtv.ultranexus.nmg import MAGIC, VERSION_OFFSET
+        nmg = bytearray(256)
+        nmg[:8] = MAGIC
+        nmg[VERSION_OFFSET:VERSION_OFFSET + 8] = b"7.0.3.48"
+        self.nmg_path.write_bytes(nmg)
         self.base_hash = hashlib.sha256(base).hexdigest()
         self.candidate_hash = hashlib.sha256(candidate).hexdigest()
-        self.nmg_hash = hashlib.sha256(b"review").hexdigest()
+        self.nmg_hash = hashlib.sha256(nmg).hexdigest()
         FakeFTPConnection.files = {"/internal/schedule/schedule.bin": base}
 
         self.station = Station.objects.create()
@@ -188,7 +192,11 @@ class AttendedDeliveryTests(TestCase):
             validation={"status": "passed", "target_id": self.target.pk,
                         "source_nmg_hash": self.nmg_hash, "occurrences": [item]},
         )
-        self.batch.approval_2_snapshot = publication_snapshot(self.batch)
+        from pubtv.operations.publication_review import capture_controller_snapshot, publication_review
+        capture_controller_snapshot(self.batch, adapter=FakeFTPAdapter("controller.test", port=21, username="test", password="test"))
+        review = publication_review(self.batch)
+        self.assertFalse(review.get("blockers"), review)
+        self.batch.approval_2_snapshot = {**publication_snapshot(self.batch), "review_hash": review["review_hash"]}
         self.batch.approval_2_hash = canonical_hash(self.batch.approval_2_snapshot)
         self.batch.approval_2_status = "approved"
         self.batch.approval_2_at = datetime.now(timezone.utc)
