@@ -126,6 +126,7 @@ Core operating decisions are now recorded. Remaining recommendations still need 
 | D19 | **Accepted:** make the Shows index an operational catalog | Provide sorting by title, code, show type, episode count, or earliest weekly time, and show active weekly reserved times on each show card. |
 | D20 | **Accepted:** episode runtime needs editable seconds | Keep schedule and slot lengths owner-friendly, while the episode runtime control exposes hours, minutes, and seconds and stores the combined total in `runtime_seconds`. |
 | D21 | **Accepted:** Week opens on capacity mode | Default the Week view to consecutive Available/Reserved blocks; keep individual scheduled items plus Available blocks available as an explicit alternate mode. |
+| D22 | **Accepted:** owner-controlled database portability | Export uses SQLite online backup with embedded ChannelDex metadata; import is streamed and validated locally, staged until next launch, and activated with recovery copy/sidecar preservation. Network shares are copy/storage only; concurrent multi-writer access is unsupported. |
 
 ### Accepted contract/default: uploaded schedule revisions (D14a)
 

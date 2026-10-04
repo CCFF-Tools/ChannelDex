@@ -8,6 +8,7 @@ import time
 import webbrowser
 from pathlib import Path
 import threading
+from pubtv.operations.database_portability import apply_staged_import, rollback_activation, finalize_activation, PortableDatabaseError
 
 
 def worker_command() -> list[str]:
@@ -143,8 +144,25 @@ def main() -> None:
         return
     # Ensure all files created by Django/SQLite are private to the owner.
     os.umask(0o077)
-    prepare_data_dir()
-    application = _load_application()
+    data_dir = prepare_data_dir()
+    # Must happen before django.setup/migrations so Django never opens both DBs.
+    activated = False
+    try:
+        activated = apply_staged_import(data_dir)
+    except PortableDatabaseError as exc:
+        print(f"ChannelDex database import was not activated: {exc}", file=sys.stderr)
+    try:
+        application = _load_application()
+    except Exception:
+        if not activated:
+            raise
+        from django.db import connections
+        connections.close_all()
+        if not rollback_activation(data_dir):
+            raise
+        application = _load_application()
+    if activated:
+        finalize_activation(data_dir)
     host = "127.0.0.1"
     port = int(os.environ.get("PUBTV_PORT", "8000"))
     os.environ.setdefault("PUBTV_ENABLE_QUIT", "1")
