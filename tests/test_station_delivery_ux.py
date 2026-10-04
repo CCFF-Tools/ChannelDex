@@ -114,14 +114,22 @@ class StationDeliveryUXTests(TestCase):
         run.return_value = Mock(returncode=0, stdout=str(app) + "\n")
         with patch("pubtv.operations.views.Path.exists", return_value=True):
             response = Client().post("/settings/browse/", {"kind": "application"})
+        assert "choose file with prompt \"Choose an application\" of type {\"com.apple.application-bundle\"}" in run.call_args.args[0][2]
         assert response.json()["path"].endswith("Contents/MacOS/Adobe Media Encoder")
-        run.return_value = Mock(returncode=1, stdout="")
+        run.return_value = Mock(returncode=1, stdout="", stderr="execution error: User canceled. (-128)")
         assert Client().post("/settings/browse/", {"kind": "file"}).json()["cancelled"] is True
+
+        run.return_value = Mock(returncode=1, stdout="", stderr="execution error: picker failed (7)")
+        failed = Client().post("/settings/browse/", {"kind": "file"}).json()
+        assert failed["cancelled"] is False
+        assert failed["error"] == "The local picker failed."
+        assert "execution error" not in failed["error"]
+        assert "(7)" not in failed["error"]
 
     @patch("pubtv.operations.views.subprocess.run")
     def test_browse_application_uses_plist_executable_and_trailing_slash(self, run):
         with tempfile.TemporaryDirectory() as directory:
-            app = Path(directory) / "Adobe Media Encoder.app"
+            app = Path(directory) / "Adobe Media Encoder 2026" / "Adobe Media Encoder 2026.app"
             contents = app / "Contents"
             macos = contents / "MacOS"
             macos.mkdir(parents=True)
