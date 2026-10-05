@@ -1,6 +1,6 @@
 from django.urls import path
 from pubtv.operations import views
-from pubtv.operations import media_queue, premiere_planning, schedule_preparation
+from pubtv.operations import media_queue, premiere_planning, schedule_preparation, guided_delivery
 
 urlpatterns = [
     path("", views.dashboard, name="dashboard"),
@@ -10,6 +10,7 @@ urlpatterns = [
     path("schedule/", views.schedule_view, name="schedule"),
     path("schedule/prepare/", schedule_preparation.schedule_prepare, name="schedule-prepare"),
     path("schedule/delivery/", views.automation_dashboard, name="schedule-delivery"),
+    path("schedule/guided-delivery/", guided_delivery.guided_delivery_view, name="guided-delivery"),
     path("media/", media_queue.media_queue, name="media-queue"),
     path("media/status/", media_queue.media_queue_status, name="media-queue-status"),
     path("media/status/", media_queue.media_queue_status, name="media-queue-summary"),

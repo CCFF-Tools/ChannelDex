@@ -234,6 +234,21 @@ success/failure audit entries. Referenced sets can make actual retention exceed 
 ## Current operator boundary
 
 The device page supports explicit read-only diagnostics for connection, AME/FFmpeg availability, and local evidence integrity. Diagnostics are bounded and use the displayed configuration only after the operator clicks the action; they never qualify a target or perform encoding/upload/playout. Automatic preparation and unattended delivery remain later proposed capabilities.
+
+## Accepted 2026-10-05 guided already-encoded delivery
+
+The guided path is implemented as a durable owner-facing orchestration record.
+It accepts an existing encoded episode, binds the selected bytes and hash, and
+queues the existing target-profile probe and verified FTP transfer with encoding
+disabled. The owner then confirms the premiere-to-premiere cycle, reviews a
+fresh controller `schedule.bin` pull and exact preserve-mode changes, records
+Approval 2, and explicitly confirms delivery. Staging, active replacement and
+exactly one `LOADSCH` remain the existing attended delivery service; activation
+is never automatic. Candidate, current and rollback hashes are retained and
+shown from the operation journal. After controller acknowledgement the guided
+record enters a distinct verification-pending state; only independent accepted
+activation evidence can advance it to verified/upload coverage. AME encoding
+and external qualification remain outside this path and can be inserted later.
 ## Accepted 2026-10-04 pull-before-publish workflow
 
 Preparation queues a controller pull in automatic mode, or blocks until an explicit successful manual pull when automatic mode is off. The worker uses the captured bytes directly; failed pulls require attention and explicit retry. Staging downloads and hashes the live schedule before writes and blocks on drift. Existing attended LOADSCH, rollback, ambiguity, activation evidence, and external qualification gates remain unchanged.

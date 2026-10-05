@@ -1,0 +1,119 @@
+{% extends "base.html" %}
+{% block page_title %}Guided encoded delivery{% endblock %}
+{% block content %}
+<div class="page-heading">
+  <p class="eyebrow">Schedule / Guided delivery</p>
+  <h1>Deliver an already-encoded episode</h1>
+  <p class="lede">Selected bytes are hash-bound, target-probed and transferred before schedule activation.</p>
+  <p><a class="button-link" href="{% url 'schedule-delivery' %}">Schedule delivery</a></p>
+</div>
+
+<section class="list-card">
+  <h2>Start intake review</h2>
+  <form method="post" class="stacked-form">
+    {% csrf_token %}
+    <input type="hidden" name="action" value="start">
+    <input type="hidden" name="submission_token" value="{{ submission_token }}">
+    <label>Target <select name="target" required>{% for target in targets %}<option value="{{ target.pk }}">{{ target }}</option>{% endfor %}</select></label>
+    <label>Show <select name="show" required>{% for show in shows %}<option value="{{ show.pk }}">{{ show.title }}</option>{% endfor %}</select></label>
+    <label>Existing episode <select name="episode"><option value="">Create from title</option>{% for episode in episodes %}<option value="{{ episode.pk }}">{{ episode.show }} · {{ episode.title }}</option>{% endfor %}</select></label>
+    <label>New episode title <input name="episode_title"></label>
+    <label>Exact local encoded file path <input id="guided-file-path" name="file_path" required></label>
+    <button id="guided-choose-file" type="button">Choose encoded file</button>
+    <span id="guided-file-status" class="helptext"></span>
+    <button class="primary" type="submit">Review encoded intake</button>
+  </form>
+</section>
+
+<section class="list-card">
+  <h2>Guided deliveries</h2>
+  {% for delivery in deliveries %}
+  <article id="guided-{{ delivery.pk }}">
+    <h3>{{ delivery.show }} · {{ delivery.episode }} · {{ delivery.target }}</h3>
+    <p><strong>{{ delivery.get_state_display }}</strong> · <code>{{ delivery.asset.file_name }}</code> · intake <code>{{ delivery.intake_snapshot.file.sha256 }}</code></p>
+    {% if delivery.cycle_assignment %}<p>Exact cycle assignment {{ delivery.cycle_assignment.pk }} · premiere {{ delivery.cycle_assignment.premiere_date }}</p>{% endif %}
+    <p>Candidate <code>{{ delivery.guided_versions.candidate|default:"pending" }}</code> · Current <code>{{ delivery.guided_versions.current|default:"pending" }}</code> · Rollback <code>{{ delivery.guided_versions.rollback|default:"created during delivery" }}</code></p>
+    {% if delivery.last_error %}<p role="alert">{{ delivery.last_error }}</p>{% endif %}
+
+    {% if delivery.state == 'intake_review' or delivery.state == 'blocked' and not delivery.preparation_batch_id %}
+    <form method="post">
+      {% csrf_token %}<input type="hidden" name="action" value="confirm"><input type="hidden" name="delivery" value="{{ delivery.pk }}">
+      <label>Premiere date <input type="date" name="premiere_date" required></label>
+      <button type="submit">Confirm exact intake and cycle</button>
+    </form>
+    {% elif delivery.state == 'media_queued' %}
+    <p data-guided-waiting>Validating the encoded file and transferring it to the target. Schedule preparation will continue automatically.</p>
+    {% elif delivery.state == 'cycle_planned' %}
+      {% if delivery.show.station.auto_pull_controller_schedule %}
+      <p data-guided-waiting>Pulling the current controller BIN and generating the paired reviewed artifacts.</p>
+      {% else %}
+      <p>Automatic controller pulling is disabled in Settings. Authorize a fresh manual pull for this delivery.</p>
+      <form method="post">
+        {% csrf_token %}<input type="hidden" name="action" value="queue_manual_pull"><input type="hidden" name="delivery" value="{{ delivery.pk }}">
+        <button type="submit">Authorize fresh controller pull</button>
+      </form>
+      {% endif %}
+    {% endif %}
+
+    {% if delivery.guided_review %}
+    <details open>
+      <summary>Exact controller change review</summary>
+      {% include "ultranexus_publication_review.html" with review=delivery.guided_review %}
+      {% if delivery.state == 'change_review' and delivery.guided_review.review_token %}
+      <form method="post">
+        {% csrf_token %}<input type="hidden" name="action" value="approve_and_deliver"><input type="hidden" name="delivery" value="{{ delivery.pk }}"><input type="hidden" name="review_token" value="{{ delivery.guided_review.review_token }}">
+        <label><input type="checkbox" required> I reviewed the exact controller changes and authorize active replacement plus one LOADSCH command now</label>
+        <button class="primary" type="submit">Approve changes and deliver now</button>
+      </form>
+      {% endif %}
+    </details>
+    {% endif %}
+
+    {% if delivery.state == 'verification_pending' %}
+    <section aria-label="Independent activation verification">
+      <h4>Verify the active schedule</h4>
+      <p><strong>Independent verification required:</strong> compare the active controller state with the delivered changes above. This records schedule coverage only and never proves airing.</p>
+      <form method="post" class="stacked-form">
+        {% csrf_token %}<input type="hidden" name="action" value="verify_activation"><input type="hidden" name="delivery" value="{{ delivery.pk }}">
+        <label>Independent controller evidence JSON file <input name="evidence_file" required></label>
+        <label><input type="checkbox" name="confirm_observation" required> I independently observed this exact BIN active on the selected controller</label>
+        <button type="submit">Record independent verification</button>
+      </form>
+    </section>
+    {% endif %}
+
+    {% if delivery.rollback_hash and delivery.state != 'rolled_back' %}
+    <details>
+      <summary>Safety rollback</summary>
+      <p>Restore retained known-good BIN <code>{{ delivery.rollback_hash }}</code> and issue one LOADSCH.</p>
+      <form method="post">
+        {% csrf_token %}<input type="hidden" name="action" value="rollback"><input type="hidden" name="delivery" value="{{ delivery.pk }}">
+        <label><input type="checkbox" name="confirm_rollback" required> Restore this exact known-good version</label>
+        <button type="submit">Restore known-good BIN</button>
+      </form>
+    </details>
+    {% endif %}
+  </article>
+  {% empty %}<p>No guided deliveries yet.</p>{% endfor %}
+</section>
+
+<script>
+(() => {
+  const button = document.getElementById('guided-choose-file');
+  const field = document.getElementById('guided-file-path');
+  const status = document.getElementById('guided-file-status');
+  button?.addEventListener('click', async () => {
+    status.textContent = 'Opening file chooser…';
+    try {
+      const csrf = document.querySelector('[name=csrfmiddlewaretoken]').value;
+      const response = await fetch('{% url "browse-path" %}', {method: 'POST', headers: {'X-CSRFToken': csrf, 'Content-Type': 'application/x-www-form-urlencoded'}, body: new URLSearchParams({kind: 'files'})});
+      const result = await response.json();
+      if (response.ok && result.paths?.length === 1) {
+        field.value = result.paths[0]; status.textContent = 'Encoded file selected';
+      } else status.textContent = result.error || 'Choose exactly one encoded file.';
+    } catch (error) { status.textContent = 'The local file chooser is unavailable.'; }
+  });
+  if (document.querySelector('[data-guided-waiting]')) setTimeout(() => window.location.reload(), 5000);
+})();
+</script>
+{% endblock %}
