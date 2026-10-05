@@ -83,6 +83,8 @@ def prepare_data_dir() -> Path:
         secret_file.write_text(os.urandom(32).hex(), encoding="utf-8")
         secret_file.chmod(0o600)
     os.environ.setdefault("PUBTV_SECRET_KEY", secret_file.read_text(encoding="utf-8").strip())
+    from pubtv.ultranexus.ame_bridge import install_plugin
+    install_plugin(path)
     return path
 
 

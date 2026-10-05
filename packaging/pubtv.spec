@@ -8,6 +8,7 @@ sys.path.insert(0, str(ROOT))
 datas = [
     (str(ROOT / "pubtv" / "templates"), "pubtv/templates"),
     (str(ROOT / "pubtv" / "static"), "pubtv/static"),
+    (str(ROOT / "pubtv" / "integrations"), "pubtv/integrations"),
 ]
 hiddenimports = (
     collect_submodules("pubtv.config")

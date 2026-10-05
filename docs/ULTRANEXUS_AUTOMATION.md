@@ -9,11 +9,12 @@ research gates and separate operator confirmations are satisfied.
 
 Approval 1 records the exact source path, SHA-256, asset revision, target, and
 per-item **Encode before transfer** choice. The local worker may then encode with
-a qualified Adobe Media Encoder bridge, or qualified FFmpeg when AME is not
-available, probe the output, enforce the Nexus Mono profile, transfer it by FTP,
-and verify the remote bytes. When encoding is disabled, the selected bytes are
-unchanged and must pass the same profile inspection. An AME failure never causes
-an automatic backend switch.
+Adobe's supported UXP Render Queue API, or FFmpeg when the ChannelDex AME panel
+is unavailable, probe the output, enforce the Nexus Mono profile, transfer it by
+FTP, and verify the remote bytes. Both encoders read the approved source in
+place; no private source copy is created. When encoding is disabled, the selected
+bytes are unchanged and must pass the same profile inspection. An accepted AME
+job failure never causes an automatic backend switch.
 
 Approval 2 records the exact occurrence revisions and selected change operations,
 controller snapshot, paired NMG/BIN hashes, target, and settings revision. It
@@ -48,7 +49,8 @@ unassigned episodes block publication.
   transfer attempts, controller snapshots, NMG/BIN artifact revisions, activation
   evidence, and exact occurrence revision selections.
 - A durable preparation queue and supervised `run_ultranexus_worker` command.
-- AME ExtendScript and FFmpeg adapters, strict ffprobe validation, passive binary
+- An Adobe Media Encoder 27.0+ UXP panel using `RenderQueue.renderFile`, an FFmpeg
+  fallback, strict ffprobe validation, passive binary
   FTP with unique staging names and remote readback hashing, and deterministic
   27-character controller filename allocation.
 - A hash-qualified Python NMG parser/writer for the reviewed 7.0.3.48 layout,
@@ -89,9 +91,9 @@ python manage.py record_ultranexus_research DEVICE_ID KEY EVIDENCE_FILE --status
 
 | Gate key | Required evidence and acceptance test | Unlocks |
 |---|---|---|
-| `ame_scripting` | Versioned AME lifecycle runs with the supplied hashed preset; unrelated jobs remain untouched; completion and failure are observable | AME encoding |
-| `ffmpeg_equivalence` | AME/FFmpeg image, audio, duration, loudness, legalization, and controller playback comparison | FFmpeg fallback |
-| `nexus_mono_bypass` | Accepted controller playback and technical comparison for already encoded files | Encode bypass |
+| `ame_scripting` | Historical ExtendScript research evidence; retained for audit but not used by the supported UXP integration | No execution gate |
+| `ffmpeg_equivalence` | Optional AME/FFmpeg comparison evidence retained for engineering review | No execution gate; every output is still probed |
+| `nexus_mono_bypass` | Historical direct-transfer evidence retained for audit | No execution gate; the selected file must pass the same probe |
 | `nmg_bin_relationship` | Paired NMG/BIN captures with firmware, hashes, and controlled single changes | NMG/BIN transformation contract |
 | `schedule_bin_format` | Accepted restricted 7.0.3.48 output-1 ordinary-video fixtures and destination validation | Restricted BIN generation |
 | `schedule_bin_activation` | XPASS/LOADSCH target qualification, command responses, and independent activation evidence | Attended schedule activation |

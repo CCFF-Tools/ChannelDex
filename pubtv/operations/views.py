@@ -26,6 +26,7 @@ from .schedule_preparation import schedule_prepare
 from pubtv.ultranexus.exceptions import UltraNexusError, CapabilityError
 from pubtv.ultranexus.secrets import device_secret_reference, new_device_secret_reference, KeychainSecretStore
 from pubtv.ultranexus.encoding import discover_executables
+from pubtv.ultranexus.ame_bridge import AMEBridge, bridge_root, plugin_manifest_path
 from .database_portability import export_database, stage_import, PortableDatabaseError
 from pathlib import Path
 import re
@@ -92,8 +93,9 @@ def _run_device_diagnostics(target, posted, current, only=None):
         preset_path = config.get("ame_preset")
         ame = _file_evidence(ame_path)
         preset = _file_evidence(preset_path, current.ame_preset_sha256 if current else "")
-        ame_ok = ame["readable"] and preset["readable"] and not preset["stale"]
-        findings.append({"name": "Adobe Media Encoder executable and preset", "status": "observed" if ame_ok else "fail", "detail": "Executable and preset are readable; this does not qualify encoding.", "details": [f"Executable: {'found' if ame['readable'] else 'missing'}.", f"Preset: {'found' if preset['readable'] else 'missing'}.", f"Approved fingerprint: {'matches' if preset['readable'] and not preset['stale'] and preset['approved_hash'] else 'not confirmed'}.", "No encoding or qualification action was performed."]})
+        bridge = AMEBridge(django_settings.DATA_DIR).status()
+        ame_ok = ame["readable"] and preset["readable"] and bridge.get("ready")
+        findings.append({"name": "Adobe Media Encoder UXP bridge", "status": "pass" if ame_ok else "blocked", "detail": "AME, the selected preset, and the supported ChannelDex UXP panel must all be available.", "details": [f"Executable: {'found' if ame['readable'] else 'missing'}.", f"Preset: {'found' if preset['readable'] else 'missing'}.", f"Preset SHA-256: {preset['observed_hash'] or 'unavailable'}.", f"UXP panel: {'connected' if bridge.get('ready') else 'not connected'}."]})
 
     if only in (None, "ffmpeg"):
         ffmpeg_path = config.get("ffmpeg_executable")
@@ -315,6 +317,11 @@ def help_page(request):
 def device_settings(request, pk):
     target = get_object_or_404(Device, pk=pk)
     current = UltraNexusTargetSettings.objects.filter(target=target, is_current=True).first()
+    plugin_manifest = plugin_manifest_path(django_settings.DATA_DIR)
+    def page_context(form, **extra):
+        return {"target": target, "form": form, "current": current,
+                "ame_bridge_root": bridge_root(django_settings.DATA_DIR),
+                "ame_plugin_manifest": plugin_manifest, **extra}
     initial = {}
     if current:
         initial = {field: getattr(current, field, "") for field in (
@@ -345,7 +352,7 @@ def device_settings(request, pk):
     if request.method == "POST" and request.POST.get("action") in diagnostic_actions:
         diagnostics = _run_device_diagnostics(target, request.POST, current, diagnostic_actions[request.POST.get("action")])
         form = UltraNexusSettingsForm(request.POST or initial)
-        return render(request, "device_settings.html", {"target": target, "form": form, "current": current, "diagnostics": diagnostics})
+        return render(request, "device_settings.html", page_context(form, diagnostics=diagnostics))
     if request.method == "POST":
         form = UltraNexusSettingsForm(request.POST)
         if form.is_valid():
@@ -354,10 +361,10 @@ def device_settings(request, pk):
             displayed_version = current.version if current else 0
             if expected_version is None:
                 form.add_error(None, "Reload these device settings before saving.")
-                return render(request, "device_settings.html", {"target": target, "form": form, "current": current})
+                return render(request, "device_settings.html", page_context(form))
             if expected_version != displayed_version:
                 form.add_error(None, "These device settings changed in another window. Reload and review them before saving.")
-                return render(request, "device_settings.html", {"target": target, "form": form, "current": current})
+                return render(request, "device_settings.html", page_context(form))
             values["schedule_path"] = current.schedule_path if current and current.schedule_path else "/internal/schedule/schedule.bin"
             values["reconciliation_mode"] = current.reconciliation_mode if current else "preserve"
             values["command_port"] = values.get("command_port") or (
@@ -376,7 +383,7 @@ def device_settings(request, pk):
                 reference = device_secret_reference(target.pk)
             if not current and not values.get("password"):
                 form.add_error("password", "Enter a password for the first device setup.")
-                return render(request, "device_settings.html", {"target": target, "form": form, "current": current})
+                return render(request, "device_settings.html", page_context(form))
             if values.get("password"):
                 reference = new_device_secret_reference(target.pk)
             settings_data = dict(current.settings) if current else {}
@@ -402,7 +409,7 @@ def device_settings(request, pk):
                     store.set(reference, values["password"])
                 except (CapabilityError, OSError, subprocess.CalledProcessError):
                     messages.error(request, "The Keychain password could not be saved.")
-                    return render(request, "device_settings.html", {"target": target, "form": form, "current": current})
+                    return render(request, "device_settings.html", page_context(form))
             try:
                 with transaction.atomic():
                     locked = UltraNexusTargetSettings.objects.select_for_update().filter(target=target, is_current=True).first()
@@ -439,7 +446,7 @@ def device_settings(request, pk):
                     except (CapabilityError, OSError, subprocess.CalledProcessError):
                         pass
                 form.add_error(None, "; ".join(exc.messages))
-                return render(request, "device_settings.html", {"target": target, "form": form, "current": current})
+                return render(request, "device_settings.html", page_context(form))
             except Exception:
                 if values.get("password"):
                     try:
@@ -457,7 +464,7 @@ def device_settings(request, pk):
             return redirect("device-settings", pk=target.pk)
     else:
         form = UltraNexusSettingsForm(initial=initial)
-    return render(request, "device_settings.html", {"target": target, "form": form, "current": current})
+    return render(request, "device_settings.html", page_context(form))
 
 
 def _resolve_application_executable(selected):

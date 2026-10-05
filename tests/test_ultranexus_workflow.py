@@ -64,34 +64,108 @@ try:
             invalidate_snapshot(batch, approval=1, reason="source changed")
             self.assertEqual(batch.approval_1_status, "stale")
 
-        def test_changed_ame_preset_blocks_before_encoder_or_ftp(self):
+        def test_supported_ame_bridge_encodes_from_original_source_path(self):
             with TemporaryDirectory() as directory, override_settings(DATA_DIR=directory):
                 source = Path(directory) / "source.mp4"
                 source.write_bytes(b"approved source")
                 preset = Path(directory) / "Nexus Mono.epr"
-                preset.write_bytes(b"changed preset")
+                preset.write_bytes(b"preset")
                 asset = self.occurrence.asset
                 asset.smb_reference = str(source)
                 asset.save()
                 UltraNexusTargetSettings.objects.create(
                     target=self.device, version=1, is_current=True, host="controller.test",
                     media_directory="/Vol1/mpeg", secret_reference="test:owner",
-                    ame_preset_sha256=hashlib.sha256(b"qualified preset").hexdigest(),
-                    settings={"ame_preset": str(preset)},
+                    settings={"ame_preset": str(preset), "ftp_username": "owner"},
                 )
-                ResearchGate.objects.create(target=self.device, key="ame_scripting", status="passed")
                 batch = PreparationBatch.objects.create(target=self.device)
                 item = PreparationBatchItem.objects.create(batch=batch, asset=asset)
                 approve_preparation_batch(batch)
-                def forbidden(*args, **kwargs):
-                    self.fail("changed preset must block before encoding or transfer")
+                captured = {}
+
+                class Bridge:
+                    def available(self): return True
+                    def status(self): return {"ready": True}
+                    def render(self, input_path, preset_path, output_path, **kwargs):
+                        captured["source"] = Path(input_path)
+                        captured["preset"] = Path(preset_path)
+                        Path(output_path).write_bytes(b"encoded")
+                        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+                class FTP:
+                    def __init__(self, *args, **kwargs): pass
+                    def upload(self, local_path, remote_path, overwrite=False):
+                        digest = hashlib.sha256(Path(local_path).read_bytes()).hexdigest()
+                        return TransferResult(remote_path, digest)
+
+                probe = {"streams": [
+                    {"codec_type": "video", "codec_name": "h264", "profile": "Main", "level": 41,
+                     "width": 1920, "height": 1080, "duration": "10.0", "r_frame_rate": "30000/1001",
+                     "avg_frame_rate": "30000/1001", "field_order": "progressive", "pix_fmt": "yuv420p",
+                     "sample_aspect_ratio": "1:1", "color_space": "bt709", "color_range": "tv"},
+                    {"codec_type": "audio", "codec_name": "aac", "sample_rate": "48000", "channels": 1},
+                ]}
                 result = process_preparation_batch(
-                    batch, ame_discoverer=lambda *args: "ame", runner=forbidden,
-                    ftp_factory=forbidden, ame_process_checker=forbidden,
+                    batch, ame_bridge=Bridge(), credential_resolver=lambda ref: "password",
+                    ftp_factory=FTP, probe_runner=lambda path: probe,
                 )
                 item.refresh_from_db()
-                self.assertFalse(result["complete"])
-                self.assertIn("SHA-256 changed", item.blocker)
+                self.assertTrue(result["complete"], result)
+                self.assertEqual(captured["source"], source.resolve())
+                self.assertEqual(captured["preset"], preset)
+                self.assertFalse(list((Path(directory) / "ultranexus" / "renditions").glob("approved-input-*")))
+                self.assertEqual(item.resulting_inspection.details["encoder_backend"], "adobe_media_encoder_uxp")
+
+        def test_ffmpeg_fallback_reads_original_source_without_research_gate(self):
+            with TemporaryDirectory() as directory, override_settings(DATA_DIR=directory):
+                source = Path(directory) / "source.mov"; source.write_bytes(b"source")
+                preset = Path(directory) / "preset.epr"; preset.write_bytes(b"preset")
+                self.occurrence.asset.smb_reference = str(source); self.occurrence.asset.save()
+                UltraNexusTargetSettings.objects.create(
+                    target=self.device, version=1, is_current=True, host="controller.test",
+                    media_directory="/Vol1/mpeg", secret_reference="test:owner",
+                    settings={"ame_preset": str(preset), "ffmpeg_executable": "/tools/ffmpeg",
+                              "ftp_username": "owner"},
+                )
+                batch = PreparationBatch.objects.create(target=self.device)
+                item = PreparationBatchItem.objects.create(batch=batch, asset=self.occurrence.asset)
+                approve_preparation_batch(batch)
+                commands = []
+
+                class Bridge:
+                    def available(self): return False
+                    def status(self): return {"ready": False, "detail": "AME panel disconnected."}
+
+                class FTP:
+                    def __init__(self, *args, **kwargs): pass
+                    def upload(self, local_path, remote_path, overwrite=False):
+                        return TransferResult(remote_path, hashlib.sha256(Path(local_path).read_bytes()).hexdigest())
+
+                def run(command, **kwargs):
+                    commands.append(command)
+                    if command[0] == "/tools/ffprobe":
+                        return SimpleNamespace(returncode=0, stdout=__import__("json").dumps(probe), stderr="")
+                    self.assertEqual(command[0], "/tools/ffmpeg")
+                    self.assertEqual(Path(command[command.index("-i") + 1]), source.resolve())
+                    Path(command[-1]).write_bytes(b"encoded")
+                    return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+                probe = {"streams": [
+                    {"codec_type": "video", "codec_name": "h264", "profile": "Main", "level": 41,
+                     "width": 1920, "height": 1080, "duration": "10", "r_frame_rate": "30000/1001",
+                     "avg_frame_rate": "30000/1001", "field_order": "progressive", "pix_fmt": "yuv420p",
+                     "sample_aspect_ratio": "1:1", "color_space": "bt709", "color_range": "tv"},
+                    {"codec_type": "audio", "codec_name": "aac", "sample_rate": "48000", "channels": 1},
+                ]}
+                result = process_preparation_batch(
+                    batch, ame_bridge=Bridge(), ffmpeg_discoverer=lambda paths: "/tools/ffmpeg",
+                    runner=run, credential_resolver=lambda ref: "password", ftp_factory=FTP,
+                )
+                item.refresh_from_db()
+                self.assertTrue(result["complete"], result)
+                self.assertEqual([command[0] for command in commands], ["/tools/ffmpeg", "/tools/ffprobe"])
+                self.assertEqual(item.resulting_inspection.details["encoder_backend"], "ffmpeg")
+                self.assertFalse(list((Path(directory) / "ultranexus" / "renditions").glob("approved-input-*")))
 
         def test_gap_is_visible_but_not_a_preview_blocker(self):
             later = Occurrence.objects.create(station=self.station, show=self.occurrence.show, item_type="filler", label="Filler", starts_at=datetime(2026, 1, 1, 13, tzinfo=timezone.utc), planned_duration_seconds=60)
@@ -137,7 +211,6 @@ try:
                 media_directory="/Vol1/mpeg", secret_reference="channeldex:test",
                 settings={"ftp_username": "owner"},
             )
-            ResearchGate.objects.create(target=self.device, key="nexus_mono_bypass", status="passed")
             batch = PreparationBatch.objects.create(target=self.device)
             item = PreparationBatchItem.objects.create(
                 batch=batch, asset=self.occurrence.asset, encode_before_transfer=False,
@@ -207,20 +280,17 @@ try:
                 item.refresh_from_db()
                 self.assertEqual(item.selected_input_hash, original_digest)
 
-        def test_bypass_uses_approved_private_copy_if_source_path_changes(self):
+        def test_bypass_reads_in_place_and_detects_source_change(self):
             with TemporaryDirectory() as directory, override_settings(DATA_DIR=directory):
                 source, batch, item, probe = self._qualified_bypass_batch(directory)
-                approved = source.read_bytes()
-                captured = {}
 
                 class FTP:
                     def __init__(self, *args, **kwargs): pass
                     def upload(self, local_path, remote_path, overwrite=False):
-                        captured["bytes"] = Path(local_path).read_bytes()
-                        return TransferResult(remote_path, __import__("hashlib").sha256(captured["bytes"]).hexdigest())
+                        raise AssertionError("changed source must block before FTP")
 
                 def mutate_during_probe(path):
-                    self.assertNotEqual(Path(path), source)
+                    self.assertEqual(Path(path), source.resolve())
                     source.write_bytes(b"changed after approval")
                     return probe
 
@@ -229,9 +299,9 @@ try:
                     probe_runner=mutate_during_probe,
                 )
                 item.refresh_from_db()
-                self.assertTrue(result["complete"])
-                self.assertEqual(captured["bytes"], approved)
-                self.assertEqual(Path(item.resulting_inspection.local_path).read_bytes(), approved)
+                self.assertFalse(result["complete"])
+                self.assertIn("changed during preparation", item.blocker)
+                self.assertFalse(list((Path(directory) / "ultranexus" / "renditions").glob("approved-input-*")))
 
         def test_incompatible_bypass_blocks_without_silent_encoding_or_transfer(self):
             with TemporaryDirectory() as directory, override_settings(DATA_DIR=directory):
