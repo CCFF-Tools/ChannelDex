@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import hashlib
-import shutil
 import json
 import os
 import posixpath
@@ -24,7 +23,8 @@ from .models import (PreparationBatch, PreparationBatchItem, ResearchGate, Media
                      MediaBinding, MediaIdAllocation, TransferAttempt, UltraNexusTargetSettings, ArtifactRevision,
                      SchedulePublicationBatch, Device)
 from pubtv.ultranexus.exceptions import CompatibilityError
-from pubtv.ultranexus.encoding import AdobeMediaEncoder, FFmpegEncoder, discover_ame
+from pubtv.ultranexus.ame_bridge import AMEBridge
+from pubtv.ultranexus.encoding import FFmpegEncoder, discover_ffmpeg
 from pubtv.ultranexus.media import parse_ffprobe_json, validate_nexus_mono
 from pubtv.ultranexus.ftp import StdlibFTPAdapter
 from pubtv.ultranexus.secrets import KeychainSecretStore, SecretReference
@@ -34,7 +34,6 @@ from pubtv.ultranexus.bin import (RESOURCE_BASE as BIN_RESOURCE_BASE,
                                   RESOURCE_STRIDE as BIN_RESOURCE_STRIDE,
                                   week_seconds)
 from pubtv.ultranexus.parity import analyze_nmg_timeline, validate_nmg_bin_parity
-from pubtv.ultranexus.qualification import validate_qualification_manifest
 from pubtv.ultranexus.mutation import MutationPlan
 
 
@@ -333,33 +332,6 @@ def restricted_target_blockers(target_settings):
     return blockers
 
 
-def _qualified_ffmpeg(config, target):
-    """Bind a passed equivalence gate to the reviewed build and comparisons."""
-    if not _gate_passed(target, "ffmpeg_equivalence"):
-        raise RuntimeError("FFmpeg equivalence gate is not passed")
-    executable = Path(config.get("ffmpeg_executable") or "")
-    manifest_path = Path(config.get("ffmpeg_qualification_manifest") or "")
-    build_hash = (config.get("ffmpeg_build_sha256") or "").lower()
-    manifest_hash = (config.get("ffmpeg_qualification_sha256") or "").lower()
-    if (not executable.is_file() or not manifest_path.is_file() or
-            len(build_hash) != 64 or len(manifest_hash) != 64):
-        raise RuntimeError("Exact FFmpeg build and reviewed comparison manifest are required")
-    if _sha256_file(executable) != build_hash or _sha256_file(manifest_path) != manifest_hash:
-        raise RuntimeError("FFmpeg build or qualification manifest changed")
-    try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, ValueError) as exc:
-        raise RuntimeError("FFmpeg qualification manifest is unreadable") from exc
-    blockers = validate_qualification_manifest(
-        manifest, build_hash=build_hash,
-        preset_hash=(config.get("ame_preset_sha256") or "").lower(),
-        profile_hash=(config.get("ffmpeg_profile_sha256") or "").lower(),
-    )
-    if blockers:
-        raise RuntimeError("FFmpeg comparisons are not accepted: " + "; ".join(blockers))
-    return str(executable)
-
-
 def _run_ffprobe(path, *, runner=subprocess.run, executable="ffprobe"):
     result = runner(
         (executable, "-v", "error", "-show_streams", "-show_format", "-of", "json", str(path)),
@@ -370,18 +342,6 @@ def _run_ffprobe(path, *, runner=subprocess.run, executable="ffprobe"):
     if getattr(result, "returncode", 1) != 0:
         raise RuntimeError("ffprobe failed")
     return parse_ffprobe_json(result.stdout)
-
-
-def _ame_process_running(executable):
-    try:
-        result = subprocess.run(("pgrep", "-f", str(executable)), check=False, capture_output=True, text=True)
-    except OSError as exc:
-        raise RuntimeError("Unable to determine whether Adobe Media Encoder is already running") from exc
-    if result.returncode == 0:
-        return True
-    if result.returncode == 1:
-        return False
-    raise RuntimeError("Unable to determine whether Adobe Media Encoder is already running")
 
 
 def _next_media_id(target):
@@ -502,9 +462,9 @@ def approve_preparation_batch(batch, *, actor="owner", at=None):
 
 
 def process_preparation_batch(batch, *, runner=subprocess.run, credential_resolver=None,
-                              ftp_factory=StdlibFTPAdapter, ame_discoverer=discover_ame,
-                              ffmpeg_executable="ffmpeg", probe_runner=None,
-                              ame_process_checker=_ame_process_running, item_ids=None):
+                              ftp_factory=StdlibFTPAdapter, ame_bridge=None,
+                              ffmpeg_discoverer=discover_ffmpeg, probe_runner=None,
+                              item_ids=None):
     """Execute a prepared batch through injected, inspectable boundaries.
 
     Missing paths/tools/credentials/capabilities become durable blockers; this
@@ -589,8 +549,6 @@ def process_preparation_batch(batch, *, runner=subprocess.run, credential_resolv
         item.execution_status = "encoding" if item.encode_before_transfer else "validating"
         item.save(update_fields=["execution_status"])
         attempt = None
-        input_copy = None
-        retain_input = False
         path = item.selected_input_path or item.asset.smb_reference
         current = live_snapshots[str(item.asset.asset_id)]
         if not path or not Path(path).is_file():
@@ -619,15 +577,13 @@ def process_preparation_batch(batch, *, runner=subprocess.run, credential_resolv
         approved_digest = current["selected_input_hash"]
         remote_filename = controller_filename(item.asset.file_name, approved_digest, encoded=item.encode_before_transfer)
         output = artifact_root / f"{item.asset.asset_id}-{uuid.uuid4().hex}-{remote_filename}"
+        source_path = Path(path).resolve()
+        probe_executable = str(Path(config.get("ffmpeg_executable") or "ffprobe").with_name("ffprobe"))
         try:
             if item.resulting_inspection_id and item.resulting_inspection.status == "passed" and item.resulting_binding_id:
                 continue
-            input_copy = artifact_root / f"approved-input-{uuid.uuid4().hex}"
-            fd = os.open(input_copy, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            with os.fdopen(fd, "wb") as destination, open(path, "rb") as source:
-                shutil.copyfileobj(source, destination, length=1024 * 1024)
-            if _sha256_file(input_copy) != approved_digest:
-                raise RuntimeError("approved source changed while preparing its private copy")
+            if _sha256_file(source_path) != approved_digest:
+                raise RuntimeError("approved source changed before encoding")
             existing_binding = MediaBinding.objects.filter(asset=item.asset, target=batch.target,
                 binding_type="encoded").select_related("local_inspection").first()
             if existing_binding:
@@ -641,49 +597,43 @@ def process_preparation_batch(batch, *, runner=subprocess.run, credential_resolv
                 encoder_backend = prior_inspection.details.get("encoder_backend", "retained")
                 command = ()
             elif item.encode_before_transfer:
-                ame = ame_discoverer((config.get("ame_executable"),) if config.get("ame_executable") else ())
-                if ame and _gate_passed(batch.target, "ame_scripting"):
-                    if not config.get("ame_preset"):
-                        raise RuntimeError("qualified AME preset path is unavailable")
-                    preset_path = Path(config["ame_preset"])
-                    preset_hash = str(config.get("ame_preset_sha256") or "").lower()
-                    if (not preset_path.is_file() or len(preset_hash) != 64
-                            or _sha256_file(preset_path) != preset_hash):
-                        raise RuntimeError("qualified AME preset is missing or its SHA-256 changed")
-                    if ame_process_checker(ame):
-                        raise RuntimeError("Adobe Media Encoder is already running; refusing to disturb unrelated work")
-                    encoder_backend = "adobe_media_encoder"
-                    encoder = AdobeMediaEncoder(executable=ame, preset=config.get("ame_preset"))
-                    script = encoder.extend_script(str(input_copy), str(output))
-                    with NamedTemporaryFile("w", suffix=".jsx", delete=False, dir=artifact_root, encoding="utf-8") as handle:
-                        handle.write(script)
-                        script_path = handle.name
-                    command = encoder.bridge_command(script_path)
-                elif _gate_passed(batch.target, "ffmpeg_equivalence"):
+                preset_path = Path(config.get("ame_preset") or "")
+                bridge = ame_bridge or AMEBridge(django_settings.DATA_DIR)
+                if preset_path.is_file() and bridge.available():
+                    preset_hash = _sha256_file(preset_path)
+                    encoder_backend = "adobe_media_encoder_uxp"
+                    command = ("ame-uxp", "RenderQueue.renderFile", str(source_path),
+                               str(preset_path.resolve()), str(output))
+                    result = bridge.render(
+                        source_path, preset_path, output,
+                        source_sha256=approved_digest, preset_sha256=preset_hash,
+                    )
+                else:
                     encoder_backend = "ffmpeg"
-                    executable = _qualified_ffmpeg(config, batch.target)
-                    command = FFmpegEncoder(executable=executable).command(str(input_copy), str(output)).argv
-                else: raise RuntimeError("qualified AME unavailable and ffmpeg equivalence research is not passed")
-                try:
+                    executable = ffmpeg_discoverer(
+                        (config.get("ffmpeg_executable"),) if config.get("ffmpeg_executable") else ()
+                    )
+                    if not executable:
+                        bridge_detail = bridge.status().get("detail", "ChannelDex AME panel is unavailable")
+                        raise RuntimeError(f"{bridge_detail} FFmpeg is not configured or executable.")
+                    probe_executable = str(Path(executable).with_name("ffprobe"))
+                    command = FFmpegEncoder(executable=executable).command(str(source_path), str(output)).argv
                     result = runner(command, check=False, capture_output=True, text=True)
-                finally:
-                    if "script_path" in locals():
-                        Path(script_path).unlink(missing_ok=True)
-                        del script_path
-                if getattr(result, "returncode", 1) != 0 or not output.is_file(): raise RuntimeError("encoder failed or produced no output")
+                if getattr(result, "returncode", 1) != 0 or not output.is_file():
+                    detail = (getattr(result, "stderr", "") or "").strip()
+                    raise RuntimeError(detail or "encoder failed or produced no output")
             else:
                 encoder_backend = "bypass"
                 command = ()
-                output = input_copy
-                if not _gate_passed(batch.target, "nexus_mono_bypass"):
-                    raise RuntimeError("direct-transfer Nexus Mono qualification is not passed")
+                output = source_path
             item.execution_status = "validating"
             item.save(update_fields=["execution_status"])
-            probe = parse_ffprobe_json(probe_runner(str(output))) if probe_runner else _run_ffprobe(output, runner=runner)
+            probe = (parse_ffprobe_json(probe_runner(str(output))) if probe_runner
+                     else _run_ffprobe(output, runner=runner, executable=probe_executable))
             validate_nexus_mono(probe)
             digest = _sha256_file(output)
-            if _sha256_file(input_copy) != approved_digest:
-                raise RuntimeError("approved private source changed before transfer")
+            if _sha256_file(source_path) != approved_digest:
+                raise RuntimeError("approved source changed during preparation")
             if _sha256_file(output) != digest:
                 raise RuntimeError("prepared media changed before transfer")
             inspection = MediaInspection.objects.create(
@@ -703,7 +653,6 @@ def process_preparation_batch(batch, *, runner=subprocess.run, credential_resolv
             item.execution_status = "transferring"
             item.save(update_fields=["execution_status"])
             allocation = _reserve_media_identifiers(batch.target, digest, remote_filename.casefold())
-            retain_input = not item.encode_before_transfer
             resolver = credential_resolver or _keychain_password
             secret = resolver(secret_ref)
             if not secret:
@@ -773,9 +722,6 @@ def process_preparation_batch(batch, *, runner=subprocess.run, credential_resolv
                     status="failed", notes=str(exc)
                 )
             item.execution_status = "blocked" if isinstance(exc, CompatibilityError) else "failed"; item.blocker = str(exc); item.save(update_fields=["execution_status", "blocker"]); blockers.append(f"{item.asset}: {exc}")
-        finally:
-            if input_copy is not None and not retain_input:
-                input_copy.unlink(missing_ok=True)
     remaining = batch.items.exclude(execution_status="ready")
     batch.status = "blocked" if remaining.exists() else "complete"
     batch.notes = "; ".join(dict.fromkeys(blockers))

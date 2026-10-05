@@ -194,6 +194,12 @@ uses its qualified FTP adapter for straightforward transfers. ChannelDex owns
 the decoded NMG/BIN generation and mutation needed to remove the WinLGX/Windows
 dependency, along with workflow state, review gates, provenance, and audit.
 Automation should link these steps rather than reimplementing media processing.
+
+AME automation uses Adobe's supported UXP `RenderQueue.renderFile` API through
+the local ChannelDex AME panel. FFmpeg is the automatic fallback when that panel
+is disconnected. Both read and hash the selected source at its original path;
+ChannelDex creates only the encoded rendition, never a private source copy.
+The exact output is probed and must pass the Nexus Mono checks before FTP.
 ### Device diagnostics remain observational (accepted)
 
 Device diagnostics may use an explicitly submitted, unsaved configuration for a short-timeout FTP login/listing and local tool/evidence checks. They must not write to the target, encode media, upload schedules, or change qualification status. Observed and approved fingerprints are shown separately; mismatches are stale and require explicit review. Future automatic preparation and unattended delivery remain proposed.

@@ -1,12 +1,10 @@
 from dataclasses import dataclass
 from pathlib import Path
 import hashlib
-import os
 import json
 import re
 import shutil
 import glob
-from .exceptions import CapabilityError
 
 @dataclass(frozen=True)
 class EncodeCommand:
@@ -15,23 +13,6 @@ class EncodeCommand:
 
 class Encoder:
     def command(self, source: str, output: str) -> EncodeCommand: raise NotImplementedError
-
-class AdobeMediaEncoder(Encoder):
-    def __init__(self, executable=None, preset=None):
-        self.executable = executable or os.environ.get("AME_EXECUTABLE", "Adobe Media Encoder")
-        self.preset = preset or os.environ.get("AME_PRESET")
-    def command(self, source, output):
-        if not self.preset: raise ValueError("AME preset is required")
-        raise CapabilityError("AME execution is unavailable; use extend_script() with the reviewed console bridge")
-    def extend_script(self, source, output):
-        # Deterministic, safely quoted bridge payload; execution remains explicit.
-        s, d, p = (json.dumps(str(v), ensure_ascii=True) for v in (source, output, self.preset))
-        return (f"var exporter = app.getExporter();\n"
-                f"var item = exporter.exportItem({s}, {d}, {p});\n"
-                "item.onEncodeFinished = function() { app.quit(); };\n"
-                "item.onError = function(error) { $.writeln(String(error)); app.quit(); };\n")
-    def bridge_command(self, script_path):
-        return (self.executable, "--console", "es.processFile", script_path)
 
 def discover_ame(candidates=()):
     paths = tuple(candidates) or tuple(

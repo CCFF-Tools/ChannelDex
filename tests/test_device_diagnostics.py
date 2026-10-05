@@ -3,7 +3,8 @@ from tempfile import TemporaryDirectory
 from unittest import TestCase
 from unittest.mock import patch
 
-from django.test import Client, TestCase
+from django.test import Client, TestCase, override_settings
+from pubtv.ultranexus.ame_bridge import prepare_bridge
 from pubtv.operations.models import Device, UltraNexusTargetSettings
 from pubtv.operations.forms import UltraNexusSettingsForm
 from pubtv.operations.views import _file_evidence, _run_device_diagnostics
@@ -109,16 +110,21 @@ class DeviceSettingsContractTests(TestCase):
         self.assertEqual(run.call_count, 2)
 
     def test_diagnostics_uses_selected_adobe_media_encoder_path(self):
-        with TemporaryDirectory() as directory:
+        with TemporaryDirectory() as directory, override_settings(DATA_DIR=directory):
             executable = Path(directory) / "Adobe Media Encoder"
             preset = Path(directory) / "reviewed.epr"
             executable.write_bytes(b"executable")
             preset.write_bytes(b"preset")
+            root = prepare_bridge(directory)
+            (root / "status.json").write_text(
+                '{"ready":true,"api":"RenderQueue.renderFile"}', encoding="utf-8"
+            )
             device = Device.objects.create(name="WinLGX")
             result = _run_device_diagnostics(device, {
                 "ame_executable": str(executable), "ame_preset": str(preset),
             }, None, only="ame")
-        self.assertEqual(result[0]["name"], "Adobe Media Encoder executable and preset")
+        self.assertEqual(result[0]["name"], "Adobe Media Encoder UXP bridge")
+        self.assertEqual(result[0]["status"], "pass")
         self.assertIn("Executable: found.", result[0]["details"])
 
     def test_device_page_shows_fixed_constraints_and_focused_tests(self):
@@ -132,7 +138,8 @@ class DeviceSettingsContractTests(TestCase):
 
         self.assertContains(response, "Fixed schedule path")
         self.assertContains(response, "Test FTP login and directory")
-        self.assertContains(response, "Test Adobe Media Encoder application and preset")
+        self.assertContains(response, "Test Adobe Media Encoder bridge and preset")
+        self.assertContains(response, "Adobe Media Encoder connection")
         self.assertContains(response, "Test FFmpeg and ffprobe")
         self.assertContains(response, "Test evidence-file integrity")
         self.assertContains(response, 'class="browse-feedback"')

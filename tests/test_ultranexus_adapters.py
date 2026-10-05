@@ -6,7 +6,7 @@ from pubtv.ultranexus.capabilities import CapabilityGate
 from pubtv.ultranexus.exceptions import CapabilityError, CompatibilityError, ValidationError
 from pubtv.ultranexus.media import parse_ffprobe_json, validate_nexus_mono
 from pubtv.ultranexus.utils import sha256_bytes, validate_filename
-from pubtv.ultranexus.encoding import FFmpegEncoder, AdobeMediaEncoder
+from pubtv.ultranexus.encoding import FFmpegEncoder
 from pubtv.ultranexus.nmg import NMGImage, MAGIC, VERSION_OFFSET, SCHEDULE_BASE, SCHEDULE_STRIDE, RESOURCE_BASE, Resource
 from pubtv.ultranexus.mutation import MutationPlan
 from pubtv.ultranexus.secrets import KeychainSecretStore, SecretReference
@@ -36,13 +36,6 @@ class UltraNexusAdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(CapabilityError, "schedule.bin"): gate.require_schedule_bin_delivery()
         command = FFmpegEncoder().command("in file.mp4", "out file.mp4").argv
         self.assertIn("-n", command); self.assertIn("in file.mp4", command)
-
-    def test_ame_bridge_script(self):
-        ame = AdobeMediaEncoder(executable="ame", preset="Nexus Mono")
-        script = ame.extend_script("a'file", "out.mp4")
-        self.assertIn("app.getExporter()", script); self.assertIn("exportItem", script); self.assertIn("app.quit", script)
-        self.assertEqual(ame.bridge_command("job.jsx"), ("ame", "--console", "es.processFile", "job.jsx"))
-        with self.assertRaises(CapabilityError): ame.command("a", "b")
 
     def test_nmg_header_and_keychain(self):
         data = bytearray(256); data[:8] = MAGIC; data[VERSION_OFFSET:VERSION_OFFSET+8] = b"7.0.3.48"
