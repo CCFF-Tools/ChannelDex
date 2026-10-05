@@ -440,8 +440,10 @@ def media_queue(request):
         if action in {"review", "review_intake"}:
             show = Show.objects.filter(pk=request.POST.get("show")).first()
             target = Device.objects.filter(pk=request.POST.get("target")).first()
-            episode = Episode.objects.filter(pk=request.POST.get("episode"), show=show).first() if show else None
-            asset = MediaAsset.objects.filter(pk=request.POST.get("asset"), episode=episode).first() if episode else None
+            episode_id = request.POST.get("episode") or None
+            episode = Episode.objects.filter(pk=episode_id, show=show).first() if show and episode_id else None
+            asset_id = request.POST.get("asset") or None
+            asset = MediaAsset.objects.filter(pk=asset_id, episode=episode).first() if episode and asset_id else None
             response_status = 200
             if show and target:
                 source_paths = request.POST.getlist("source_paths")
