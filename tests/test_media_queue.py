@@ -10,7 +10,7 @@ from django.core.management import call_command
 from django.test import Client, TestCase, override_settings
 
 from pubtv.operations.automation import process_preparation_job
-from pubtv.operations.media_queue import cancel_media_queue_batch, create_media_queue_batch, queue_summary, retry_media_queue_item
+from pubtv.operations.media_queue import cancel_media_queue_batch, create_media_queue_batch, queue_summary, remove_cancelled_media_batch, retry_media_queue_item
 from pubtv.operations.models import (Device, Episode, Occurrence, PreparationBatch,
     PreparationBatchItem, PreparationJob, RecurrenceSlot, ResearchGate, Show, Station, AuditEvent,
     TransferAttempt, UltraNexusTargetSettings, MediaBinding)
@@ -348,6 +348,44 @@ class MediaQueueAcceptanceTests(TestCase):
         summary = queue_summary()
         self.assertNotIn("cancelled", {key: value for key, value in summary["counts"].items() if value})
         self.assertTrue(any(row["batch_id"] == batch.pk and row["state"] == "cancelled" for row in summary["items"]))
+
+    def test_cancelled_batch_is_visible_until_explicitly_removed(self):
+        batch, _ = create_media_queue_batch(target=self.target, show=self.show, rows=self.rows(["Hide me"]), submission_token=uuid.uuid4())
+        cancel_media_queue_batch(batch.pk)
+        client = Client()
+        response = client.get("/media/")
+        self.assertContains(response, f"batch-{batch.pk}")
+        self.assertContains(response, "Remove from list")
+
+        response = client.post(f"/media/batches/{batch.pk}/remove/")
+        self.assertRedirects(response, "/media/")
+        self.assertNotContains(client.get("/media/"), f"batch-{batch.pk}")
+        batch.refresh_from_db()
+        self.assertTrue(batch.removed_from_list)
+        self.assertEqual(batch.items.count(), 1)
+        self.assertEqual(batch.jobs.count(), 1)
+        self.assertTrue(AuditEvent.objects.filter(entity="PreparationBatch", entity_id=batch.pk, action="cancel").exists())
+        self.assertTrue(AuditEvent.objects.filter(entity="PreparationBatch", entity_id=batch.pk, action="remove_from_list").exists())
+
+    def test_remove_from_list_requires_cancelled_state_and_is_idempotent(self):
+        batch, _ = create_media_queue_batch(target=self.target, show=self.show, rows=self.rows(["Still active"]), submission_token=uuid.uuid4())
+        with self.assertRaisesMessage(ValueError, "Only cancelled media batches"):
+            remove_cancelled_media_batch(batch.pk)
+        batch.refresh_from_db()
+        self.assertFalse(batch.removed_from_list)
+        cancel_media_queue_batch(batch.pk)
+        removed, changed = remove_cancelled_media_batch(batch.pk)
+        self.assertTrue(changed)
+        _same, changed_again = remove_cancelled_media_batch(batch.pk)
+        self.assertFalse(changed_again)
+        self.assertEqual(AuditEvent.objects.filter(entity="PreparationBatch", entity_id=removed.pk, action="remove_from_list").count(), 1)
+
+    def test_remove_endpoint_is_post_only(self):
+        batch, _ = create_media_queue_batch(target=self.target, show=self.show, rows=self.rows(["Endpoint remove"]), submission_token=uuid.uuid4())
+        cancel_media_queue_batch(batch.pk)
+        client = Client()
+        self.assertEqual(client.get(f"/media/batches/{batch.pk}/remove/").status_code, 405)
+        self.assertEqual(client.post(f"/media/batches/{batch.pk}/remove/").status_code, 302)
 
     def test_running_batch_cannot_be_cancelled_or_mutated(self):
         batch, _ = create_media_queue_batch(target=self.target, show=self.show, rows=self.rows(["Running"]), submission_token=uuid.uuid4())

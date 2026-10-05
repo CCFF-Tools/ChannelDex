@@ -29,6 +29,16 @@ MAX_UPLOAD_BYTES = 50 * 1024 * 1024 * 1024
 SUPPORTED_VIDEO_SUFFIXES = {".mp4", ".mov", ".mxf", ".mpeg", ".mpg", ".m4v", ".avi", ".mkv"}
 
 
+def accepted_media_batches():
+    """Return accepted batches, retaining cancelled ones until explicitly hidden."""
+    return (
+        PreparationBatch.objects.filter(removed_from_list=False)
+        .select_related("target")
+        .prefetch_related("items__asset__episode")
+        .order_by("-created_at")[:100]
+    )
+
+
 def _safe_name(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "_", Path(name or "source-video").name)[:180] or "source-video"
 
@@ -469,7 +479,7 @@ def media_queue(request):
             else:
                 connected["error"] = "Choose a show and destination before reviewing this intake."
                 response_status = 400
-            batches = PreparationBatch.objects.select_related("target").prefetch_related("items__asset__episode").order_by("-created_at")[:100]
+            batches = accepted_media_batches()
             episodes = list(Episode.objects.order_by("show_id", "title").values("id", "show_id", "title"))
             return render(request, "media_queue.html", {"batches": batches, "queue": queue_summary(), "targets": Device.objects.all(),
                 "shows": Show.objects.all(), "episodes": episodes, "submission_token": request.POST.get("submission_token") or uuid.uuid4(), "connected": connected}, status=response_status)
@@ -487,7 +497,7 @@ def media_queue(request):
                 if review.action == "prepare_and_plan":
                     connected["premiere_candidates"] = _intake_candidate_context(review)
                 return render(request, "media_queue.html", {
-                    "batches": PreparationBatch.objects.select_related("target").prefetch_related("items__asset__episode").order_by("-created_at")[:100],
+                    "batches": accepted_media_batches(),
                     "queue": queue_summary(), "targets": Device.objects.all(), "shows": Show.objects.all(),
                     "episodes": list(Episode.objects.order_by("show_id", "title").values("id", "show_id", "title")),
                     "submission_token": uuid.uuid4(), "connected": connected,
@@ -515,10 +525,10 @@ def media_queue(request):
             batch, created = create_media_queue_batch(target=target, show=show, rows=rows, submission_token=request.POST.get("submission_token") or None)
             messages.success(request, f"Batch {batch.pk} queued." if created else f"Batch {batch.pk} was already accepted; its original approved files are unchanged.")
         except (ValueError, IntegrityError, ValidationError, OSError) as exc:
-            batches = PreparationBatch.objects.select_related("target").prefetch_related("items__asset__episode").order_by("-created_at")[:100]
+            batches = accepted_media_batches()
             return render(request, "media_queue.html", {"batches": batches, "queue": queue_summary(), "error": str(exc) if isinstance(exc, (ValueError, ValidationError)) else "Unable to retain this intake. No batch was queued; select the files and try again.", "targets": Device.objects.all(), "shows": Show.objects.all(), "episodes": list(Episode.objects.order_by("show_id", "title").values("id", "show_id", "title")), "submission_token": request.POST.get("submission_token") or uuid.uuid4(), "connected": connected}, status=400)
         return redirect("media-queue")
-    batches = PreparationBatch.objects.select_related("target").prefetch_related("items__asset__episode").order_by("-created_at")[:100]
+    batches = accepted_media_batches()
     episodes = list(Episode.objects.order_by("show_id", "title").values("id", "show_id", "title"))
     return render(request, "media_queue.html", {"batches": batches, "queue": queue_summary(), "targets": Device.objects.all(), "shows": Show.objects.all(), "episodes": episodes, "submission_token": uuid.uuid4(), "connected": connected})
 
@@ -598,4 +608,35 @@ def media_batch_cancel(request, batch_id):
         messages.error(request, str(exc))
     else:
         messages.success(request, "This media batch was cancelled." if cancelled else "This media batch was already cancelled.")
+    return redirect("media-queue")
+
+
+def remove_cancelled_media_batch(batch_id, *, actor="owner"):
+    """Hide a cancelled batch from the accepted list without deleting history."""
+    with transaction.atomic():
+        batch = PreparationBatch.objects.select_for_update().get(pk=batch_id)
+        if batch.status != "cancelled":
+            raise ValueError("Only cancelled media batches can be removed from the list.")
+        if batch.removed_from_list:
+            return batch, False
+        batch.removed_from_list = True
+        batch.save(update_fields=["removed_from_list"])
+        AuditEvent.objects.create(
+            actor=actor, action="remove_from_list", entity="PreparationBatch", entity_id=batch.pk,
+            summary="Cancelled media queue batch removed from accepted list",
+        )
+        return batch, True
+
+
+def media_batch_remove(request, batch_id):
+    if request.method != "POST":
+        return JsonResponse({"error": "POST required"}, status=405)
+    try:
+        _batch, removed = remove_cancelled_media_batch(batch_id)
+    except PreparationBatch.DoesNotExist:
+        return JsonResponse({"error": "Batch not found"}, status=404)
+    except ValueError as exc:
+        messages.error(request, str(exc))
+    else:
+        messages.success(request, "This cancelled media batch was removed from the accepted list." if removed else "This media batch was already removed from the accepted list.")
     return redirect("media-queue")

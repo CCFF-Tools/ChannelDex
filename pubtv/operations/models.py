@@ -804,6 +804,7 @@ class PreparationBatch(models.Model):
     submission_token = models.UUIDField(null=True, blank=True, unique=True)
     label = models.CharField(max_length=160, blank=True)
     status = models.CharField(max_length=20, choices=STATUS, default="draft")
+    removed_from_list = models.BooleanField(default=False)
     approval_1_snapshot = models.JSONField(default=dict, blank=True)
     approval_1_hash = models.CharField(max_length=128, blank=True)
     approval_1_status = models.CharField(max_length=16, choices=[("pending", "Pending"), ("approved", "Approved"), ("stale", "Stale")], default="pending")
