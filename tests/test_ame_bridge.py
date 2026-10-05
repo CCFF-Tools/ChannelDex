@@ -42,6 +42,16 @@ class AMEBridgeTests(unittest.TestCase):
             self.assertEqual(payload["host"]["app"], "ame")
             self.assertEqual(payload["host"]["minVersion"], "27.0")
 
+    def test_bundled_plugin_uses_uxp_safe_path_helpers(self):
+        with TemporaryDirectory() as directory:
+            install_plugin(directory)
+            plugin_js = Path(directory) / "integrations" / "channeldex-ame-uxp" / "index.js"
+            source = plugin_js.read_text(encoding="utf-8")
+            self.assertNotIn('require("path")', source)
+            self.assertNotIn("require('path')", source)
+            self.assertNotIn("path.join", source)
+            self.assertNotIn("path.basename", source)
+
     def test_ignores_terminal_result_with_wrong_protocol_or_id(self):
         with TemporaryDirectory() as directory:
             root = prepare_bridge(directory)
