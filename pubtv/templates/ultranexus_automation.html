@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block page_title %}Schedule delivery{% endblock %}
 {% block content %}
-<div class="page-heading"><p class="eyebrow">Schedule / UltraNEXUS</p><h1>Schedule delivery</h1><p class="lede">Review confirmed cycles and their prepared media, then deliver the schedule with attended activation.</p><p><a class="button-link primary" href="{% url 'schedule-prepare' %}">Review schedule</a> <a class="button-link" href="{% url 'media-queue' %}">Media Preparation</a></p></div>
+<div class="page-heading"><p class="eyebrow">Schedule / UltraNEXUS</p><h1>Schedule delivery</h1><p class="lede">Review confirmed cycles and their prepared media, then deliver the schedule with attended activation.</p><p><a class="button-link primary" href="{% url 'schedule-prepare' %}">Review schedule</a> <a class="button-link" href="{% url 'guided-delivery' %}">Guided already-encoded delivery</a> <a class="button-link" href="{% url 'media-queue' %}">Media Preparation</a></p></div>
 <ol class="delivery-progress" aria-label="Schedule delivery stages"><li>Review changes</li><li>Generate and validate</li><li>Stage upload</li><li>Confirm activation</li><li>Record independent confirmation</li></ol>
 <section class="list-card">
   <h2>Publication batch</h2>
@@ -10,6 +10,9 @@
   <article id="publication-{{ batch.pk }}"><h3>Batch {{ batch.pk }} · {{ batch.target }}</h3>
     <p><strong data-publication-readiness="{{ batch.pk }}">{{ card.readiness.label }}</strong>{% for choice in card.readiness.waiting %} · {{ choice.assignment.episode }}{% if choice.preparation_item_id %} <a href="{% url 'media-queue' %}#item-{{ choice.preparation_item_id }}">View media job</a>{% endif %}{% endfor %}</p>
     <p>{{ batch.get_workflow_mode_display }} · {{ batch.get_reconciliation_mode_display }} · Delivery approval: {{ batch.approval_2_status }}</p>
+    {% if batch.guided_delivery %}
+    <p>This batch is controlled by the guided, hash-bound delivery workflow. <a class="button-link primary" href="{% url 'guided-delivery' %}#guided-{{ batch.guided_delivery.pk }}">Review or continue guided delivery</a></p>
+    {% else %}
     <details><summary>Review events and controller mappings ({{ batch.occurrence_selections.count }})</summary>
     {% for selection in batch.occurrence_selections.all %}
     <form method="post" class="inline-details">{% csrf_token %}<input type="hidden" name="action" value="set_publication_change"><input type="hidden" name="selection" value="{{ selection.pk }}"><span>{{ selection.occurrence }}</span><label>Change <select name="operation"><option value="add"{% if selection.operation == 'add' %} selected{% endif %}>Add</option><option value="move"{% if selection.operation == 'move' %} selected{% endif %}>Move</option><option value="replace"{% if selection.operation == 'replace' %} selected{% endif %}>Replace</option><option value="delete"{% if selection.operation == 'delete' %} selected{% endif %}>Delete</option></select></label><label>Source BIN slot <input name="source_bin_slot" type="number" min="0" max="2999" value="{{ selection.source_bin_slot|default_if_none:'' }}"></label><label>Source record SHA-256 <input name="source_bin_record_hash" size="68" maxlength="64" value="{{ selection.source_bin_record_hash }}"></label><button type="submit">Save change</button></form>
@@ -32,6 +35,7 @@
     {% endif %}
     {% if card.can_rollback %}
     <form method="post" class="stacked-form">{% csrf_token %}<input type="hidden" name="action" value="rollback_publication"><input type="hidden" name="batch" value="{{ batch.pk }}"><label>Known-good SHA-256 <input name="rollback_hash" size="68" maxlength="64" required></label><label><input type="checkbox" name="confirm_rollback" required> Restore this known-good BIN and send one LOADSCH</label><button type="submit">Confirm rollback</button></form>
+    {% endif %}
     {% endif %}
   </article>{% endwith %}{% empty %}<p>No publication batches.</p>{% endfor %}
 </section>

@@ -1118,7 +1118,7 @@ class ResearchGate(models.Model):
 
 
 class PublicationJob(models.Model):
-    KINDS = [(x, x.replace("_", " ").title()) for x in ("preview", "prepare_publication", "generate_bin", "deliver", "verify", "reconcile")]
+    KINDS = [(x, x.replace("_", " ").title()) for x in ("preview", "prepare_publication", "generate_nmg", "generate_bin", "guided_delivery", "deliver", "verify", "reconcile")]
     STATUS = [(x, x.replace("_", " ").title()) for x in ("queued", "running", "succeeded", "failed", "cancelled")]
     publication_batch = models.ForeignKey(SchedulePublicationBatch, on_delete=models.CASCADE, related_name="jobs")
     kind = models.CharField(max_length=24, choices=KINDS)
@@ -1129,3 +1129,45 @@ class PublicationJob(models.Model):
     finished_at = models.DateTimeField(null=True, blank=True)
     error = models.TextField(blank=True)
     result = models.JSONField(default=dict, blank=True)
+
+
+class GuidedEpisodeDelivery(models.Model):
+    """Durable owner-facing state for the already-encoded delivery path.
+
+    This is intentionally a thin orchestration record. Media qualification,
+    schedule review, staging, activation, and observation remain owned by the
+    existing immutable records linked below.
+    """
+    STATES = [(value, value.replace("_", " ").title()) for value in (
+        "intake_review", "intake_confirmed", "media_queued", "media_ready",
+        "cycle_planned", "controller_pulled", "change_review", "approval_2",
+        "staged", "delivered", "verification_pending", "verified",
+        "blocked", "rolled_back", "cancelled")]
+    token = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    target = models.ForeignKey(Device, on_delete=models.PROTECT, related_name="guided_episode_deliveries")
+    show = models.ForeignKey(Show, on_delete=models.PROTECT, related_name="guided_episode_deliveries")
+    episode = models.ForeignKey(Episode, on_delete=models.PROTECT, related_name="guided_deliveries")
+    asset = models.ForeignKey(MediaAsset, on_delete=models.PROTECT, related_name="guided_deliveries")
+    preparation_batch = models.OneToOneField(PreparationBatch, null=True, blank=True, on_delete=models.PROTECT, related_name="guided_delivery")
+    publication_batch = models.OneToOneField(SchedulePublicationBatch, null=True, blank=True, on_delete=models.PROTECT, related_name="guided_delivery")
+    cycle_assignment = models.ForeignKey(WeeklyEpisodeAssignment, null=True, blank=True, on_delete=models.PROTECT, related_name="guided_deliveries")
+    state = models.CharField(max_length=24, choices=STATES, default="intake_review")
+    intake_snapshot = models.JSONField(default=dict, blank=True)
+    intake_hash = models.CharField(max_length=64, blank=True)
+    change_review = models.JSONField(default=dict, blank=True)
+    change_review_hash = models.CharField(max_length=64, blank=True)
+    candidate_hash = models.CharField(max_length=128, blank=True)
+    current_hash = models.CharField(max_length=128, blank=True)
+    rollback_hash = models.CharField(max_length=128, blank=True)
+    activation_count = models.PositiveSmallIntegerField(default=0)
+    verification_prompted = models.BooleanField(default=False)
+    last_error = models.TextField(blank=True)
+    created_at = models.DateTimeField(default=timezone.now)
+    updated_at = models.DateTimeField(auto_now=True)
+    created_by = models.CharField(max_length=120, default="owner")
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["target", "episode"], condition=Q(state__in=(
+            "intake_review", "intake_confirmed", "media_queued", "media_ready",
+            "cycle_planned", "controller_pulled", "change_review", "approval_2",
+            "staged", "delivered", "verification_pending")), name="unique_active_guided_episode_delivery")]

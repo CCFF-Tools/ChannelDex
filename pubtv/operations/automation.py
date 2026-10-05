@@ -187,28 +187,67 @@ def process_due_job_state(job, *, now=None, already_claimed=False):
     if requested and requested > now:
         return job
     publication = getattr(job, "publication_batch", None)
-    if publication and getattr(job, "kind", "") in {"prepare_publication", "generate_bin"}:
+    if publication and getattr(job, "kind", "") in {"prepare_publication", "generate_nmg", "generate_bin"}:
         # The local worker owns execution; this helper is intentionally
         # conservative and never falls back to configured static BIN bytes.
         from .models import Station
         auto_pull = Station.objects.order_by("pk").values_list("auto_pull_controller_schedule", flat=True).first()
-        if auto_pull:
+        guided = getattr(publication, "guided_delivery", None)
+        manual_guided_pull = bool(
+            guided is not None and job.kind == "prepare_publication"
+            and isinstance(job.result, dict) and job.result.get("manual_pull_requested")
+        )
+        if auto_pull or manual_guided_pull:
             try:
                 from .publication_review import pull_current_controller_schedule
-                snapshot = pull_current_controller_schedule(publication, automatic=True)
+                snapshot = pull_current_controller_schedule(publication, automatic=bool(auto_pull))
                 publication.refresh_from_db()
-                job.result = {"controller_snapshot_hash": snapshot.snapshot_hash}
+                job.result = {**(job.result or {}), "controller_snapshot_hash": snapshot.snapshot_hash}
             except Exception as exc:
                 job.status = "failed"; job.error = str(exc); job.finished_at = now
                 job.save(update_fields=["status", "error", "finished_at"])
                 return job
+        elif guided is not None and job.kind == "prepare_publication":
+            job.status = "failed"
+            job.error = "A fresh manual controller pull must be explicitly authorized for this guided delivery"
+            job.finished_at = now
+            job.save(update_fields=["status", "error", "finished_at"])
+            return job
         if not publication.controller_snapshot_id:
             job.status = "failed"; job.error = "Successful manual controller pull is required"; job.finished_at = now
             job.save(update_fields=["status", "error", "finished_at"])
             return job
-        if getattr(job, "kind", "") == "generate_bin":
+        if getattr(job, "kind", "") == "prepare_publication" and guided is not None:
             try:
-                artifact = generate_bin_artifact(publication)
+                nmg = generate_nmg_artifact(publication)
+                binary = generate_bin_artifact(publication)
+                from .publication_review import publication_review
+                review = publication_review(publication)
+                if review.get("blockers"):
+                    raise ValueError("; ".join(review["blockers"]))
+                GuidedEpisodeDelivery = __import__(
+                    "pubtv.operations.models", fromlist=["GuidedEpisodeDelivery"]
+                ).GuidedEpisodeDelivery
+                GuidedEpisodeDelivery.objects.filter(pk=guided.pk).update(
+                    state="change_review", change_review=review,
+                    change_review_hash=review["review_hash"],
+                    current_hash=review["captured_hash"],
+                    candidate_hash=review["proposed_hash"], last_error="")
+                job.status = "succeeded"
+                job.result = {"controller_snapshot_hash": publication.controller_snapshot_hash,
+                    "nmg_artifact_id": nmg.pk, "bin_artifact_id": binary.pk,
+                    "review_hash": review["review_hash"]}
+                job.error = ""; job.finished_at = now
+            except Exception as exc:
+                job.status = "failed"; job.error = str(exc); job.finished_at = now
+                guided.state = "blocked"; guided.last_error = str(exc)
+                guided.save(update_fields=["state", "last_error", "updated_at"])
+            job.save(update_fields=["status", "error", "result", "finished_at"])
+            return job
+        if getattr(job, "kind", "") in {"generate_nmg", "generate_bin"}:
+            try:
+                artifact = (generate_nmg_artifact(publication) if job.kind == "generate_nmg"
+                            else generate_bin_artifact(publication))
                 job.status = "succeeded"; job.result = {"artifact_id": artifact.pk}; job.finished_at = now
             except Exception as exc:
                 job.status = "failed"; job.error = str(exc); job.finished_at = now
@@ -222,6 +261,9 @@ def process_due_job_state(job, *, now=None, already_claimed=False):
         job.finished_at = now
         job.save(update_fields=["status", "result", "finished_at"])
         return job
+    if publication and getattr(job, "kind", "") == "guided_delivery":
+        from .guided_delivery import process_guided_delivery_job
+        return process_guided_delivery_job(job, already_claimed=True)
     if publication and (publication.approval_2_status != "approved" or publication.approval_2_hash == ""):
         if hasattr(job, "status"):
             job.status = "failed"; job.error = "Approval 2 is required"
@@ -748,6 +790,14 @@ def process_preparation_job(job, **kwargs):
     job.status = "succeeded" if result["complete"] else "failed"
     job.error = "" if result["complete"] else "; ".join(result["blockers"])
     job.save(update_fields=["status", "finished_at", "result", "error"])
+    if result["complete"]:
+        try:
+            from .guided_delivery import advance_guided_after_media
+            advance_guided_after_media(job.batch)
+        except ValueError as exc:
+            from .models import GuidedEpisodeDelivery
+            GuidedEpisodeDelivery.objects.filter(preparation_batch=job.batch).update(
+                state="blocked", last_error=str(exc))
     return job
 
 

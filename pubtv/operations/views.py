@@ -17,10 +17,11 @@ from django.core.exceptions import ValidationError
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
 from .forms import OccurrenceForm, StationForm, CarryForwardSettingsForm, DeviceForm, ShowForm, ShowSlotDurationForm, EpisodeForm, ProducerForm, EpisodeMilestoneForm, AssetForm, DeliveryForm, SlotForm, AssignmentForm, AssetPreparationForm, AssetTargetTransferForm, ProgrammingForm, UploadForm, AiringForm, AutomationPreparationForm, AutomationPublicationForm, UltraNexusSettingsForm
-from .models import Episode, EpisodeWorkflowMilestone, Occurrence, Show, Station, Device, Producer, MediaAsset, Delivery, RecurrenceSlot, WeeklyEpisodeAssignment, Preparation, AssetPreparation, AssetTargetTransfer, OccurrenceProgramming, UploadedOccurrenceCoverage, UploadedScheduleRevision, AiringEvidence, AuditEvent, UltraNexusTargetSettings, PreparationBatch, PreparationBatchItem, PreparationJob, SchedulePublicationBatch, ScheduleDeliveryOperation, OccurrenceRevisionSelection, ResearchGate, TransferAttempt, PublicationJob
+from .models import Episode, EpisodeWorkflowMilestone, Occurrence, Show, Station, Device, Producer, MediaAsset, Delivery, RecurrenceSlot, WeeklyEpisodeAssignment, Preparation, AssetPreparation, AssetTargetTransfer, OccurrenceProgramming, UploadedOccurrenceCoverage, UploadedScheduleRevision, AiringEvidence, AuditEvent, UltraNexusTargetSettings, PreparationBatch, PreparationBatchItem, PreparationJob, SchedulePublicationBatch, ScheduleDeliveryOperation, OccurrenceRevisionSelection, ResearchGate, TransferAttempt, PublicationJob, GuidedEpisodeDelivery
 from .services import schedule_alerts, audit, materialize_assignment, ensure_carry_forward_week, next_premiere_date, suggested_pending_episode, confirm_preparation_fact, create_upload_snapshot, revise_airing, sign_upload_preview, load_upload_preview, commit_upload_preview, preparation_readiness, calendar_capacity, pending_episode_reason
 from .automation import approve_snapshot, canonical_hash, invalidate_snapshot, preparation_batch_snapshot, publication_snapshot, preview_schedule, approve_preparation_batch, schedule_ready_binding, generate_nmg_artifact, generate_bin_artifact, publication_artifact_blockers
 from .publication_delivery import stage_publication, activate_publication, observe_activation, rollback_publication
+from .guided_delivery import record_guided_delivery, record_guided_observation, record_guided_rollback
 from .publication_review import capture_controller_snapshot, publication_review, validate_review_token, cancel_publication
 from .schedule_preparation import schedule_prepare
 from pubtv.ultranexus.exceptions import UltraNexusError, CapabilityError
@@ -770,6 +771,7 @@ def automation_dashboard(request):
             if result["blockers"]:
                 messages.error(request, "Approval 2 blocked: " + "; ".join(result["blockers"]))
             else:
+                GuidedEpisodeDelivery.objects.filter(publication_batch=batch).update(state="approval_2")
                 messages.success(request, "Approval 2 recorded. No schedule coverage is created by approval.")
             return redirect("schedule-delivery")
         if action == "review_publication":
@@ -780,6 +782,9 @@ def automation_dashboard(request):
                 if review.get("blockers"):
                     messages.error(request, "Controller review blocked: " + "; ".join(review["blockers"]))
                 else:
+                    GuidedEpisodeDelivery.objects.filter(publication_batch=batch).update(
+                        state="change_review", change_review=review,
+                        change_review_hash=review.get("review_hash", ""))
                     messages.success(request, "Controller BIN captured. Review the exact diff and media hashes before Approval 2.")
             except (ValueError, ValidationError, OSError, UltraNexusError) as exc:
                 messages.error(request, "Controller review failed: " + str(exc))
@@ -818,6 +823,9 @@ def automation_dashboard(request):
             else:
                 try:
                     operation = stage_publication(batch.pk, expected_hash=request.POST.get("expected_hash", ""))
+                    GuidedEpisodeDelivery.objects.filter(publication_batch=batch).update(
+                        state="staged", candidate_hash=operation.artifact.content_hash,
+                        current_hash=operation.base_hash, rollback_hash=operation.rollback_hash)
                     messages.success(request, f"Candidate staged; current remote BIN retained as operation {operation.pk} rollback artifact.")
                 except (ValueError, ValidationError, UltraNexusError, OSError):
                     messages.error(request, "Staging failed; review the operation and remote schedule before retrying.")
@@ -829,7 +837,10 @@ def automation_dashboard(request):
                 messages.error(request, "A staged operation and final confirmation are required.")
             else:
                 try:
-                    activate_publication(operation.pk, expected_hash=request.POST.get("expected_hash", ""))
+                    operation = activate_publication(operation.pk, expected_hash=request.POST.get("expected_hash", ""))
+                    guided = GuidedEpisodeDelivery.objects.filter(publication_batch=batch).first()
+                    if guided:
+                        record_guided_delivery(guided, operation)
                     messages.success(request, "LOADSCH acknowledged. Attach independent controller evidence before recording coverage.")
                 except (ValueError, ValidationError, UltraNexusError, OSError):
                     messages.error(request, "Activation is uncertain or blocked; review the operation and controller evidence.")
@@ -843,7 +854,10 @@ def automation_dashboard(request):
                 messages.error(request, "Observed candidate hash does not match the activation.")
             else:
                 try:
-                    observe_activation(operation.pk, evidence_file=request.POST.get("evidence_file", ""))
+                    operation = observe_activation(operation.pk, evidence_file=request.POST.get("evidence_file", ""))
+                    guided = GuidedEpisodeDelivery.objects.filter(publication_batch=batch).first()
+                    if guided:
+                        record_guided_observation(guided, operation_state=operation.state)
                     messages.success(request, "Independent activation observation and uploaded coverage recorded.")
                 except (ValueError, ValidationError, UltraNexusError, OSError):
                     messages.error(request, "Activation evidence was not accepted; review the operation.")
@@ -855,7 +869,10 @@ def automation_dashboard(request):
                 messages.error(request, "Confirm a specific known-good rollback before restoring it.")
             else:
                 try:
-                    rollback_publication(operation.pk, expected_rollback_hash=request.POST.get("rollback_hash", ""))
+                    operation = rollback_publication(operation.pk, expected_rollback_hash=request.POST.get("rollback_hash", ""))
+                    guided = GuidedEpisodeDelivery.objects.filter(publication_batch=batch).first()
+                    if guided:
+                        record_guided_rollback(guided, operation)
                     messages.success(request, "Known-good BIN restored and LOADSCH acknowledged; observe controller state separately.")
                 except (ValueError, ValidationError, UltraNexusError, OSError):
                     messages.error(request, "Rollback is uncertain or blocked; inspect remote and controller state.")
