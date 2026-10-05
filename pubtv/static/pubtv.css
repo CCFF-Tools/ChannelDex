@@ -27,3 +27,10 @@
 .help-panel .intake-option,.upload-dropzone .intake-option{display:grid;grid-template-columns:auto minmax(0,1fr);gap:.55rem .7rem;align-items:start;margin:.65rem 0}.help-panel .intake-option>input,.upload-dropzone .intake-option>input{margin:.25rem 0 0}.help-panel .intake-option>label,.upload-dropzone .intake-option>label{display:grid;gap:.15rem;margin:0}.help-panel .intake-option-title,.upload-dropzone .intake-option-title{font-weight:650}.help-panel .intake-option-description,.upload-dropzone .intake-option-description{color:var(--muted)}.help-panel .intake-option>details{grid-column:2;min-width:0}@media(max-width:560px){.help-panel .intake-option,.upload-dropzone .intake-option{grid-template-columns:auto minmax(0,1fr)}}
 .queue-batch-cancel{display:flex;align-items:center;gap:.65rem;flex-wrap:wrap;margin:.7rem 0}.queue-batch-cancel button{font-size:.9rem}
 .schedule-workflow-actions{display:flex;gap:.5rem;align-items:center;flex-wrap:wrap}.schedule-workflow-actions a[aria-current="page"]{box-shadow:0 1px 3px #181A1B24}
+/* Media intake layout */
+#media-queue-form{max-width:none}
+.intake-options .intake-option{display:grid;grid-template-columns:auto minmax(0,1fr);gap:.55rem .7rem;align-items:start;margin:.65rem 0}
+.intake-options .intake-option>input{margin:.25rem 0 0}
+.intake-options .intake-option>label{display:grid;gap:.15rem;margin:0}
+.intake-options .intake-option-title{font-weight:650}
+.intake-options .intake-option-description{color:var(--muted)}
