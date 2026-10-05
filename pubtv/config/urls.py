@@ -16,6 +16,7 @@ urlpatterns = [
     path("media/status/", media_queue.media_queue_status, name="media-queue-summary"),
     path("media/items/<int:item_id>/retry/", media_queue.media_item_retry, name="media-item-retry"),
     path("media/batches/<int:batch_id>/cancel/", media_queue.media_batch_cancel, name="media-batch-cancel"),
+    path("media/batches/<int:batch_id>/remove/", media_queue.media_batch_remove, name="media-batch-remove"),
     path("schedule/recurring/", views.reserved_schedule, name="reserved-schedule"),
     path("shows/", views.show_list, name="show-list"),
     path("shows/<int:show_id>/", views.show_detail, name="show-detail"),
