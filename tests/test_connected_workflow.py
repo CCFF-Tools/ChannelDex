@@ -51,6 +51,9 @@ class ConnectedWorkflowTests(TestCase):
             "action": "review_intake", "next_action": action,
             "show": self.show.pk, "target": self.target.pk,
             "source_paths": uploads, "encode_before_transfer": "on",
+            # The rendered browser form retains these legacy fields as blank
+            # hidden inputs while path-based intake supplies rows below.
+            "episode": "", "asset": "", "item": "",
         }
         for index in range(files):
             data[f"episode_id_{index}"] = "new"
