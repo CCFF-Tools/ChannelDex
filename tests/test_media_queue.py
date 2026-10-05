@@ -387,6 +387,31 @@ class MediaQueueAcceptanceTests(TestCase):
         self.assertEqual(client.get(f"/media/batches/{batch.pk}/remove/").status_code, 405)
         self.assertEqual(client.post(f"/media/batches/{batch.pk}/remove/").status_code, 302)
 
+    def test_remove_endpoint_returns_json_for_async_request(self):
+        batch, _ = create_media_queue_batch(target=self.target, show=self.show, rows=self.rows(["Async remove"]), submission_token=uuid.uuid4())
+        cancel_media_queue_batch(batch.pk)
+        response = Client().post(f"/media/batches/{batch.pk}/remove/", HTTP_X_REQUESTED_WITH="XMLHttpRequest", HTTP_ACCEPT="application/json")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"removed": True, "batch_id": batch.pk})
+
+    def test_repeated_async_remove_is_safe_success(self):
+        batch, _ = create_media_queue_batch(target=self.target, show=self.show, rows=self.rows(["Async repeat"]), submission_token=uuid.uuid4())
+        cancel_media_queue_batch(batch.pk)
+        client = Client()
+        headers = {"HTTP_X_REQUESTED_WITH": "XMLHttpRequest", "HTTP_ACCEPT": "application/json"}
+        self.assertEqual(client.post(f"/media/batches/{batch.pk}/remove/", **headers).json(), {"removed": True, "batch_id": batch.pk})
+        response = client.post(f"/media/batches/{batch.pk}/remove/", **headers)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"removed": False, "batch_id": batch.pk})
+
+    def test_async_remove_non_cancelled_returns_json_error(self):
+        batch, _ = create_media_queue_batch(target=self.target, show=self.show, rows=self.rows(["Async active"]), submission_token=uuid.uuid4())
+        response = Client().post(f"/media/batches/{batch.pk}/remove/", HTTP_X_REQUESTED_WITH="XMLHttpRequest", HTTP_ACCEPT="application/json")
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json(), {"error": "Only cancelled media batches can be removed from the list."})
+        batch.refresh_from_db()
+        self.assertFalse(batch.removed_from_list)
+
     def test_running_batch_cannot_be_cancelled_or_mutated(self):
         batch, _ = create_media_queue_batch(target=self.target, show=self.show, rows=self.rows(["Running"]), submission_token=uuid.uuid4())
         batch.status = "in_progress"
