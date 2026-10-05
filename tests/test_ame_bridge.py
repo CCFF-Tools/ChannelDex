@@ -52,6 +52,23 @@ class AMEBridgeTests(unittest.TestCase):
             self.assertNotIn("path.join", source)
             self.assertNotIn("path.basename", source)
 
+    def test_bundled_plugin_awaits_async_job_results(self):
+        with TemporaryDirectory() as directory:
+            install_plugin(directory)
+            source = (Path(directory) / "integrations" / "channeldex-ame-uxp" / "index.js").read_text(
+                encoding="utf-8"
+            )
+            for call in (
+                "isInFinalState",
+                "getEncodeProgress",
+                "getEncodeProgressMessage",
+                "getStatus",
+                "getOutputFilesAfterExport",
+                "getLogOutput",
+                "getErrorText",
+            ):
+                self.assertIn(f"await job.{call}(", source)
+
     def test_ignores_terminal_result_with_wrong_protocol_or_id(self):
         with TemporaryDirectory() as directory:
             root = prepare_bridge(directory)

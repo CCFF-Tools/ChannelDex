@@ -79,20 +79,20 @@ async function processRequest(fileName) {
     if (!queued || queued.result !== 0) throw new Error(queued?.message || "AME rejected the render request");
     const job = app.RenderQueue.getJob(queued.jobId);
     if (!job) throw new Error("AME did not return a render job");
-    while (!job.isInFinalState()) {
+    while (!(await job.isInFinalState())) {
       await finish(request, "encoding", {job_id: queued.jobId, job_group_id: queued.jobGroupId,
-        progress: job.getEncodeProgress(), message: job.getEncodeProgressMessage()});
+        progress: await job.getEncodeProgress(), message: await job.getEncodeProgressMessage()});
       await new Promise(resolve => setTimeout(resolve, 1000));
     }
-    const status = job.getStatus();
+    const status = await job.getStatus();
     if (status === job.STATUS_DONE || status === job.STATUS_DONE_WARNING) {
       await finish(request, "succeeded", {job_id: queued.jobId, job_group_id: queued.jobGroupId,
-        output_files: job.getOutputFilesAfterExport(), warning: status === job.STATUS_DONE_WARNING,
-        log: job.getLogOutput()});
+        output_files: await job.getOutputFilesAfterExport(), warning: status === job.STATUS_DONE_WARNING,
+        log: await job.getLogOutput()});
       log(`Completed ${basename(request.source)}`);
     } else {
       await finish(request, "failed", {job_id: queued.jobId, job_group_id: queued.jobGroupId,
-        error: job.getErrorText() || "Adobe Media Encoder failed", log: job.getLogOutput()});
+        error: await job.getErrorText() || "Adobe Media Encoder failed", log: await job.getLogOutput()});
     }
   } catch (error) {
     if (request?.id) await finish(request, "failed", {error: String(error)});
