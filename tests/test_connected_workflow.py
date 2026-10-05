@@ -41,7 +41,7 @@ class ConnectedWorkflowTests(TestCase):
         today = timezone.localdate(timezone=ZoneInfo("America/Detroit"))
         return today + timedelta(days=(7 - today.weekday()) % 7)
 
-    def _review(self, action="prepare_and_plan", files=1):
+    def _review(self, action="prepare_and_plan", files=1, legacy_episode=""):
         uploads = []
         for index in range(files):
             path = Path(self.data_dir.name) / f"episode-{index + 1}.mp4"
@@ -53,7 +53,7 @@ class ConnectedWorkflowTests(TestCase):
             "source_paths": uploads, "encode_before_transfer": "on",
             # The rendered browser form retains these legacy fields as blank
             # hidden inputs while path-based intake supplies rows below.
-            "episode": "", "asset": "", "item": "",
+            "episode": legacy_episode, "asset": "", "item": "",
         }
         for index in range(files):
             data[f"episode_id_{index}"] = "new"
@@ -61,6 +61,12 @@ class ConnectedWorkflowTests(TestCase):
         response = Client().post("/media/", data)
         self.assertEqual(response.status_code, 200)
         return MediaIntakeReview.objects.get()
+
+    def test_review_accepts_context_episode_with_blank_legacy_asset(self):
+        episode = Episode.objects.create(show=self.show, title="Existing episode")
+        review = self._review(action="prepare_only", legacy_episode=episode.pk)
+        self.assertEqual(review.episode, episode)
+        self.assertIsNone(review.asset)
 
     def test_review_stages_files_without_starting_work_then_confirms_once(self):
         with patch("pubtv.operations.media_queue._sha256_file", side_effect=AssertionError("review must not hash")) as digest:
