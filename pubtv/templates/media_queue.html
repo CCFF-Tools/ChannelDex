@@ -15,8 +15,8 @@
 <input type="hidden" name="submission_token" value="{{ submission_token }}"><fieldset class="intake-options"><legend>Next step</legend><div class="intake-option"><input id="next-action-plan" type="radio" name="next_action" value="prepare_and_plan"{% if connected.show %} checked{% endif %}><label for="next-action-plan"><span class="intake-option-title">Prepare and plan premieres</span><span class="intake-option-description">Queue the media and review premiere/replay cycles before confirmation.</span></label></div><div class="intake-option"><input id="next-action-only" type="radio" name="next_action" value="prepare_only"{% if not connected.show %} checked{% endif %}><label for="next-action-only"><span class="intake-option-title">Prepare media only</span><span class="intake-option-description">Queue preparation and transfer without creating schedule cycles.</span></label></div></fieldset><button class="primary" type="submit" name="action" value="review_intake">Review intake</button><p>Queue preparation &amp; transfer after this review. Schedule delivery and activation remain separate gates.</p></form>
 {% if connected.reviewed %}<section class="help-panel" aria-label="Intake review"><h2>Review intake</h2><p>{{ connected.show.title }} · {% if connected.target %}{{ connected.target.name }}{% endif %} · {{ connected.review.action }}</p><ol>{% for row in connected.review_rows %}<li>{{ row.name }} → {% if row.episode_id %}episode {{ row.episode_id }}{% else %}new episode: {{ row.new_title }}{% endif %} · position {{ row.position|add:1 }} · {% if row.encode_before_transfer %}encode before transfer{% else %}already encoded{% endif %}</li>{% endfor %}</ol><p>Confirming creates the preparation batch and Approval 1 job once.{% if connected.review.action == 'prepare_and_plan' %} It also creates the exact premiere and replay cycles shown below. Any later queue, recurrence, or assignment change requires a fresh review.{% endif %}</p><form method="post">{% csrf_token %}<input type="hidden" name="action" value="confirm_intake"><input type="hidden" name="review_token" value="{{ connected.review.token }}">{% if connected.review.action == 'prepare_and_plan' %}<fieldset><legend>First premiere date</legend>{% for candidate in connected.premiere_candidates %}<div class="intake-option"><input id="premiere-{{ candidate.date|date:'Y-m-d' }}" type="radio" name="first_premiere_date" value="{{ candidate.date|date:'Y-m-d' }}"{% if candidate.recommended %} checked{% endif %}{% if candidate.occupied or not candidate.proposal %} disabled{% endif %}><label for="premiere-{{ candidate.date|date:'Y-m-d' }}"><span class="intake-option-title">{{ candidate.date|date:'l, F j, Y' }} at {{ candidate.slot.start_time|time:'g:i a' }} Eastern</span><span class="intake-option-description">{{ candidate.reason }}</span></label>{% if candidate.proposal %}<details><summary>Review this complete run</summary>{% for cycle in candidate.proposal.cycles %}<p><strong>{{ cycle.title }}</strong> · premiere {{ cycle.premiere_date }}</p><ul>{% for occurrence in cycle.occurrences %}<li>{{ occurrence.role|title }}: {{ occurrence.date }} at {{ occurrence.time }} Eastern</li>{% endfor %}</ul>{% endfor %}</details>{% endif %}</div>{% empty %}<p role="alert">No valid premiere dates are configured. Review this show's weekly times.</p>{% endfor %}</fieldset>{% endif %}<button class="primary" type="submit">Confirm and queue preparation</button></form></section>{% endif %}
 {{ episodes|json_script:"queue-episodes" }}
-<section aria-label="Accepted media batches"><h2>Accepted batches</h2>
-{% for batch in batches %}<article class="list-card" id="batch-{{ batch.pk }}"><h3>Batch {{ batch.pk }} · {{ batch.label|default:"Media batch" }}</h3><p>{{ batch.target }} · {{ batch.get_status_display }}{% if batch.show_id %} · <a href="{% url 'bulk-premiere-planner' batch.show_id %}">Plan this show's premieres</a>{% endif %}</p>{% if batch.status == 'approved' or batch.status == 'blocked' or batch.status == 'failed' %}<form method="post" action="{% url 'media-batch-cancel' batch.pk %}" class="queue-batch-cancel">{% csrf_token %}<button type="submit">Remove from active queue</button><span class="helptext">Cancels queued work and keeps its history.</span></form>{% elif batch.status == 'cancelled' %}<form method="post" action="{% url 'media-batch-remove' batch.pk %}" class="queue-batch-remove">{% csrf_token %}<button type="submit">Remove from list</button><span class="helptext">Hides this cancelled batch but keeps its history.</span></form>{% endif %}<ol>
+<section aria-label="Accepted media batches" id="accepted-media-batches"><h2>Accepted batches</h2>
+{% for batch in batches %}<article class="list-card" id="batch-{{ batch.pk }}"><h3>Batch {{ batch.pk }} · {{ batch.label|default:"Media batch" }}</h3><p>{{ batch.target }} · {{ batch.get_status_display }}{% if batch.show_id %} · <a href="{% url 'bulk-premiere-planner' batch.show_id %}">Plan this show's premieres</a>{% endif %}</p>{% if batch.status == 'approved' or batch.status == 'blocked' or batch.status == 'failed' %}<form method="post" action="{% url 'media-batch-cancel' batch.pk %}" class="queue-batch-cancel">{% csrf_token %}<button type="submit">Remove from active queue</button><span class="helptext">Cancels queued work and keeps its history.</span></form>{% elif batch.status == 'cancelled' %}<form method="post" action="{% url 'media-batch-remove' batch.pk %}" class="queue-batch-remove">{% csrf_token %}<button type="submit">Remove from list</button><span class="helptext">Hides this cancelled batch but keeps its history.</span><span class="helptext" role="alert" data-remove-error hidden></span></form>{% endif %}<ol>
 {% for item in batch.items.all %}<li id="item-{{ item.pk }}"><p><strong>{{ item.asset.episode.title|default:item.asset.file_name }}</strong> · {{ item.asset.file_name }} · {{ item.asset.version }} · <span data-item-status>{{ item.get_execution_status_display }}</span></p><progress aria-label="Preparing {{ item.asset.file_name }}" hidden></progress><p class="helptext" data-item-blocker>{{ item.blocker }}</p>{% if batch.status != 'cancelled' %}<form method="post" action="{% url 'media-item-retry' item.pk %}" data-item-retry{% if item.execution_status != 'failed' and item.execution_status != 'blocked' %} hidden{% endif %}>{% csrf_token %}<button type="submit">Retry this item</button></form>{% endif %}</li>{% empty %}<li>No files.</li>{% endfor %}</ol></article>{% empty %}<p>No accepted media batches yet.</p>{% endfor %}
 </section>
 <script>
@@ -55,6 +55,31 @@
     } catch (error) { status.textContent = 'The local file chooser is unavailable.'; }
   });
   show.addEventListener('change', draw);
+})();
+</script>
+<script>
+(() => {
+  document.querySelectorAll('.queue-batch-remove').forEach((form) => {
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const button = form.querySelector('button'), error = form.querySelector('[data-remove-error]');
+      error.hidden = true; button.disabled = true;
+      try {
+        const response = await fetch(form.action, {method: 'POST', headers: {'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json'}, body: new FormData(form), credentials: 'same-origin'});
+        let result;
+        try { result = await response.json(); } catch (_) { throw new Error('This batch could not be removed.'); }
+        if (!response.ok) throw new Error(result.error || 'This batch could not be removed.');
+        const card = form.closest('article');
+        card.remove();
+        const section = document.getElementById('accepted-media-batches');
+        if (!section.querySelector('article')) {
+          const empty = document.createElement('p'); empty.textContent = 'No accepted media batches yet.'; section.append(empty);
+        }
+      } catch (err) {
+        error.textContent = err.message || 'This batch could not be removed. Try again.'; error.hidden = false; button.disabled = false;
+      }
+    });
+  });
 })();
 </script>
 {% endblock %}

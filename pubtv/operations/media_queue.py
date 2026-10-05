@@ -629,14 +629,22 @@ def remove_cancelled_media_batch(batch_id, *, actor="owner"):
 
 
 def media_batch_remove(request, batch_id):
+    wants_json = (
+        request.headers.get("X-Requested-With") == "XMLHttpRequest"
+        or "application/json" in request.headers.get("Accept", "")
+    )
     if request.method != "POST":
         return JsonResponse({"error": "POST required"}, status=405)
     try:
-        _batch, removed = remove_cancelled_media_batch(batch_id)
+        batch, removed = remove_cancelled_media_batch(batch_id)
     except PreparationBatch.DoesNotExist:
         return JsonResponse({"error": "Batch not found"}, status=404)
     except ValueError as exc:
+        if wants_json:
+            return JsonResponse({"error": str(exc)}, status=400)
         messages.error(request, str(exc))
     else:
+        if wants_json:
+            return JsonResponse({"removed": removed, "batch_id": batch.pk})
         messages.success(request, "This cancelled media batch was removed from the accepted list." if removed else "This media batch was already removed from the accepted list.")
     return redirect("media-queue")
