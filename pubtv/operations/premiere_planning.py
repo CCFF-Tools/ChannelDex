@@ -18,6 +18,7 @@ from django.utils import timezone
 
 from .models import Episode, RecurrenceSlot, Show, Station, WeeklyEpisodeAssignment
 from .services import active_premiere_slot, audit, materialize_assignment, occurrences_for_cycle
+from .active_station import resolve_active_station
 
 
 _SIGNER = TimestampSigner(salt="pubtv-bulk-premiere-planner")
@@ -217,7 +218,7 @@ def confirm_bulk_premiere_plan(*, token, actor="owner"):
 
 
 def bulk_premiere_planner(request, show_id):
-    station = Station.objects.first()
+    station = resolve_active_station(request)
     show = get_object_or_404(Show, pk=show_id, station=station)
     episodes = list(show.episodes.filter(status="pending").order_by("intended_air_order", "intended_premiere_date", "legacy_received_at", "pk"))
     selected_ids = request.POST.getlist("episode_ids") or request.GET.getlist("episode_ids")

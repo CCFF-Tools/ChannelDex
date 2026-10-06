@@ -120,9 +120,9 @@ class StationForm(forms.ModelForm):
         help_texts = {"timezone": "Scheduling stays in America/Detroit, independent of the Mac's timezone."}
 
     def clean_name(self):
-        name = self.cleaned_data["name"]
-        if name != "PUB-TV":
-            raise forms.ValidationError("V1 is limited to the PUB-TV station boundary.")
+        name = self.cleaned_data["name"].strip()
+        if Station.objects.filter(name__iexact=name).exclude(pk=self.instance.pk).exists():
+            raise forms.ValidationError("A station with this name already exists.")
         return name
 
 
@@ -153,8 +153,8 @@ class AutomationPreparationForm(forms.Form):
 
     def __init__(self, *args, station=None, **kwargs):
         super().__init__(*args, **kwargs)
-        self.fields["target"].queryset = Device.objects.all().order_by("name")
-        self.fields["assets"].queryset = MediaAsset.objects.filter(kind__in=("source", "encoded")).order_by("file_name", "pk")
+        self.fields["target"].queryset = Device.objects.filter(station=station).order_by("name") if station else Device.objects.none()
+        self.fields["assets"].queryset = (MediaAsset.objects.filter(episode__show__station=station, kind__in=("source", "encoded")).order_by("file_name", "pk") if station else MediaAsset.objects.none())
 
 
 class AutomationPublicationForm(forms.Form):
@@ -166,8 +166,8 @@ class AutomationPublicationForm(forms.Form):
 
     def __init__(self, *args, station=None, **kwargs):
         super().__init__(*args, **kwargs)
-        self.fields["target"].queryset = Device.objects.all().order_by("name")
-        self.fields["occurrences"].queryset = Occurrence.objects.filter(status="planned").select_related("show", "episode").order_by("starts_at")
+        self.fields["target"].queryset = Device.objects.filter(station=station).order_by("name") if station else Device.objects.none()
+        self.fields["occurrences"].queryset = (Occurrence.objects.filter(station=station, status="planned").select_related("show", "episode").order_by("starts_at") if station else Occurrence.objects.none())
 
     def clean(self):
         data = super().clean()
@@ -224,6 +224,16 @@ class DeviceForm(forms.ModelForm):
         model = Device
         fields = ["name"]
         help_texts = {"name": "The exact playback or schedule-upload device name."}
+
+    def __init__(self, *args, station=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.station = station
+
+    def clean_name(self):
+        name = self.cleaned_data["name"].strip()
+        if self.station and Device.objects.filter(station=self.station, name=name).exclude(pk=self.instance.pk).exists():
+            raise forms.ValidationError("A device with this name already exists on the active station.")
+        return name
 
 
 class ShowForm(forms.ModelForm):
@@ -545,7 +555,9 @@ class AssetTargetTransferForm(forms.ModelForm):
     def __init__(self, *args, station=None, **kwargs):
         super().__init__(*args, **kwargs)
         if station:
-            self.fields["device"].queryset = Device.objects.all().order_by("name")
+            self.fields["device"].queryset = Device.objects.filter(station=station).order_by("name")
+        else:
+            self.fields["device"].queryset = Device.objects.none()
         self.fields["transferred_at"].input_formats = ["%Y-%m-%dT%H:%M"]
 
 
@@ -563,6 +575,10 @@ class ProgrammingForm(forms.ModelForm):
             "device": "Choose the device programmed for this specific scheduled occurrence.",
             "slot_assignment": "Record the WinLGX slot or schedule position used for this occurrence; it does not carry forward to replays.",
         }
+
+    def __init__(self, *args, station=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["device"].queryset = Device.objects.filter(station=station).order_by("name") if station else Device.objects.none()
 
 
 class UploadForm(forms.ModelForm):

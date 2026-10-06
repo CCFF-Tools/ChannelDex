@@ -17,6 +17,7 @@ from .models import (Device, MediaAsset, Occurrence, OccurrenceRevisionSelection
     PreparationBatchItem, PublicationCycleSelection, SchedulePublicationBatch,
     UploadedOccurrenceCoverage, WeeklyEpisodeAssignment)
 from .services import audit
+from .active_station import resolve_active_station
 
 SALT = "channeldex.schedule-cycle-review.v1"
 
@@ -196,18 +197,19 @@ def _choices_from_ids(ids, asset_ids):
 
 
 def schedule_prepare(request):
-    context = {"targets": Device.objects.order_by("name")}
+    station = resolve_active_station(request)
+    context = {"targets": Device.objects.filter(station=station).order_by("name")}
     try:
         if request.method == "POST":
             if request.POST.get("action") == "confirm":
                 payload = signing.loads(request.POST.get("review_token", ""), salt=SALT, max_age=3600)
-                target = Device.objects.get(pk=payload["target_id"])
+                target = Device.objects.get(pk=payload["target_id"], station=station)
                 choices = _choices_from_ids(payload["ids"], payload["assets"])
                 batch = confirm_schedule_preparation(target, choices, payload["snapshot"],
                     review_token=payload["uuid"], confirm_replacements=request.POST.get("confirm_replacements") == "on")
                 messages.success(request, "Reviewed schedule plan saved. Waiting media can finish independently; delivery remains attended.")
                 return redirect(f"/schedule/delivery/?batch={batch.pk}#publication-{batch.pk}")
-            target = Device.objects.get(pk=request.POST.get("target"))
+            target = Device.objects.get(pk=request.POST.get("target"), station=station)
             ids = request.POST.getlist("assignment")
             assets = {str(pk): request.POST.get(f"asset_{pk}") for pk in ids}
             choices = _choices_from_ids(ids, assets)
@@ -220,7 +222,7 @@ def schedule_prepare(request):
             KeyError, Device.DoesNotExist, WeeklyEpisodeAssignment.DoesNotExist, MediaAsset.DoesNotExist) as exc:
         context["error"] = str(exc) if isinstance(exc, SchedulePreparationError) else "The proposal or selection is invalid or expired. Select all cycles and media versions again."
     assignments = WeeklyEpisodeAssignment.objects.filter(selection_type__in=("premiere", "rerun"), episode__isnull=False).select_related("show", "episode").order_by("-week_start", "pk")
-    requested_target = Device.objects.filter(pk=request.GET.get("target")).first() if request.method == "GET" else None
+    requested_target = Device.objects.filter(pk=request.GET.get("target"), station=station).first() if request.method == "GET" else None
     if requested_target:
         context["target"] = requested_target
     context["cycle_options"] = [(a, prepared_asset_suggestions(a, requested_target) if requested_target else MediaAsset.objects.filter(episode=a.episode).order_by("-pk")) for a in assignments]

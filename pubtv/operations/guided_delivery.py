@@ -23,6 +23,7 @@ from .models import (AuditEvent, Device, Episode, GuidedEpisodeDelivery,
                      WeeklyEpisodeAssignment)
 from .schedule_preparation import confirm_schedule_preparation, preview_schedule_preparation
 from .services import materialize_assignment
+from .active_station import resolve_active_station
 
 
 def _file_snapshot(path: str) -> dict:
@@ -286,13 +287,14 @@ def record_guided_rollback(delivery: GuidedEpisodeDelivery | int, operation, *, 
 
 
 def guided_delivery_view(request):
+    station = resolve_active_station(request)
     """Owner-facing entry and progress page; workers remain asynchronous."""
     if request.method == "POST":
         action = request.POST.get("action")
         try:
             if action == "start":
-                target = get_object_or_404(Device, pk=request.POST.get("target"))
-                show = get_object_or_404(Show, pk=request.POST.get("show"))
+                target = get_object_or_404(Device, pk=request.POST.get("target"), station=station)
+                show = get_object_or_404(Show, pk=request.POST.get("show"), station=station)
                 episode = Episode.objects.filter(pk=request.POST.get("episode"), show=show).first()
                 delivery = start_guided_encoded_delivery(target=target, show=show,
                     episode=episode, episode_title=request.POST.get("episode_title", ""),
@@ -300,7 +302,7 @@ def guided_delivery_view(request):
                     submission_token=request.POST.get("submission_token"))
                 messages.success(request, "Encoded intake recorded. Review the exact file, episode, target, and premiere cycle before confirmation.")
                 return redirect("guided-delivery")
-            delivery = get_object_or_404(GuidedEpisodeDelivery, pk=request.POST.get("delivery"))
+            delivery = get_object_or_404(GuidedEpisodeDelivery, pk=request.POST.get("delivery"), target__station=station, show__station=station)
             if action == "confirm":
                 confirm_guided_intake(delivery, premiere_date=date.fromisoformat(request.POST["premiere_date"]))
                 messages.success(request, "Premiere cycle confirmed and target-profile media work queued.")
@@ -345,7 +347,7 @@ def guided_delivery_view(request):
             return redirect("guided-delivery")
         except (ValueError, OSError, TypeError, KeyError) as exc:
             messages.error(request, str(exc))
-    deliveries = list(GuidedEpisodeDelivery.objects.select_related(
+    deliveries = list(GuidedEpisodeDelivery.objects.filter(target__station=station, show__station=station).select_related(
         "target", "show", "episode", "asset", "preparation_batch", "publication_batch",
         "cycle_assignment").order_by("-created_at")[:20])
     for delivery in deliveries:
@@ -356,8 +358,8 @@ def guided_delivery_view(request):
             from .publication_review import publication_review
             delivery.guided_review = publication_review(delivery.publication_batch)
     return render(request, "guided_delivery.html", {
-        "deliveries": deliveries, "targets": Device.objects.order_by("name"),
-        "shows": Show.objects.order_by("title"),
-        "episodes": Episode.objects.select_related("show").order_by("show__title", "title"),
+        "deliveries": deliveries, "targets": Device.objects.filter(station=station).order_by("name"),
+        "shows": Show.objects.filter(station=station).order_by("title"),
+        "episodes": Episode.objects.filter(show__station=station).select_related("show").order_by("show__title", "title"),
         "submission_token": uuid.uuid4(),
     })

@@ -420,7 +420,7 @@ from django.test import TransactionTestCase
 class LibraryIdentityBackfillTests(TransactionTestCase):
     def test_only_unambiguous_input_evidence_backfills_no_episode_number_guess(self):
         prior = [("operations", "0029_library_identity_metadata")]
-        latest = [("operations", "0030_media_relink_review")]
+        latest = [("operations", "0031_device_station")]
         executor = MigrationExecutor(connection); executor.migrate(prior)
         try:
             apps = executor.loader.project_state(prior).apps
