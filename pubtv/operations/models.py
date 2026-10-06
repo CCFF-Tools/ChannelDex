@@ -285,7 +285,19 @@ class Delivery(models.Model):
             raise ValidationError({"other_method": "Describe the other delivery method."})
 
 class Device(models.Model):
-    name = models.CharField(max_length=120, unique=True)
+    station = models.ForeignKey(Station, on_delete=models.CASCADE, related_name="devices")
+    name = models.CharField(max_length=120)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["station", "name"], name="unique_station_device_name")]
+
+    def save(self, *args, **kwargs):
+        # Keep legacy Python callers that construct Device(name=...) readable;
+        # database rows remain non-null and are assigned to canonical PUB-TV.
+        if self.station_id is None:
+            station = Station.objects.filter(name="PUB-TV").order_by("pk").first()
+            self.station = station or Station.objects.create(name="PUB-TV")
+        return super().save(*args, **kwargs)
 
     def __str__(self):
         return self.name

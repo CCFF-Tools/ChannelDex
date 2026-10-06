@@ -13,17 +13,18 @@ MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
     ("whitenoise.middleware.WhiteNoiseMiddleware" if importlib.util.find_spec("whitenoise") else "pubtv.config.static.StaticFilesMiddleware"),
     "django.middleware.csrf.CsrfViewMiddleware",
+    "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
 ]
-INSTALLED_APPS = ["django.contrib.contenttypes", "django.contrib.staticfiles", "django.contrib.messages", "django.forms", "pubtv.operations"]
+INSTALLED_APPS = ["django.contrib.contenttypes", "django.contrib.staticfiles", "django.contrib.sessions", "django.contrib.messages", "django.forms", "pubtv.operations"]
 FORM_RENDERER = "django.forms.renderers.TemplatesSetting"
 TEMPLATES = [{
     "BACKEND": "django.template.backends.django.DjangoTemplates",
     "DIRS": [BASE_DIR / "pubtv" / "templates"],
     "APP_DIRS": True,
-        "OPTIONS": {"context_processors": ["django.template.context_processors.request", "django.contrib.messages.context_processors.messages", "pubtv.config.settings.quit_enabled"]},
+        "OPTIONS": {"context_processors": ["django.template.context_processors.request", "django.contrib.messages.context_processors.messages", "pubtv.config.settings.quit_enabled", "pubtv.config.context_processors.active_station"]},
 }]
 
 def quit_enabled(request):  # noqa: ARG001

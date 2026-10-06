@@ -3,6 +3,7 @@ from pubtv.operations import views
 from pubtv.operations import media_queue, premiere_planning, schedule_preparation, guided_delivery
 
 urlpatterns = [
+    path("stations/switch/", views.switch_station, name="station-switch"),
     path("", views.dashboard, name="dashboard"),
     path("help/", views.help_page, name="help"),
     path("today/", views.dashboard, name="today"),

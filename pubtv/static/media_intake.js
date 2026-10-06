@@ -118,7 +118,9 @@
   });
   show.addEventListener('change', () => {rows = changeShow(rows, episodes, show.value); draw();
     status.textContent = 'Show changed. Only incompatible existing episode choices were cleared; titles, paths and metadata remain.';});
-  target.addEventListener('change', save);
+  const syncTarget = () => { show.disabled = !target.value; if (!target.value) show.value = ''; save(); };
+  target.addEventListener('change', syncTarget);
+  syncTarget();
   document.getElementById('apply-mode-button').addEventListener('click', () => {
     const mode = document.getElementById('apply-mode').value;
     if (modes.includes(mode)) {rows.forEach(row => {row.encoding_mode = mode;}); draw();}

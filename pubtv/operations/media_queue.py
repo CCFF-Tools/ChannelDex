@@ -24,6 +24,7 @@ from django.utils import timezone
 from .automation import approve_snapshot, canonical_hash, preparation_batch_snapshot, schedule_ready_binding, _sha256_file
 from .media_identity import asset_claim, file_metadata
 from .models import AuditEvent, Device, Episode, MediaAsset, MediaIntakeReview, MediaRelinkReview, PreparationBatch, PreparationBatchItem, PreparationJob, Show, UltraNexusTargetSettings
+from .active_station import resolve_active_station
 
 
 QUEUE_STATES = ("queued", "encoding", "validating", "transferring", "verifying", "ready", "blocked", "failed", "cancelled")
@@ -31,10 +32,10 @@ MAX_UPLOAD_BYTES = 50 * 1024 * 1024 * 1024
 SUPPORTED_VIDEO_SUFFIXES = {".mp4", ".mov", ".mxf", ".mpeg", ".mpg", ".m4v", ".avi", ".mkv"}
 
 
-def accepted_media_batches():
+def accepted_media_batches(station=None):
     """Return accepted batches, retaining cancelled ones until explicitly hidden."""
     return (
-        PreparationBatch.objects.filter(removed_from_list=False)
+        PreparationBatch.objects.filter(removed_from_list=False, **({"target__station": station} if station is not None else {}))
         .select_related("target")
         .prefetch_related("items__asset__episode")
         .order_by("-created_at")[:100]
@@ -212,9 +213,11 @@ def create_media_queue_batch(*, target, show, rows, submission_token=None, label
         raise
 
 
-def queue_summary():
+def queue_summary(station=None):
     """Return a polling-safe global summary without exposing private paths."""
     items = PreparationBatchItem.objects.select_related("batch", "asset", "asset__episode").order_by("batch__created_at", "position", "pk")
+    if station is not None:
+        items = items.filter(batch__target__station=station)
     counts = {state: 0 for state in QUEUE_STATES}
     rows = []
     for item in items:
@@ -379,10 +382,10 @@ def relink_media_asset(asset_id, path, *, actor="owner", expected_identity="", c
 def media_queue_summary(request):
     from .models import SchedulePublicationBatch
     from .schedule_preparation import publication_readiness
-    result = queue_summary()
+    result = queue_summary(resolve_active_station(request))
     result["publications"] = [{"id": batch.pk, **{
         key: value for key, value in publication_readiness(batch).items() if key != "waiting"
-    }} for batch in SchedulePublicationBatch.objects.select_related("target").order_by("-pk")[:100]]
+    }} for batch in SchedulePublicationBatch.objects.filter(target__station=resolve_active_station(request)).select_related("target").order_by("-pk")[:100]]
     response = JsonResponse(result)
     response["Cache-Control"] = "no-store"
     return response
@@ -390,15 +393,17 @@ def media_queue_summary(request):
 
 def intake_context(request):
     """Resolve show-context links without trusting unrelated query values."""
-    show = Show.objects.filter(pk=request.GET.get("show")).first() if request.GET.get("show") else None
-    if show is None and not request.GET.get("show") and Show.objects.count() == 1:
-        show = Show.objects.first()
+    station = resolve_active_station(request)
+    show = Show.objects.filter(pk=request.GET.get("show"), station=station).first() if request.GET.get("show") else None
+    if show is None and not request.GET.get("show"):
+        station_shows = Show.objects.filter(station=station).order_by("pk")
+        show = station_shows.first() if station_shows.count() == 1 else None
     episode = Episode.objects.filter(pk=request.GET.get("episode"), show=show).first() if show and request.GET.get("episode") else None
     asset = MediaAsset.objects.filter(pk=request.GET.get("asset"), episode=episode).first() if episode and request.GET.get("asset") else None
-    targets = Device.objects.order_by("name")
-    target = Device.objects.filter(pk=request.GET.get("target")).first() if request.GET.get("target") else None
+    targets = Device.objects.filter(station=station).order_by("name")
+    target = Device.objects.filter(pk=request.GET.get("target"), station=station).first() if request.GET.get("target") else None
     if target is None:
-        configured = Device.objects.filter(ultranexus_settings__is_current=True).order_by("name")
+        configured = Device.objects.filter(station=station, ultranexus_settings__is_current=True).order_by("name")
         target = configured.first() if configured.count() == 1 else (targets.first() if targets.count() == 1 else None)
     try:
         order = max(0, int(request.GET.get("order", "0")))
@@ -662,12 +667,13 @@ def confirm_intake_review(review, *, first_premiere_date=None, actor="owner"):
 
 
 def media_queue(request):
+    station = resolve_active_station(request)
     connected = intake_context(request)
     if request.method == "POST":
         action = request.POST.get("action", "prepare_only")
         if action in {"review", "review_intake"}:
-            show = Show.objects.filter(pk=request.POST.get("show")).first()
-            target = Device.objects.filter(pk=request.POST.get("target")).first()
+            show = Show.objects.filter(pk=request.POST.get("show"), station=station).first()
+            target = Device.objects.filter(pk=request.POST.get("target"), station=station).first()
             episode_id = request.POST.get("episode") or None
             episode = Episode.objects.filter(pk=episode_id, show=show).first() if show and episode_id else None
             asset_id = request.POST.get("asset") or None
@@ -726,12 +732,14 @@ def media_queue(request):
             else:
                 connected["error"] = "Choose a show and destination before reviewing this intake."
                 response_status = 400
-            batches = accepted_media_batches()
-            episodes = list(Episode.objects.order_by("show_id", "title").values("id", "show_id", "title"))
-            return render(request, "media_queue.html", {"batches": batches, "queue": queue_summary(), "targets": Device.objects.all(),
-                "shows": Show.objects.all(), "episodes": episodes, "submission_token": uuid.uuid4() if connected.get("reviewed") else request.POST.get("submission_token") or uuid.uuid4(), "connected": connected}, status=response_status)
+            batches = accepted_media_batches(station)
+            episodes = list(Episode.objects.filter(show__station=station).order_by("show_id", "title").values("id", "show_id", "title"))
+            return render(request, "media_queue.html", {"batches": batches, "queue": queue_summary(station), "targets": Device.objects.filter(station=station),
+                "shows": Show.objects.filter(station=station), "episodes": episodes, "submission_token": uuid.uuid4() if connected.get("reviewed") else request.POST.get("submission_token") or uuid.uuid4(), "connected": connected}, status=response_status)
         if action == "confirm_intake":
             review = get_object_or_404(MediaIntakeReview, token=request.POST.get("review_token"))
+            if review.show.station_id != station.pk or review.target.station_id != station.pk:
+                return HttpResponseBadRequest("This intake belongs to a different active station.")
             try:
                 batch, created = confirm_intake_review(
                     review, first_premiere_date=request.POST.get("first_premiere_date"),
@@ -744,9 +752,9 @@ def media_queue(request):
                 if review.action == "prepare_and_plan":
                     connected["premiere_candidates"] = _intake_candidate_context(review)
                 return render(request, "media_queue.html", {
-                    "batches": accepted_media_batches(),
-                    "queue": queue_summary(), "targets": Device.objects.all(), "shows": Show.objects.all(),
-                    "episodes": list(Episode.objects.order_by("show_id", "title").values("id", "show_id", "title")),
+                    "batches": accepted_media_batches(station),
+                    "queue": queue_summary(station), "targets": Device.objects.filter(station=station), "shows": Show.objects.filter(station=station),
+                    "episodes": list(Episode.objects.filter(show__station=station).order_by("show_id", "title").values("id", "show_id", "title")),
                     "submission_token": uuid.uuid4(), "connected": connected,
                 }, status=400)
             review.refresh_from_db()
@@ -770,13 +778,13 @@ def media_queue(request):
         # helpers remain available to old records/callers, but this endpoint
         # never copies uploads or hashes video during an HTTP request.
         connected["error"] = "Use Add episode files or an absolute local path, then review the intake."
-        return render(request, "media_queue.html", {"batches": accepted_media_batches(), "queue": queue_summary(),
-            "targets": Device.objects.all(), "shows": Show.objects.all(),
-            "episodes": list(Episode.objects.order_by("show_id", "title").values("id", "show_id", "title")),
+        return render(request, "media_queue.html", {"batches": accepted_media_batches(station), "queue": queue_summary(station),
+            "targets": Device.objects.filter(station=station), "shows": Show.objects.filter(station=station),
+            "episodes": list(Episode.objects.filter(show__station=station).order_by("show_id", "title").values("id", "show_id", "title")),
             "submission_token": request.POST.get("submission_token") or uuid.uuid4(), "connected": connected}, status=400)
-    batches = accepted_media_batches()
-    episodes = list(Episode.objects.order_by("show_id", "title").values("id", "show_id", "title"))
-    response = render(request, "media_queue.html", {"batches": batches, "queue": queue_summary(), "targets": Device.objects.all(), "shows": Show.objects.all(), "episodes": episodes, "submission_token": uuid.uuid4(), "connected": connected})
+    batches = accepted_media_batches(station)
+    episodes = list(Episode.objects.filter(show__station=station).order_by("show_id", "title").values("id", "show_id", "title"))
+    response = render(request, "media_queue.html", {"batches": batches, "queue": queue_summary(station), "targets": Device.objects.filter(station=station), "shows": Show.objects.filter(station=station), "episodes": episodes, "submission_token": uuid.uuid4(), "connected": connected})
     if connected["accepted"]:
         response.delete_cookie("media_intake_accepted")
     return response

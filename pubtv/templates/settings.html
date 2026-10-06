@@ -27,6 +27,16 @@
 </section>
 
 <section class="list-card">
+  <h2>Add channel</h2>
+  <p>Channel names are local owner data. Creating one selects it for this browser session.</p>
+  <form method="post" class="stacked-form">
+    {% csrf_token %}<input type="hidden" name="action" value="create_station">
+    {{ station_form.as_p }}
+    <button class="primary" type="submit">Create channel</button>
+  </form>
+</section>
+
+<section class="list-card">
   <h2>UltraNEXUS devices</h2>
   <p>Connection details and credentials belong to the station device they serve. Passwords are kept in the macOS login Keychain.</p>
   {% for device in devices %}<p><strong>{{ device.name }}</strong> <a class="button-link" href="{% url 'device-settings' device.pk %}">Configure device</a></p>{% empty %}<p>No playback devices configured.</p>{% endfor %}
@@ -63,7 +73,7 @@
 <section class="list-card">
   <h2>Database portability</h2>
   {% if pending_import %}<p class="alerts"><strong>Import pending:</strong> quit and reopen ChannelDex to activate the validated database.</p>{% endif %}
-  <p>Export a self-contained ChannelDex database snapshot and save it to a network share if you wish. It contains application records only—not your secret key, credentials, or media files.</p>
+  <p>Export a self-contained ChannelDex database snapshot and save it to a network share if you wish. It contains application records only. Your secret key, credentials, and media files stay separate.</p>
   <form method="post" action="{% url 'database-export' %}">
     {% csrf_token %}
     <button class="primary" type="submit">Export database</button>

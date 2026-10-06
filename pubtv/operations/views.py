@@ -32,6 +32,7 @@ from pubtv.ultranexus.secrets import device_secret_reference, new_device_secret_
 from pubtv.ultranexus.encoding import discover_executables
 from pubtv.ultranexus.ame_bridge import AMEBridge, bridge_root, plugin_manifest_path
 from .database_portability import export_database, stage_import, PortableDatabaseError
+from .active_station import resolve_active_station, switch_station as switch_active_station
 from pathlib import Path
 import re
 import subprocess
@@ -192,6 +193,12 @@ def _apply_carry_forward(request, station, week_start):
     return created
 
 
+@require_POST
+@csrf_protect
+def switch_station(request):
+    return switch_active_station(request)
+
+
 def _pending_queue(show):
     """Return the premiere queue using only stored fields; receipt is derived."""
     episodes = list(show.episodes.filter(status="pending").prefetch_related("deliveries"))
@@ -199,7 +206,7 @@ def _pending_queue(show):
     return sorted(episodes, key=lambda item: (item.intended_air_order is None, item.intended_air_order or 0, item.received_at or missing_receipt, item.pk))
 
 def dashboard(request):
-    station = Station.objects.first()
+    station = resolve_active_station(request)
     try:
         selected = date.fromisoformat(request.GET.get("date", "")) if request.GET.get("date") else timezone.localdate()
     except ValueError:
@@ -244,7 +251,8 @@ def dashboard(request):
 
 
 def occurrence_workbench(request, pk):
-    occurrence = get_object_or_404(Occurrence.objects.select_related("station", "show", "episode", "asset", "weekly_assignment", "recurrence_slot", "preparation"), pk=pk)
+    station = resolve_active_station(request)
+    occurrence = get_object_or_404(Occurrence.objects.select_related("station", "show", "episode", "asset", "weekly_assignment", "recurrence_slot", "preparation"), pk=pk, station=station)
     preparation = getattr(occurrence, "preparation", None)
     asset_preparation = getattr(occurrence.asset, "preparation_record", None) if occurrence.asset_id else None
     transfers = list(occurrence.asset.target_transfers.select_related("device").order_by("device__name", "pk")) if occurrence.asset_id else []
@@ -259,7 +267,14 @@ def occurrence_workbench(request, pk):
 
 
 def settings_view(request):
-    station = Station.objects.first()
+    station = resolve_active_station(request)
+    station_form = StationForm(request.POST if request.method == "POST" and request.POST.get("action") == "create_station" else None)
+    if request.method == "POST" and request.POST.get("action") == "create_station":
+        if station_form.is_valid():
+            station = station_form.save()
+            request.session["active_station_id"] = station.pk
+            messages.success(request, f"Channel {station.name} created and selected.")
+            return redirect("settings")
     form_data = request.POST if request.method == "POST" else None
     carry_forward_form = CarryForwardSettingsForm(form_data, instance=station) if station else None
     if request.method == "POST" and carry_forward_form and carry_forward_form.is_valid():
@@ -275,7 +290,7 @@ def settings_view(request):
         messages.success(request, "Schedule carry-forward setting updated.")
         return redirect("settings")
     pending_import = Path(django_settings.DATA_DIR) / ".staged-channeldex-import.sqlite3"
-    return render(request, "settings.html", {"station": station, "devices": Device.objects.all().order_by("name"), "carry_forward_form": carry_forward_form, "pending_import": pending_import.exists()})
+    return render(request, "settings.html", {"station": station, "devices": Device.objects.filter(station=station).order_by("name"), "carry_forward_form": carry_forward_form, "station_form": station_form, "pending_import": pending_import.exists()})
 
 
 @require_POST
@@ -319,7 +334,7 @@ def help_page(request):
 
 
 def device_settings(request, pk):
-    target = get_object_or_404(Device, pk=pk)
+    target = get_object_or_404(Device, pk=pk, station=resolve_active_station(request))
     current = UltraNexusTargetSettings.objects.filter(target=target, is_current=True).first()
     plugin_manifest = plugin_manifest_path(django_settings.DATA_DIR)
     def page_context(form, **extra):
@@ -566,12 +581,13 @@ def _browse_path(request):
 
 
 def _automation_context(request, *, form_p=None, form_s=None, message=""):
+    station = resolve_active_station(request)
     target_id = request.GET.get("target") or request.POST.get("target")
-    target = Device.objects.filter(pk=target_id).first() if target_id else Device.objects.order_by("name").first()
+    target = Device.objects.filter(pk=target_id, station=station).first() if target_id else Device.objects.filter(station=station).order_by("name").first()
     gates = list(ResearchGate.objects.filter(target=target).order_by("key")) if target else []
     preview = None
     if target:
-        selected = list(Occurrence.objects.filter(status="planned").select_related("show", "episode", "asset").order_by("starts_at"))
+        selected = list(Occurrence.objects.filter(station=station, status="planned").select_related("show", "episode", "asset").order_by("starts_at"))
         preview = preview_schedule(selected, target=target)
     current_settings = UltraNexusTargetSettings.objects.filter(target=target, is_current=True).first() if target else None
     settings_initial = None
@@ -614,7 +630,7 @@ def _automation_context(request, *, form_p=None, form_s=None, message=""):
             "nmg_schedule_template_base": current_settings.settings.get("nmg_schedule_template_base"),
             "capability_flags": ",".join(current_settings.capability_flags or []),
         }
-    publication_batches = list(SchedulePublicationBatch.objects.select_related("target").prefetch_related(
+    publication_batches = list(SchedulePublicationBatch.objects.filter(target__station=station).select_related("target").prefetch_related(
         "occurrence_selections__occurrence", "artifact_revisions", "delivery_operations"
     ).order_by("-created_at")[:12])
     from .schedule_preparation import publication_readiness
@@ -631,20 +647,21 @@ def _automation_context(request, *, form_p=None, form_s=None, message=""):
                                       "schedule_transferred", "activation_requested", "activation_acknowledged",
                                       "activation_observed", "ambiguous",
                                   })})
-    return {"station": Station.objects.first(), "targets": Device.objects.order_by("name"), "target": target,
-            "research_gates": gates, "preparation_batches": PreparationBatch.objects.select_related("target").prefetch_related("items__asset").order_by("-created_at")[:12],
+    return {"station": station, "targets": Device.objects.filter(station=station).order_by("name"), "target": target,
+            "research_gates": gates, "preparation_batches": PreparationBatch.objects.filter(target__station=station).select_related("target").prefetch_related("items__asset").order_by("-created_at")[:12],
             "publication_batches": publication_batches, "publication_cards": publication_cards,
-            "preparation_form": form_p or AutomationPreparationForm(), "publication_form": form_s or AutomationPublicationForm(),
+            "preparation_form": form_p or AutomationPreparationForm(station=station), "publication_form": form_s or AutomationPublicationForm(station=station),
             "settings_form": UltraNexusSettingsForm(initial=settings_initial),
             "schedule_preview": preview, "automation_message": message}
 
 
 def automation_dashboard(request):
     """Owner-facing two approval workflow; all external work remains gated."""
+    station = resolve_active_station(request)
     if request.method == "POST":
         action = request.POST.get("action", "")
         if action == "create_delivery_publication":
-            item = get_object_or_404(PreparationBatchItem.objects.select_related("batch", "occurrence"), pk=request.POST.get("item"))
+            item = get_object_or_404(PreparationBatchItem.objects.select_related("batch", "occurrence"), pk=request.POST.get("item"), batch__target__station=station)
             if not item.occurrence_id:
                 messages.info(request, "Select confirmed premiere cycles in Review schedule.")
                 return redirect("schedule-prepare")
@@ -668,7 +685,7 @@ def automation_dashboard(request):
         if action == "save_target_settings":
             return redirect("device-settings", pk=request.POST.get("target"))
         if action == "create_preparation":
-            form = AutomationPreparationForm(request.POST)
+            form = AutomationPreparationForm(request.POST, station=resolve_active_station(request))
             if form.is_valid():
                 batch = PreparationBatch.objects.create(target=form.cleaned_data["target"], label=form.cleaned_data["label"] or "Preparation batch")
                 for position, asset in enumerate(form.cleaned_data["assets"]):
@@ -677,7 +694,7 @@ def automation_dashboard(request):
                 return redirect("schedule-delivery")
             return render(request, "ultranexus_automation.html", _automation_context(request, form_p=form))
         if action == "toggle_preparation_item":
-            item = get_object_or_404(PreparationBatchItem.objects.select_related("batch"), pk=request.POST.get("item"))
+            item = get_object_or_404(PreparationBatchItem.objects.select_related("batch"), pk=request.POST.get("item"), batch__target__station=station)
             if item.batch.approval_1_status == "approved":
                 messages.error(request, "The encoding choice is frozen by Approval 1. Create a new batch to change it.")
             else:
@@ -686,7 +703,7 @@ def automation_dashboard(request):
                 messages.success(request, "Media preparation choice updated.")
             return redirect("schedule-delivery")
         if action == "approve_preparation":
-            batch = get_object_or_404(PreparationBatch, pk=request.POST.get("batch"))
+            batch = get_object_or_404(PreparationBatch, pk=request.POST.get("batch"), target__station=station)
             try:
                 approve_preparation_batch(batch)
                 batch.status = "approved"; batch.save(update_fields=["status"])
@@ -702,7 +719,7 @@ def automation_dashboard(request):
             messages.info(request, "Review and retry individual items in Media Preparation.")
             return redirect("media-queue")
         if action == "create_publication":
-            form = AutomationPublicationForm(request.POST)
+            form = AutomationPublicationForm(request.POST, station=resolve_active_station(request))
             if form.is_valid():
                 batch = SchedulePublicationBatch(
                     target=form.cleaned_data["target"],
@@ -721,9 +738,9 @@ def automation_dashboard(request):
             try:
                 with transaction.atomic():
                     selection_ref = get_object_or_404(OccurrenceRevisionSelection.objects.select_related("publication_batch"),
-                                                      pk=request.POST.get("selection"))
+                                                      pk=request.POST.get("selection"), publication_batch__target__station=station)
                     Device.objects.select_for_update().get(pk=selection_ref.publication_batch.target_id)
-                    batch = SchedulePublicationBatch.objects.select_for_update().get(pk=selection_ref.publication_batch_id)
+                    batch = SchedulePublicationBatch.objects.select_for_update().get(pk=selection_ref.publication_batch_id, target__station=station)
                     if batch.status == "cancelled":
                         raise ValueError("Cancelled publications cannot be edited")
                     if batch.activated_at or batch.delivery_operations.filter(state__in=ScheduleDeliveryOperation.ACTIVE).exists():
@@ -748,7 +765,7 @@ def automation_dashboard(request):
         if action == "approve_publication":
             batch_id = request.POST.get("batch")
             with transaction.atomic():
-                initial = get_object_or_404(SchedulePublicationBatch, pk=batch_id)
+                initial = get_object_or_404(SchedulePublicationBatch, pk=batch_id, target__station=station)
                 Device.objects.select_for_update().get(pk=initial.target_id)
                 batch = SchedulePublicationBatch.objects.select_for_update().select_related("target").get(pk=batch_id)
                 selection_ids = list(batch.occurrence_selections.values_list("occurrence_id", flat=True))
@@ -804,7 +821,7 @@ def automation_dashboard(request):
                 messages.success(request, "Approval 2 recorded. No schedule coverage is created by approval.")
             return redirect("schedule-delivery")
         if action == "review_publication":
-            batch = get_object_or_404(SchedulePublicationBatch, pk=request.POST.get("batch"))
+            batch = get_object_or_404(SchedulePublicationBatch, pk=request.POST.get("batch"), target__station=station)
             try:
                 snapshot = capture_controller_snapshot(batch)
                 review = publication_review(batch, snapshot)
@@ -819,7 +836,7 @@ def automation_dashboard(request):
                 messages.error(request, "Controller review failed: " + str(exc))
             return redirect("schedule-delivery")
         if action == "cancel_publication":
-            batch = get_object_or_404(SchedulePublicationBatch, pk=request.POST.get("batch"))
+            batch = get_object_or_404(SchedulePublicationBatch, pk=request.POST.get("batch"), target__station=station)
             try:
                 cancel_publication(batch.pk)
             except ValueError as exc:
@@ -828,7 +845,7 @@ def automation_dashboard(request):
                 messages.success(request, "Publication cancelled. Prepared media and audit records were retained.")
             return redirect("schedule-delivery")
         if action == "generate_nmg":
-            batch = get_object_or_404(SchedulePublicationBatch, pk=request.POST.get("batch"))
+            batch = get_object_or_404(SchedulePublicationBatch, pk=request.POST.get("batch"), target__station=station)
             try:
                 artifact = generate_nmg_artifact(batch)
                 messages.success(request, f"Generated and validated NMG revision {artifact.revision}: {artifact.content_hash}")
@@ -836,7 +853,7 @@ def automation_dashboard(request):
                 messages.error(request, str(exc))
             return redirect("schedule-delivery")
         if action == "generate_bin":
-            batch = get_object_or_404(SchedulePublicationBatch, pk=request.POST.get("batch"))
+            batch = get_object_or_404(SchedulePublicationBatch, pk=request.POST.get("batch"), target__station=station)
             key = f"generate-bin-{batch.pk}-{batch.controller_snapshot_hash or 'unpulled'}"
             job, created = PublicationJob.objects.get_or_create(
                 idempotency_key=key, defaults={"publication_batch": batch, "kind": "generate_bin"})
@@ -846,7 +863,7 @@ def automation_dashboard(request):
             messages.success(request, f"BIN generation queued (job {job.pk}); worker status is visible in the job record.")
             return redirect("schedule-delivery")
         if action == "stage_publication":
-            batch = get_object_or_404(SchedulePublicationBatch, pk=request.POST.get("batch"))
+            batch = get_object_or_404(SchedulePublicationBatch, pk=request.POST.get("batch"), target__station=station)
             if request.POST.get("confirm_stage") != "on":
                 messages.error(request, "Confirm the reviewed BIN hash before staging.")
             else:
@@ -860,7 +877,7 @@ def automation_dashboard(request):
                     messages.error(request, "Staging failed; review the operation and remote schedule before retrying.")
             return redirect("schedule-delivery")
         if action == "activate_publication":
-            batch = get_object_or_404(SchedulePublicationBatch, pk=request.POST.get("batch"))
+            batch = get_object_or_404(SchedulePublicationBatch, pk=request.POST.get("batch"), target__station=station)
             operation = batch.delivery_operations.order_by("-pk").first()
             if request.POST.get("confirm_activate") != "on" or not operation:
                 messages.error(request, "A staged operation and final confirmation are required.")
@@ -875,7 +892,7 @@ def automation_dashboard(request):
                     messages.error(request, "Activation is uncertain or blocked; review the operation and controller evidence.")
             return redirect("schedule-delivery")
         if action == "observe_publication":
-            batch = get_object_or_404(SchedulePublicationBatch, pk=request.POST.get("batch"))
+            batch = get_object_or_404(SchedulePublicationBatch, pk=request.POST.get("batch"), target__station=station)
             operation = batch.delivery_operations.order_by("-pk").first()
             if not operation or request.POST.get("confirm_observation") != "on":
                 messages.error(request, "Confirm independent activation evidence for a specific operation.")
@@ -892,7 +909,7 @@ def automation_dashboard(request):
                     messages.error(request, "Activation evidence was not accepted; review the operation.")
             return redirect("schedule-delivery")
         if action == "rollback_publication":
-            batch = get_object_or_404(SchedulePublicationBatch, pk=request.POST.get("batch"))
+            batch = get_object_or_404(SchedulePublicationBatch, pk=request.POST.get("batch"), target__station=station)
             operation = batch.delivery_operations.order_by("-pk").first()
             if not operation or request.POST.get("confirm_rollback") != "on":
                 messages.error(request, "Confirm a specific known-good rollback before restoring it.")
@@ -910,7 +927,8 @@ def automation_dashboard(request):
 
 
 def device_list(request):
-    return render(request, "device_list.html", {"devices": Device.objects.all().order_by("name")})
+    station = resolve_active_station(request)
+    return render(request, "device_list.html", {"devices": Device.objects.filter(station=station).order_by("name"), "station": station})
 
 
 def schedule_view(request):
@@ -926,7 +944,7 @@ def schedule_view(request):
     return day_view(request)
 
 def scheduling_today(request):
-    station = Station.objects.first()
+    station = resolve_active_station(request)
     try:
         selected = date.fromisoformat(request.GET.get("date", "")) if request.GET.get("date") else timezone.localdate()
     except ValueError:
@@ -955,7 +973,7 @@ def scheduling_today(request):
 
 def reserved_schedule(request):
     """Show upcoming recurring show reservations at their full slot length."""
-    station = Station.objects.first()
+    station = resolve_active_station(request)
     try:
         selected = date.fromisoformat(request.GET.get("date", "")) if request.GET.get("date") else timezone.localdate()
     except ValueError:
@@ -1002,7 +1020,7 @@ def reserved_schedule(request):
     })
 
 def show_list(request):
-    station = Station.objects.first()
+    station = resolve_active_station(request)
     show_type = request.GET.get("show_type", "")
     sort = request.GET.get("sort", "title")
     valid_sorts = {"title", "code", "show_type", "episodes", "weekly_time"}
@@ -1043,12 +1061,13 @@ def show_list(request):
     })
 
 def show_detail(request, show_id):
+    station = resolve_active_station(request)
     show = get_object_or_404(
         Show.objects.prefetch_related(
             "occurrences__episode", "occurrences__programming",
             "occurrences__airing_evidence", "slots"
         ),
-        pk=show_id,
+        pk=show_id, station=station,
     )
     pending = _pending_queue(show)
     episodes = sorted(
@@ -1065,7 +1084,7 @@ def show_detail(request, show_id):
     return render(request, "show_detail.html", {"show": show, "pending": pending, "episodes": episodes})
 
 def episode_queue_reorder(request, show_id):
-    station = Station.objects.first()
+    station = resolve_active_station(request)
     show = get_object_or_404(Show, pk=show_id, station=station)
     if request.method != "POST":
         return HttpResponseBadRequest("Queue changes must be submitted with POST.")
@@ -1100,18 +1119,19 @@ def episode_queue_reorder(request, show_id):
     return redirect("show-detail", show_id=show.pk)
 
 def episode_detail(request, pk):
+    station = resolve_active_station(request)
     episode = get_object_or_404(
         Episode.objects.select_related("show", "producer").prefetch_related(
             "assets__preparation_record", "assets__target_transfers", "deliveries",
             "occurrences__programming", "occurrences__airing_evidence",
             "workflow_milestones",
         ),
-        pk=pk,
+        pk=pk, show__station=station,
     )
     return render(request, "episode_detail.html", {"episode": episode})
 
 def episode_list(request):
-    station = Station.objects.first()
+    station = resolve_active_station(request)
     episodes = Episode.objects.filter(show__station=station).select_related("show").prefetch_related(
         "deliveries", "workflow_milestones", "assets__preparation_record",
         "assets__target_transfers", "occurrences__programming",
@@ -1122,7 +1142,7 @@ def episode_list(request):
 
 def media_library(request):
     """Library, local availability and destination evidence stay distinct."""
-    station = Station.objects.first()
+    station = resolve_active_station(request)
     episodes = Episode.objects.filter(show__station=station).select_related("show").prefetch_related(
         "assets__preparation_batch_items__batch", "assets__ultranexus_bindings__local_inspection", "assets__ultranexus_bindings__target"
     ) if station else Episode.objects.none()
@@ -1167,16 +1187,20 @@ def media_library(request):
 def media_asset_relink(request, asset_id):
     if request.method != "POST":
         return JsonResponse({"error": "POST required"}, status=405)
+    station = resolve_active_station(request)
+    asset = MediaAsset.objects.filter(pk=asset_id, episode__show__station=station).first()
+    if asset is None:
+        return JsonResponse({"error": "Asset is outside the active station."}, status=404)
     try:
         action = request.POST.get("action", "review")
         if action == "confirm":
-            asset, changed = confirm_relink_review(request.POST.get("review_token"), asset_id=asset_id)
+            asset, changed = confirm_relink_review(request.POST.get("review_token"), asset_id=asset.pk)
             review = MediaRelinkReview.objects.get(token=request.POST.get("review_token"), asset_id=asset_id)
             return JsonResponse({**relink_review_result(review), "changed": changed})
         if action == "status":
-            review = get_object_or_404(MediaRelinkReview, asset_id=asset_id, token=request.POST.get("review_token"))
+            review = get_object_or_404(MediaRelinkReview, asset=asset, token=request.POST.get("review_token"))
         elif action == "review":
-            review = begin_relink_review(asset_id, request.POST.get("path", ""))
+            review = begin_relink_review(asset.pk, request.POST.get("path", ""))
         else:
             raise ValueError("Unsupported relink action.")
         response = JsonResponse(relink_review_result(review))
@@ -1187,7 +1211,7 @@ def media_asset_relink(request, asset_id):
 
 
 def occurrence_create(request):
-    station = Station.objects.first()
+    station = resolve_active_station(request)
     if not station: return HttpResponseBadRequest("Create a station first")
     initial = {key: value for key in ("show", "episode") if request.GET.get(key) and (Show.objects.filter(pk=request.GET[key], station=station).exists() if key == "show" else Episode.objects.filter(pk=request.GET[key], show__station=station).exists())}
     form = OccurrenceForm(request.POST or None, station=station, initial=initial)
@@ -1199,7 +1223,7 @@ def occurrence_create(request):
     return render(request, "occurrence_form.html", {"form": form, "title": "Add to schedule"})
 
 def occurrence_edit(request, pk):
-    occurrence = get_object_or_404(Occurrence, pk=pk)
+    occurrence = get_object_or_404(Occurrence, pk=pk, station=resolve_active_station(request))
     if request.method == "POST":
         expected = request.POST.get("expected_revision")
         form = OccurrenceForm(request.POST, instance=occurrence, station=occurrence.station)
@@ -1223,14 +1247,22 @@ def occurrence_edit(request, pk):
     return render(request, "occurrence_form.html", {"form": form, "title": "Edit schedule item", "occurrence": occurrence})
 
 def _crud(request, model, form_class, title, pk=None, initial=None, extra_context=None):
-    obj = get_object_or_404(model, pk=pk) if pk else None
-    scoped = {ShowForm, AssetForm, DeliveryForm}
+    station = resolve_active_station(request)
+    obj = get_object_or_404(model, pk=pk, station=station) if pk and model is Device else (get_object_or_404(model, pk=pk) if pk else None)
+    scoped = {ShowForm, AssetForm, DeliveryForm, DeviceForm}
     kwargs = {"instance": obj}
     if form_class in scoped:
-        kwargs["station"] = Station.objects.first()
+        kwargs["station"] = station
     form = form_class(request.POST or None, initial=initial, **kwargs)
     if request.method == "POST" and form.is_valid():
-        obj = form.save(); audit("update" if pk else "create", model.__name__, obj, title)
+        obj = form.save(commit=False)
+        if isinstance(obj, Device):
+            obj.station = station
+        obj.full_clean()
+        obj.save()
+        if hasattr(form, "save_m2m"):
+            form.save_m2m()
+        audit("update" if pk else "create", model.__name__, obj, title)
         messages.success(request, f"{title} saved.")
         if isinstance(obj, Show): return redirect("show-detail", show_id=obj.pk)
         if isinstance(obj, MediaAsset) and obj.episode_id: return redirect("episode-detail", pk=obj.episode_id)
@@ -1249,7 +1281,11 @@ def _crud(request, model, form_class, title, pk=None, initial=None, extra_contex
     context.update(extra_context or {})
     return render(request, "simple_form.html", context)
 def setup_station(request):
-    existing = Station.objects.first()
+    existing = resolve_active_station(request)
+    if request.method == "POST" and request.POST.get("name") != "PUB-TV":
+        form = StationForm(request.POST, instance=existing)
+        form.add_error("name", "Station setup remains the PUB-TV boundary. Add another channel from Settings.")
+        return render(request, "simple_form.html", {"form": form, "title": "Station setup", "intro": "Edit the canonical PUB-TV station settings."})
     return _crud(request, Station, StationForm, "Station setup", pk=existing.pk if existing else None)
 def setup_device(request): return _crud(request, Device, DeviceForm, "Device setup")
 def show_create(request):
@@ -1258,13 +1294,13 @@ def show_create(request):
         extra_context={"producer_url": "/producers/new/?popup=1"},
     )
 def show_edit(request, show_id):
-    station = Station.objects.first()
+    station = resolve_active_station(request)
     show = get_object_or_404(Show, pk=show_id, station=station)
     return _crud(request, Show, ShowForm, "Edit show", pk=show.pk)
 
 @xframe_options_sameorigin
 def producer_create(request):
-    station = Station.objects.first()
+    station = resolve_active_station(request)
     if not station:
         return HttpResponseBadRequest("Create a station first")
     show = Show.objects.filter(pk=request.GET.get("show"), station=station).first()
@@ -1296,7 +1332,7 @@ def producer_create(request):
     })
 
 def _episode_create(request, reference=None):
-    station = Station.objects.first()
+    station = resolve_active_station(request)
     show = reference.show if reference else (
         get_object_or_404(Show, pk=request.GET.get("show"), station=station)
         if request.GET.get("show") and station else None
@@ -1342,7 +1378,7 @@ def episode_create(request):
 
 
 def episode_duplicate(request, pk):
-    station = Station.objects.first()
+    station = resolve_active_station(request)
     reference = get_object_or_404(
         Episode.objects.select_related("show", "producer"),
         pk=pk,
@@ -1351,7 +1387,7 @@ def episode_duplicate(request, pk):
     return _episode_create(request, reference=reference)
 
 def episode_edit(request, pk):
-    station = Station.objects.first()
+    station = resolve_active_station(request)
     episode = get_object_or_404(Episode, pk=pk, show__station=station)
     selected_producer = Producer.objects.filter(pk=request.GET.get("producer"), station=station).first()
     form = EpisodeForm(
@@ -1372,7 +1408,7 @@ def episode_edit(request, pk):
     })
 
 def episode_milestone_create(request, pk):
-    station = Station.objects.first()
+    station = resolve_active_station(request)
     episode = get_object_or_404(Episode, pk=pk, show__station=station)
     if request.method != "GET":
         messages.info(request, "Workflow milestones are now derived from delivery, asset, transfer, programming, and upload facts.")
@@ -1397,19 +1433,19 @@ def episode_milestone_create(request, pk):
         "stage_help": EpisodeMilestoneForm.STAGE_HELP,
     })
 def asset_create(request):
-    station = Station.objects.first()
+    station = resolve_active_station(request)
     episode = get_object_or_404(Episode, pk=request.GET.get("episode"), show__station=station) if request.GET.get("episode") and station else None
     return _crud(request, MediaAsset, AssetForm, "Record media asset", initial={"episode": episode.pk} if episode else None)
 def asset_edit(request, pk):
-    station = Station.objects.first()
+    station = resolve_active_station(request)
     asset = get_object_or_404(MediaAsset, pk=pk, episode__show__station=station)
     return _crud(request, MediaAsset, AssetForm, "Edit media asset", pk=asset.pk)
 def delivery_create(request):
-    station = Station.objects.first()
+    station = resolve_active_station(request)
     episode = get_object_or_404(Episode, pk=request.GET.get("episode"), show__station=station) if request.GET.get("episode") and station else None
     return _crud(request, Delivery, DeliveryForm, "Record delivery", initial={"episode": episode.pk} if episode else None)
 def slot_create(request):
-    station = Station.objects.first()
+    station = resolve_active_station(request)
     if not station:
         return HttpResponseBadRequest("Create a station first")
     show = Show.objects.filter(pk=request.GET.get("show"), station=station).first()
@@ -1429,7 +1465,7 @@ def slot_create(request):
     return render(request, "simple_form.html", {"form": form, "title": "Add weekly time slot", "advanced_fields": True, "hide_duration": bool(show and show.slot_duration_seconds), "intro": "Add one weekly air time. Mark exactly one active time as the new-episode premiere slot; the other times are replays."})
 
 def slot_edit(request, pk):
-    station = Station.objects.first()
+    station = resolve_active_station(request)
     slot = get_object_or_404(RecurrenceSlot, pk=pk, station=station)
     form = SlotForm(request.POST or None, instance=slot, station=station, show=slot.show)
     if request.method == "POST" and form.is_valid():
@@ -1466,7 +1502,7 @@ def slot_edit(request, pk):
     return render(request, "simple_form.html", {"form": form, "title": "Edit weekly time slot", "advanced_fields": True, "hide_duration": bool(slot.show.slot_duration_seconds), "intro": "Effective dates preserve historical definitions. Leave them blank for an ongoing time slot."})
 
 def show_slot_duration_edit(request, show_id):
-    station = Station.objects.first()
+    station = resolve_active_station(request)
     show = get_object_or_404(Show, pk=show_id, station=station)
     form = ShowSlotDurationForm(request.POST or None, instance=show)
     if request.method == "POST" and form.is_valid():
@@ -1480,7 +1516,7 @@ def show_slot_duration_edit(request, show_id):
     })
 
 def show_slot_manager(request, show_id):
-    station = Station.objects.first()
+    station = resolve_active_station(request)
     show = get_object_or_404(Show, pk=show_id, station=station)
     if request.GET.get("legacy") != "1":
         return redirect(f"/shows/{show.pk}/#weekly-times")
@@ -1493,7 +1529,7 @@ def show_slot_manager(request, show_id):
         warning = f"This show currently has {premiere_count} active premiere slots; it needs exactly one."
     return render(request, "slot_manager.html", {"show": show, "slots": slots, "today": today, "warning": warning})
 def assignment_create(request):
-    station = Station.objects.first()
+    station = resolve_active_station(request)
     initial = {}
     selected_show = None
     form_data = request.POST or None
@@ -1628,7 +1664,7 @@ def assignment_create(request):
         "premiere_setup_missing": bool(selected_show and not next_premiere_date(selected_show)),
     })
 def day_view(request):
-    station = Station.objects.first()
+    station = resolve_active_station(request)
     try:
         selected = date.fromisoformat(request.GET.get("date", "")) if request.GET.get("date") else timezone.localdate()
     except ValueError:
@@ -1667,7 +1703,7 @@ def day_view(request):
     return render(request, "calendar_day.html", {"title": "Day plan", "occurrences": occurrences, "timeline": timeline, "selected_date": selected, "previous_date": selected - timedelta(days=1), "next_date": selected + timedelta(days=1), "capacity": capacity, "capacity_filter": request.GET.get("capacity", "all"), "show_type_filter": show_type, "show_types": Show.SHOW_TYPES, "coverage_label": _human_duration(covered), "alerts": _alerts(occurrences)})
 
 def week_view(request):
-    station = Station.objects.first()
+    station = resolve_active_station(request)
     try:
         selected = date.fromisoformat(request.GET.get("date", "")) if request.GET.get("date") else timezone.localdate()
     except ValueError:
@@ -1732,7 +1768,7 @@ def agenda_view(request):
         days = min(max(int(request.GET.get("days", "7")), 1), 31)
     except ValueError:
         return HttpResponseBadRequest("Invalid range")
-    station = Station.objects.first()
+    station = resolve_active_station(request)
     start = timezone.localdate()
     end = start + timedelta(days=days)
     if station:
@@ -1753,11 +1789,12 @@ def agenda_view(request):
     for item in occurrences: item.readiness = preparation_readiness(item)
     return render(request, "calendar_agenda.html", {"title": "Upcoming agenda", "occurrences": occurrences, "selected_date": start, "alerts": _alerts(occurrences)})
 def history_view(request):
+    station = resolve_active_station(request)
     tab = request.GET.get("tab", "uploads")
-    if tab not in {"uploads", "air", "audit"}: tab = "uploads"
-    uploads = UploadedScheduleRevision.objects.all().order_by("-uploaded_at")
-    evidence = AiringEvidence.objects.all().order_by("-aired_at")
-    audit_events = AuditEvent.objects.all().order_by("-occurred_at")
+    if tab not in {"uploads", "air"}: tab = "uploads"
+    uploads = UploadedScheduleRevision.objects.filter(device__station=station).order_by("-uploaded_at")
+    evidence = AiringEvidence.objects.filter(occurrence__station=station).order_by("-aired_at")
+    audit_events = AuditEvent.objects.none()
     query = request.GET.get("q", "").strip()
     if query:
         uploads = uploads.filter(external_reference__icontains=query)
@@ -1765,7 +1802,8 @@ def history_view(request):
         audit_events = audit_events.filter(summary__icontains=query)
     return render(request, "history.html", {"title": "History: evidence and audit", "tab": tab, "query": query, "uploads": uploads, "evidence": evidence, "audit_events": audit_events})
 def preparation_edit(request, pk):
-    occurrence = get_object_or_404(Occurrence, pk=pk)
+    station = resolve_active_station(request)
+    occurrence = get_object_or_404(Occurrence, pk=pk, station=station)
     if not occurrence.asset_id:
         messages.info(request, "This occurrence has no asset. Live items are N/A; select an asset for media preparation.")
         return redirect("occurrence-workbench", pk=occurrence.pk)
@@ -1784,8 +1822,9 @@ def preparation_edit(request, pk):
 
 
 def transfer_create(request, asset_id):
-    asset = get_object_or_404(MediaAsset.objects.select_related("episode__show"), pk=asset_id)
-    station = asset.episode.show.station if asset.episode_id else Station.objects.first()
+    station = resolve_active_station(request)
+    asset = get_object_or_404(MediaAsset.objects.select_related("episode__show"), pk=asset_id, episode__show__station=station)
+    station = asset.episode.show.station if asset.episode_id else resolve_active_station(request)
     form = AssetTargetTransferForm(request.POST or None, station=station, prefix="transfer")
     if request.method == "POST" and form.is_valid():
         transfer = form.save(commit=False); transfer.asset = asset
@@ -1797,9 +1836,10 @@ def transfer_create(request, asset_id):
 
 
 def transfer_edit(request, asset_id, pk):
-    asset = get_object_or_404(MediaAsset, pk=asset_id)
-    transfer = get_object_or_404(AssetTargetTransfer, pk=pk, asset=asset)
-    station = asset.episode.show.station if asset.episode_id else Station.objects.first()
+    station = resolve_active_station(request)
+    asset = get_object_or_404(MediaAsset.objects.select_related("episode__show"), pk=asset_id, episode__show__station=station)
+    transfer = get_object_or_404(AssetTargetTransfer, pk=pk, asset=asset, device__station=station)
+    station = asset.episode.show.station if asset.episode_id else resolve_active_station(request)
     form = AssetTargetTransferForm(request.POST or None, instance=transfer, station=station, prefix="transfer")
     if request.method == "POST" and form.is_valid():
         transfer = form.save(commit=False); transfer.asset = asset; transfer.full_clean(); transfer.save()
@@ -1808,7 +1848,8 @@ def transfer_edit(request, asset_id, pk):
         return redirect("episode-detail", pk=asset.episode_id) if asset.episode_id else redirect("dashboard")
     return render(request, "asset_transfer_form.html", {"asset": asset, "form": form, "title": "Edit asset transfer", "transfer": transfer})
 def programming_create(request, pk):
-    occurrence = get_object_or_404(Occurrence, pk=pk); form = ProgrammingForm(request.POST or None)
+    station = resolve_active_station(request)
+    occurrence = get_object_or_404(Occurrence, pk=pk, station=station); form = ProgrammingForm(request.POST or None, station=station)
     if request.method == "POST" and form.is_valid():
         obj, created = OccurrenceProgramming.objects.update_or_create(
             occurrence=occurrence,
@@ -1818,7 +1859,7 @@ def programming_create(request, pk):
         audit("create" if created else "update", "OccurrenceProgramming", obj, "Programming record saved"); return redirect("occurrence-workbench", pk=occurrence.pk)
     return render(request, "simple_form.html", {"form": form, "title": "Record device programming", "occurrence": occurrence, "device_url": "/setup/device/?next=/occurrences/%s/programming/" % occurrence.pk})
 def upload_create(request):
-    station = Station.objects.first()
+    station = resolve_active_station(request)
     initial = None
     if station:
         raw_occurrences = request.GET.getlist("occurrence") + request.GET.getlist("occurrences")
@@ -1868,7 +1909,7 @@ def upload_create(request):
 def upload_transition(request, pk, state):
     if request.method != "POST" or state not in {"superseded", "invalidated"}:
         return HttpResponseBadRequest("Use POST with a valid upload transition.")
-    upload = get_object_or_404(UploadedScheduleRevision, pk=pk)
+    upload = get_object_or_404(UploadedScheduleRevision, pk=pk, device__station=resolve_active_station(request))
     reason = request.POST.get("reason", "").strip()
     if not reason:
         return HttpResponseBadRequest("A transition reason is required.")
@@ -1884,7 +1925,8 @@ def upload_transition(request, pk, state):
         audit("transition", "UploadedScheduleRevision", upload, f"{state}: {reason}", request.POST.get("actor", "owner"))
     return redirect("history")
 def airing_create(request, pk):
-    occurrence = get_object_or_404(Occurrence, pk=pk); form = AiringForm(request.POST or None, occurrence=occurrence)
+    station = resolve_active_station(request)
+    occurrence = get_object_or_404(Occurrence, pk=pk, station=station); form = AiringForm(request.POST or None, occurrence=occurrence)
     if request.method == "POST" and form.is_valid():
         obj=form.save(commit=False); obj.occurrence=occurrence; obj.actor="owner"
         if obj.supersedes_id:
