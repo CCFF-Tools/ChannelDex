@@ -183,6 +183,10 @@ or record airing. Users may arrange and confirm premieres while processing runs.
 Consecutive premiere proposals require explicit confirmation, preserve reviewed
 order, and reject conflicts rather than moving episodes around them. Schedule
 media versions are explicit reviewed choices; readiness never initiates delivery.
+
+## Accepted: library-first intake and safe relink (2026-10-05)
+
+Media Preparation adds local files by chooser or pasted absolute path, retains editable drafts, and requires a per-file encoding mode before one concise review. Confirmation adds episodes/assets to Library and queues preparation; premiere selection is separate. Library readiness, availability, runtime, versions, preparation, and transfer remain distinct. Relink fingerprints in the background and requires explicit confirmation: matching content may retain the asset identity, while changed or unknown content routes to separate new-version intake with fresh inspection and verification. Active work and historical evidence are protected. Legacy reviews and guided records remain readable.
 Controller activation remains a separate attended action behind existing gates.
 
 ## Accepted: orchestrate proven media tools (2026-10-04)

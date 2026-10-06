@@ -213,8 +213,17 @@ class MediaQueueAcceptanceTests(TestCase):
             process_preparation_job(retry, credential_resolver=lambda _ref: "password",
                 ftp_factory=self.adapter_factory(self.MemoryFTP()), probe_runner=lambda _path: self.compatible_probe())
         item.refresh_from_db()
-        self.assertEqual(item.execution_status, "failed")
-        self.assertIn("Retained prepared media changed", item.blocker)
+        # Already encoded input and retained rendition are the same bytes.
+        # Detect their mutation at the source approval boundary, before any
+        # orphan-binding adoption or remote transfer can occur.
+        self.assertEqual(item.execution_status, "blocked")
+        self.assertEqual(item.approval_1_status, "stale")
+        self.assertIn("source input changed", item.blocker)
+        upload.assert_not_called()
+        binding = MediaBinding.objects.get(asset=item.asset, target=self.target)
+        self.assertNotEqual(binding.local_inspection.media_hash, hashlib.sha256(retained.read_bytes()).hexdigest())
+        with self.assertRaisesMessage(ValueError, "fresh intake review"):
+            retry_media_queue_item(item.pk)
         upload.assert_not_called()
         self.assertEqual(MediaBinding.objects.filter(asset=item.asset, target=self.target).count(), 1)
 

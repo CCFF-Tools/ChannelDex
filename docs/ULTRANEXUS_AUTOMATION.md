@@ -252,3 +252,7 @@ and external qualification remain outside this path and can be inserted later.
 ## Accepted 2026-10-04 pull-before-publish workflow
 
 Preparation queues a controller pull in automatic mode, or blocks until an explicit successful manual pull when automatic mode is off. The worker uses the captured bytes directly; failed pulls require attention and explicit retry. Staging downloads and hashes the live schedule before writes and blocks on drift. Existing attended LOADSCH, rollback, ambiguity, activation evidence, and external qualification gates remain unchanged.
+
+## Accepted intake boundary (2026-10-05)
+
+Library intake is a local reference and review workflow. It does not copy, overwrite, or cloud-upload source media. Background hash/probe work and verified transfer remain separate worker stages; “already encoded” selects the existing encoded path but does not waive target qualification. A relinked or changed source stales dependent queued review and requires explicit refreshed confirmation. Existing controller, approval, binding, and external qualification gates remain unchanged.

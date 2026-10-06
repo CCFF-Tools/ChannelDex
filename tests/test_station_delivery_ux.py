@@ -130,11 +130,11 @@ class StationDeliveryUXTests(TestCase):
         with tempfile.TemporaryDirectory() as directory:
             first, second = Path(directory) / "one.mp4", Path(directory) / "two.mxf"
             first.write_bytes(b"1"); second.write_bytes(b"2")
-            run.return_value = Mock(returncode=0, stdout=f"{first}\n{second}\n")
+            run.return_value = Mock(returncode=0, stdout=__import__("json").dumps([str(first), str(second)]))
             response = Client().post("/settings/browse/", {"kind": "files"})
         assert response.status_code == 200
         assert response.json()["paths"] == [str(first.resolve()), str(second.resolve())]
-        assert "multiple selections allowed" in run.call_args.args[0][2]
+        assert "multipleSelectionsAllowed: true" in run.call_args.args[0][-1]
 
     @patch("pubtv.operations.views.subprocess.run")
     def test_browse_application_uses_plist_executable_and_trailing_slash(self, run):

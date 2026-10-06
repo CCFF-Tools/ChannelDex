@@ -19,6 +19,7 @@ from django.db import IntegrityError, transaction
 from django.db.models import Q
 from django.utils import timezone
 
+from .media_identity import batch_asset_claims, file_metadata, measured_runtime
 from .models import (PreparationBatch, PreparationBatchItem, ResearchGate, MediaInspection,
                      MediaBinding, MediaIdAllocation, TransferAttempt, UltraNexusTargetSettings, ArtifactRevision,
                      SchedulePublicationBatch, Device)
@@ -286,6 +287,9 @@ def preparation_snapshot(item: PreparationBatchItem):
     snapshot = {"asset_id": str(asset.asset_id), "file_name": asset.file_name, "version": asset.version,
             "encode_before_transfer": item.encode_before_transfer, "occurrence_id": item.occurrence_id,
             "selected_input_path": item.selected_input_path, "selected_input_hash": item.selected_input_hash}
+    if item.reviewed_file_size is not None:
+        snapshot["reviewed_file_size"] = item.reviewed_file_size
+        snapshot["reviewed_mtime_ns"] = item.reviewed_mtime_ns
     if item.batch.submission_token and asset.episode_id:
         snapshot["episode_id"] = str(asset.episode_id)
     return snapshot
@@ -494,7 +498,7 @@ def approve_preparation_batch(batch, *, actor="owner", at=None):
     if not UltraNexusTargetSettings.objects.filter(target=batch.target, is_current=True).exists():
         raise ValueError("Approval 1 requires current UltraNEXUS target settings.")
     for item in items:
-        path = item.selected_input_path or item.asset.smb_reference
+        path = item.selected_input_path or item.asset.local_path or item.asset.smb_reference
         if not path or not Path(path).is_file():
             raise ValueError(f"{item.asset}: selected local source file is unavailable")
         item.selected_input_path = str(Path(path).resolve())
@@ -503,7 +507,60 @@ def approve_preparation_batch(batch, *, actor="owner", at=None):
     return approve_snapshot(batch, preparation_batch_snapshot(batch), approval=1, actor=actor, at=at)
 
 
-def process_preparation_batch(batch, *, runner=subprocess.run, credential_resolver=None,
+def _establish_library_inputs(batch, *, probe_runner=None, runner=subprocess.run, item_ids=None):
+    """Acquire identity/runtime in the worker before qualification or transfer."""
+    from .models import MediaAsset, Episode
+    items = batch.items.select_related("asset__episode")
+    if item_ids is not None:
+        items = items.filter(pk__in=item_ids)
+    for item in items:
+        if item.reviewed_file_size is None or item.execution_status in {"ready", "blocked", "failed"}:
+            continue
+        try:
+            if item.approval_1_status == "stale":
+                raise ValueError("Source input changed; fresh owner review required.")
+            path = item.selected_input_path
+            expected = (item.reviewed_file_size, item.reviewed_mtime_ns)
+            if file_metadata(path) != expected:
+                raise ValueError("Reviewed source changed; fresh intake review required.")
+            digest = _sha256_file(path)
+            if file_metadata(path) != expected:
+                raise ValueError("Reviewed source changed during inspection; fresh intake review required.")
+            if item.selected_input_hash and digest != item.selected_input_hash:
+                raise ValueError("Source bytes changed; fresh intake review required.")
+            asset = item.asset
+            if asset.local_path != path or (asset.content_identity and asset.content_identity != digest):
+                raise ValueError("Library input identity or location changed; fresh review required.")
+            runtime = measured_runtime(path, probe_runner=probe_runner, runner=runner)
+            if file_metadata(path) != expected:
+                raise ValueError("Reviewed source changed during inspection; fresh intake review required.")
+            # Inputs are claimed by the shared asset lock. Preserve an existing
+            # identity, and never substitute prepared-output identity for it.
+            if not asset.content_identity:
+                MediaAsset.objects.filter(pk=asset.pk, content_identity="", local_path=path).update(content_identity=digest)
+            item.selected_input_hash = digest
+            item.save(update_fields=["selected_input_hash"])
+            if runtime is not None:
+                MediaAsset.objects.filter(pk=asset.pk).update(runtime_seconds=runtime, runtime_provenance="measured")
+                if asset.episode_id:
+                    Episode.objects.filter(pk=asset.episode_id, runtime_seconds__isnull=True).update(runtime_seconds=runtime, runtime_provenance="measured")
+        except (OSError, ValueError, RuntimeError) as exc:
+            item.execution_status = "blocked"
+            item.blocker = str(exc)
+            item.approval_1_status = "stale"
+            item.save(update_fields=["execution_status", "blocker", "approval_1_status"])
+
+
+def process_preparation_batch(batch, **kwargs):
+    # Relink and preparation use the same cross-process file claims, so SQLite
+    # cannot allow a path/identity change between review and worker IO.
+    with batch_asset_claims(batch):
+        _establish_library_inputs(batch, probe_runner=kwargs.get("probe_runner"),
+            runner=kwargs.get("runner", subprocess.run), item_ids=kwargs.get("item_ids"))
+        return _process_claimed_preparation_batch(batch, **kwargs)
+
+
+def _process_claimed_preparation_batch(batch, *, runner=subprocess.run, credential_resolver=None,
                               ftp_factory=StdlibFTPAdapter, ame_bridge=None,
                               ffmpeg_discoverer=discover_ffmpeg, probe_runner=None,
                               item_ids=None):
@@ -543,14 +600,31 @@ def process_preparation_batch(batch, *, runner=subprocess.run, credential_resolv
         batch.status = "blocked"
         batch.notes = message
         batch.save(update_fields=["approval_1_status", "status", "notes"])
-        batch.items.update(execution_status="blocked", blocker=message)
+        batch.items.exclude(execution_status="ready").update(execution_status="blocked", blocker=message)
         return {"batch": batch, "blockers": [message], "complete": False}
     items = list(batch.items.select_related("asset"))
     live_snapshots = {}
+    approved_by_asset = {entry["asset_id"]: entry for entry in approved_items}
+    wanted_ids = {int(value) for value in item_ids} if item_ids is not None else None
     for item in items:
-        path = item.selected_input_path or item.asset.smb_reference
+        if wanted_ids is not None and item.pk not in wanted_ids:
+            # An explicit item job cannot read, invalidate or replay siblings.
+            live_snapshots[str(item.asset.asset_id)] = approved_by_asset.get(str(item.asset.asset_id), preparation_snapshot(item))
+            continue
+        if item.execution_status == "ready" and item.resulting_binding_id:
+            # Finished transfer evidence remains valid when source moves.
+            live_snapshots[str(item.asset.asset_id)] = approved_by_asset.get(str(item.asset.asset_id), preparation_snapshot(item))
+            continue
+        path = item.selected_input_path or item.asset.local_path or item.asset.smb_reference
+        metadata = {}
+        if item.reviewed_file_size is not None:
+            try:
+                size, mtime = file_metadata(path)
+                metadata = {"reviewed_file_size": size, "reviewed_mtime_ns": mtime}
+            except (OSError, ValueError):
+                metadata = {"reviewed_file_size": None, "reviewed_mtime_ns": None}
         live_snapshots[str(item.asset.asset_id)] = {
-            **preparation_snapshot(item),
+            **preparation_snapshot(item), **metadata,
             "selected_input_path": str(Path(path).resolve()) if path else "",
             "selected_input_hash": (_sha256_file(path) if item.selected_input_hash and path and Path(path).is_file() else ""),
         }
@@ -569,18 +643,24 @@ def process_preparation_batch(batch, *, runner=subprocess.run, credential_resolv
             if current.get(key) != value:
                 return False
         return True
-    if any(not snapshot_matches(entry, live_snapshots.get(entry.get("asset_id"))) for entry in approved_items):
-        message = "Approval 1 snapshot is stale"
+    changed_assets = [entry.get("asset_id") for entry in approved_items
+        if not snapshot_matches(entry, live_snapshots.get(entry.get("asset_id")))]
+    if changed_assets:
+        message = "Approval 1 snapshot is stale; source input changed and needs a fresh review"
         batch.approval_1_status = "stale"
         batch.status = "blocked"
         batch.notes = message
         batch.save(update_fields=["approval_1_status", "status", "notes"])
-        batch.items.update(execution_status="blocked", blocker=message)
+        batch.items.filter(asset__asset_id__in=changed_assets).exclude(execution_status="ready").update(
+            execution_status="blocked", blocker=message, approval_1_status="stale")
         return {"batch": batch, "blockers": [message], "complete": False}
     if item_ids is not None:
         wanted = {int(value) for value in item_ids}
         items = [item for item in items if item.pk in wanted]
     for item in items:
+        if item.approval_1_status == "stale":
+            blockers.append(f"{item.asset}: {item.blocker or 'fresh source review required'}")
+            continue
         if item.resulting_inspection_id and item.resulting_inspection.status == "passed" and item.resulting_binding_id:
             continue
         if item.execution_status in {"blocked", "failed"} and not item_ids:
@@ -591,7 +671,7 @@ def process_preparation_batch(batch, *, runner=subprocess.run, credential_resolv
         item.execution_status = "encoding" if item.encode_before_transfer else "validating"
         item.save(update_fields=["execution_status"])
         attempt = None
-        path = item.selected_input_path or item.asset.smb_reference
+        path = item.selected_input_path or item.asset.local_path or item.asset.smb_reference
         current = live_snapshots[str(item.asset.asset_id)]
         if not path or not Path(path).is_file():
             item.execution_status = "blocked"; item.blocker = "Needs attention: source path unavailable"; item.save(update_fields=["execution_status", "blocker"])

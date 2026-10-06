@@ -1,0 +1,20 @@
+/* Behavioral tests for the browser draft model; no DOM or OS chooser required. */
+const assert = require('node:assert/strict');
+const state = require('../pubtv/static/media_intake.js');
+const first = state.normalize({source_path: '/media/one.mp4'});
+assert.equal(first.episode_id, 'new'); assert.equal(first.encoding_mode, '');
+first.new_title = 'Owner edited title'; first.episode_number = '42'; first.runtime_seconds = '90'; first.encoding_mode = 'already_encoded';
+const paths = ['/media/one.mp4', '/media/commas, "quotes"\nnewlines.mp4'];
+const appended = state.append([first], paths);
+assert.equal(appended.length, 2); assert.strictEqual(appended[0], first);
+assert.equal(appended[0].new_title, 'Owner edited title'); assert.equal(appended[0].encoding_mode, 'already_encoded');
+assert.equal(appended[1].source_path, paths[1]);
+const cancelled = state.append(appended, []); assert.deepEqual(cancelled, appended);
+const retained = state.changeShow([{...first, episode_id: '7'}, {...appended[1], episode_id: 'new'}], [{id: 7, show_id: 1}], 2);
+assert.equal(retained[0].episode_id, ''); assert.equal(retained[0].new_title, first.new_title);
+assert.equal(retained[0].episode_number, '42'); assert.equal(retained[0].runtime_seconds, '90');
+assert.equal(retained[1].episode_id, 'new');
+const compatible = state.changeShow([{...first, episode_id: '7'}], [{id: 7, show_id: 1}], 1);
+assert.equal(compatible[0].episode_id, '7');
+assert.equal(state.normalize({...first, new_title: ''}).new_title, '');
+console.log('media intake draft model: PASS');

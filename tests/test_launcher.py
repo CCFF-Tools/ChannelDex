@@ -148,3 +148,14 @@ class LauncherTests(unittest.TestCase):
         prepare.assert_not_called()
         load.assert_not_called()
         supervise.assert_not_called()
+
+    def test_gunicorn_threads_keep_native_picker_request_serviceable(self):
+        from pubtv.config import launcher
+        from gunicorn.app.base import BaseApplication
+        configured = {}
+        def run(application):
+            application.load_config()
+            configured.update({key: application.cfg.settings[key].value for key in ("workers", "worker_class", "threads", "bind")})
+        with patch.object(BaseApplication, "run", new=run):
+            launcher.run_gunicorn(object(), "127.0.0.1", 8765)
+        self.assertEqual(configured, {"workers": 1, "worker_class": "gthread", "threads": 4, "bind": ["127.0.0.1:8765"]})

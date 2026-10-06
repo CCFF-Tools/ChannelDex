@@ -245,3 +245,16 @@ These additions are **accepted** and implemented.
 owner-supplied outputs and independent controller evidence. Exercise the packaged
 Mac with representative real source files before production operation; automated
 fixtures do not establish AME equivalence or controller acceptance.
+
+- [x] **Accepted workflow contract (2026-10-05):** browser chooser or pasted
+  absolute paths, append/remove/draft-preserving intake, per-file encoding mode,
+  one review to Library and preparation, separate premiere planning, and
+  background relink review/confirmation. Legacy review and guided-delivery
+  records remain readable.
+- [x] Validate the library workflow with 165 affected Django tests, JavaScript
+  draft-state checks, a macOS package build, and isolated browser ingestion,
+  ordered planning, and background relink smoke checks. Native file selection
+  was observed with an owner-selected video; cancellation and unusual picker
+  filenames have automated coverage but were not manually exercised.
+- [ ] Complete representative-media encoder/device qualification. Local
+  software tests and the isolated smoke checks do not establish that evidence.
