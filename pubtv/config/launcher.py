@@ -115,7 +115,7 @@ def run_gunicorn(application, host: str, port: int) -> None:
 
     class PubTVApplication(BaseApplication):
         def load_config(self):
-            for key, value in {"bind": f"{host}:{port}", "workers": 1, "accesslog": "-", "errorlog": "-"}.items():
+            for key, value in {"bind": f"{host}:{port}", "workers": 1, "worker_class": "gthread", "threads": 4, "accesslog": "-", "errorlog": "-"}.items():
                 self.cfg.set(key, value)
 
         def load(self):

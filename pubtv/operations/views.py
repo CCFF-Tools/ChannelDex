@@ -12,12 +12,15 @@ import signal
 import threading
 import hashlib
 import plistlib
+import json
 from ftplib import FTP
 from django.core.exceptions import ValidationError
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
 from .forms import OccurrenceForm, StationForm, CarryForwardSettingsForm, DeviceForm, ShowForm, ShowSlotDurationForm, EpisodeForm, ProducerForm, EpisodeMilestoneForm, AssetForm, DeliveryForm, SlotForm, AssignmentForm, AssetPreparationForm, AssetTargetTransferForm, ProgrammingForm, UploadForm, AiringForm, AutomationPreparationForm, AutomationPublicationForm, UltraNexusSettingsForm
 from .models import Episode, EpisodeWorkflowMilestone, Occurrence, Show, Station, Device, Producer, MediaAsset, Delivery, RecurrenceSlot, WeeklyEpisodeAssignment, Preparation, AssetPreparation, AssetTargetTransfer, OccurrenceProgramming, UploadedOccurrenceCoverage, UploadedScheduleRevision, AiringEvidence, AuditEvent, UltraNexusTargetSettings, PreparationBatch, PreparationBatchItem, PreparationJob, SchedulePublicationBatch, ScheduleDeliveryOperation, OccurrenceRevisionSelection, ResearchGate, TransferAttempt, PublicationJob, GuidedEpisodeDelivery
+from .media_queue import begin_relink_review, confirm_relink_review, relink_review_result
+from .models import MediaRelinkReview
 from .services import schedule_alerts, audit, materialize_assignment, ensure_carry_forward_week, next_premiere_date, suggested_pending_episode, confirm_preparation_fact, create_upload_snapshot, revise_airing, sign_upload_preview, load_upload_preview, commit_upload_preview, preparation_readiness, calendar_capacity, pending_episode_reason
 from .automation import approve_snapshot, canonical_hash, invalidate_snapshot, preparation_batch_snapshot, publication_snapshot, preview_schedule, approve_preparation_batch, schedule_ready_binding, generate_nmg_artifact, generate_bin_artifact, publication_artifact_blockers
 from .publication_delivery import stage_publication, activate_publication, observe_activation, rollback_publication
@@ -493,8 +496,23 @@ def _resolve_application_executable(selected):
     return ""
 
 
+_picker_claim = threading.Lock()
+
+
 @csrf_protect
 def browse_path(request):
+    if request.method != "POST":
+        return JsonResponse({"error": "POST required"}, status=405)
+    if not _picker_claim.acquire(blocking=False):
+        return JsonResponse({"paths": [], "available": True, "cancelled": False,
+                             "error": "A local file chooser is already open. Finish or cancel it before choosing again."}, status=409)
+    try:
+        return _browse_path(request)
+    finally:
+        _picker_claim.release()
+
+
+def _browse_path(request):
     """Open a local Finder chooser; safe JSON response and editable fallback."""
     if request.method != "POST":
         return JsonResponse({"error": "POST required"}, status=405)
@@ -504,31 +522,42 @@ def browse_path(request):
     if kind == "application":
         script = 'POSIX path of (choose file with prompt "Choose an application" of type {"com.apple.application-bundle"})'
     elif kind == "files":
-        script = 'set chosenFiles to choose file with prompt "Choose media files" with multiple selections allowed\nset output to ""\nrepeat with selectedFile in chosenFiles\n\tset output to output & (POSIX path of selectedFile) & linefeed\nend repeat\nreturn output'
+        script = 'var app = Application.currentApplication(); app.includeStandardAdditions = true; JSON.stringify(app.chooseFile({withPrompt: "Choose media files", multipleSelectionsAllowed: true}).map(function(file) { return file.toString(); }));'
     else:
-        script = 'POSIX path of (choose file)'
+        script = 'var app = Application.currentApplication(); app.includeStandardAdditions = true; JSON.stringify([app.chooseFile().toString()]);'
     try:
-        result = subprocess.run(("osascript", "-e", script), check=False, capture_output=True, text=True, timeout=120)
+        result = subprocess.run(("osascript", "-l", "JavaScript", "-e", script) if kind in {"files", "file"} else ("osascript", "-e", script), check=False, capture_output=True, text=True, timeout=120)
     except (OSError, subprocess.TimeoutExpired):
         return JsonResponse({"path": "", "paths": [], "available": False, "cancelled": False, "resolved": False, "error": "The local picker is unavailable."})
     if result.returncode != 0:
         cancelled = re.search(r"(?<!\d)-128(?!\d)", result.stderr or "") is not None
         return JsonResponse({"path": "", "paths": [], "available": True, "cancelled": cancelled, "resolved": False,
                              "error": "" if cancelled else "The local picker failed."})
-    selected_paths = [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
-    if kind == "files":
-        paths = []
+    if kind in {"files", "file"}:
+        try:
+            selected_paths = json.loads(result.stdout or "[]")
+            if not isinstance(selected_paths, list) or any(not isinstance(value, str) for value in selected_paths):
+                raise ValueError("Invalid picker response")
+        except (ValueError, TypeError):
+            return JsonResponse({"paths": [], "available": True, "cancelled": False, "resolved": False, "error": "The local picker returned unreadable paths. Use the absolute-path field."})
+        entries = []
         for selected in selected_paths:
-            candidate = Path(selected).expanduser()
+            error = ""
+            candidate = Path(selected)
             try:
+                if not candidate.is_absolute():
+                    raise ValueError("The selected path is not absolute.")
                 candidate = candidate.resolve(strict=True)
-            except (OSError, RuntimeError):
-                continue
-            if candidate.is_file():
-                paths.append(str(candidate))
-        if paths:
-            return JsonResponse({"path": paths[0], "paths": paths, "available": True, "cancelled": False, "resolved": True, "error": ""})
-        return JsonResponse({"path": "", "paths": [], "available": True, "cancelled": False, "resolved": False, "error": "The selected files are unavailable."})
+                if not candidate.is_file():
+                    raise ValueError("The selected path is not a regular file.")
+            except (OSError, RuntimeError, ValueError) as exc:
+                error = str(exc) or "The selected file is unavailable."
+            # Invalid entries stay visible, editable and individually marked.
+            entries.append({"path": str(candidate) if not error else selected, "error": error})
+        paths = [entry["path"] for entry in entries]
+        return JsonResponse({"path": paths[0] if paths else "", "paths": paths, "entries": entries, "available": True,
+                             "cancelled": False, "resolved": bool(paths) and not any(entry["error"] for entry in entries), "error": ""})
+    selected_paths = [(result.stdout or "").rstrip("\r\n")] if result.stdout else []
     selected = selected_paths[0] if selected_paths else ""
     resolved = _resolve_application_executable(selected) if kind == "application" and selected else (selected if selected and Path(selected).exists() else "")
     if resolved:
@@ -1089,6 +1118,73 @@ def episode_list(request):
         "occurrences__airing_evidence",
     ).order_by("show__title", F("intended_air_order").asc(nulls_last=True), "pk") if station else Episode.objects.none()
     return render(request, "episode_list.html", {"episodes": episodes})
+
+
+def media_library(request):
+    """Library, local availability and destination evidence stay distinct."""
+    station = Station.objects.first()
+    episodes = Episode.objects.filter(show__station=station).select_related("show").prefetch_related(
+        "assets__preparation_batch_items__batch", "assets__ultranexus_bindings__local_inspection", "assets__ultranexus_bindings__target"
+    ) if station else Episode.objects.none()
+    query = (request.GET.get("q") or "").strip()
+    show_id = request.GET.get("show") or ""
+    readiness = request.GET.get("readiness") or ""
+    if query:
+        search = Q(title__icontains=query) | Q(show__title__icontains=query)
+        if query.isdigit():
+            search |= Q(episode_number=int(query))
+        episodes = episodes.filter(search)
+    if show_id.isdigit():
+        episodes = episodes.filter(show_id=int(show_id))
+    episodes = episodes.distinct().order_by("show__title", F("episode_number").asc(nulls_last=True), "title", "pk")
+    rows = []
+    for episode in episodes:
+        assets = list(episode.assets.all())
+        items = []
+        for asset in assets:
+            asset.available = bool(asset.local_path and Path(asset.local_path).is_file())
+            asset_items = list(asset.preparation_batch_items.all())
+            items.extend(asset_items)
+            asset.latest_item = max(asset_items, key=lambda item: item.pk) if asset_items else None
+            asset.ready_targets = [binding.target for binding in asset.ultranexus_bindings.all()
+                if binding.binding_type == "encoded" and binding.is_schedule_ready]
+        prepared = any(asset.ready_targets for asset in assets)
+        available = any(asset.available for asset in assets)
+        attention = any(item.execution_status in {"failed", "blocked"} for item in items if item.batch.status != "cancelled")
+        state = "ready" if prepared else "attention" if attention else "pending" if assets else "missing"
+        if readiness in {"ready", "pending", "attention", "missing"} and state != readiness:
+            continue
+        if readiness == "available" and not available:
+            continue
+        rows.append({"episode": episode, "assets": assets, "items": items,
+                     "available": available, "prepared": prepared, "readiness": state})
+    return render(request, "media_library.html", {"rows": rows,
+        "shows": Show.objects.filter(station=station).order_by("title") if station else Show.objects.none(),
+        "query": query, "show_id": show_id, "readiness": readiness})
+
+
+@csrf_protect
+def media_asset_relink(request, asset_id):
+    if request.method != "POST":
+        return JsonResponse({"error": "POST required"}, status=405)
+    try:
+        action = request.POST.get("action", "review")
+        if action == "confirm":
+            asset, changed = confirm_relink_review(request.POST.get("review_token"), asset_id=asset_id)
+            review = MediaRelinkReview.objects.get(token=request.POST.get("review_token"), asset_id=asset_id)
+            return JsonResponse({**relink_review_result(review), "changed": changed})
+        if action == "status":
+            review = get_object_or_404(MediaRelinkReview, asset_id=asset_id, token=request.POST.get("review_token"))
+        elif action == "review":
+            review = begin_relink_review(asset_id, request.POST.get("path", ""))
+        else:
+            raise ValueError("Unsupported relink action.")
+        response = JsonResponse(relink_review_result(review))
+        response["Cache-Control"] = "no-store"
+        return response
+    except (MediaAsset.DoesNotExist, MediaRelinkReview.DoesNotExist, ValidationError, OSError, RuntimeError, ValueError, KeyError) as exc:
+        return JsonResponse({"error": str(exc) or "Unable to relink this asset."}, status=400)
+
 
 def occurrence_create(request):
     station = Station.objects.first()

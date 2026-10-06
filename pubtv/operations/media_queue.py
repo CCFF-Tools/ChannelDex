@@ -6,6 +6,7 @@ remain in :mod:`automation`, where the qualified adapters and gates live.
 from __future__ import annotations
 
 import os
+import json
 import re
 import uuid
 from datetime import date, datetime, timedelta
@@ -21,7 +22,8 @@ from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
 
 from .automation import approve_snapshot, canonical_hash, preparation_batch_snapshot, schedule_ready_binding, _sha256_file
-from .models import AuditEvent, Device, Episode, MediaAsset, MediaIntakeReview, PreparationBatch, PreparationBatchItem, PreparationJob, Show, UltraNexusTargetSettings
+from .media_identity import asset_claim, file_metadata
+from .models import AuditEvent, Device, Episode, MediaAsset, MediaIntakeReview, MediaRelinkReview, PreparationBatch, PreparationBatchItem, PreparationJob, Show, UltraNexusTargetSettings
 
 
 QUEUE_STATES = ("queued", "encoding", "validating", "transferring", "verifying", "ready", "blocked", "failed", "cancelled")
@@ -59,56 +61,79 @@ def _row_episode(row, show):
     return episode, title
 
 
+class IntakeValidationError(ValueError):
+    def __init__(self, errors):
+        self.row_errors = errors
+        super().__init__("; ".join(f"Row {index + 1}: {'; '.join(messages)}" for index, messages in errors.items()))
+
+
 def validate_rows(rows, *, show):
-    """Validate every row before any episode, asset, batch, or file is written."""
+    """Validate all rows without writing; preserve individual error locations."""
     rows = list(rows or [])
     if not rows:
         raise ValueError("Add at least one source file.")
-    seen = set()
-    seen_paths = set()
-    validated = []
-    for row in rows:
+    seen, seen_paths, validated, errors = set(), set(), [], {}
+    for index, row in enumerate(rows):
+        problems = []
         source_path = row.get("source_path") or row.get("path")
         upload = row.get("file") or row.get("source_video") or row.get("upload")
-        if source_path:
-            path = Path(str(source_path)).expanduser()
-            try:
-                path = path.resolve(strict=True)
-                stat = path.stat()
-            except (OSError, RuntimeError):
-                raise ValueError(f"{Path(str(source_path)).name or 'Selected file'}: file is unavailable.")
-            if not path.is_file():
-                raise ValueError(f"{path.name}: selected path is not a regular file.")
-            if len(str(path)) > 500:
-                raise ValueError(f"{path.name}: selected path is too long for intake.")
-            if stat.st_size == 0:
-                raise ValueError(f"{path.name}: empty source files are not allowed.")
-            if stat.st_size > MAX_UPLOAD_BYTES:
-                raise ValueError(f"{path.name}: files larger than 50 GiB are not allowed.")
-            if path.suffix.casefold() not in SUPPORTED_VIDEO_SUFFIXES:
-                raise ValueError(f"{path.name}: unsupported video file type.")
-            name = path.name
-            path_key = str(path)
-            if path_key in seen_paths:
-                raise ValueError("Each local source file may appear only once in a batch.")
-            seen_paths.add(path_key)
-        else:
-            if upload is None or not getattr(upload, "name", ""):
-                raise ValueError("Every queue row requires a source file.")
-            if getattr(upload, "size", 1) == 0:
-                raise ValueError(f"{upload.name}: empty source files are not allowed.")
-            if getattr(upload, "size", 0) > MAX_UPLOAD_BYTES:
-                raise ValueError(f"{upload.name}: files larger than 50 GiB are not allowed.")
-            if Path(upload.name).suffix.casefold() not in SUPPORTED_VIDEO_SUFFIXES:
-                raise ValueError(f"{upload.name}: unsupported video file type.")
-            name = upload.name
-        episode, title = _row_episode(row, show)
-        key = f"episode:{episode.pk}" if episode else f"new:{title.casefold()}"
-        if key in seen:
-            raise ValueError("Each episode may appear only once in a batch.")
-        seen.add(key)
-        validated.append({"upload": upload, "source_path": str(path) if source_path else None, "name": name,
-                          "episode": episode, "title": title, "encode_before_transfer": bool(row.get("encode_before_transfer", True))})
+        path, name = None, ""
+        try:
+            if source_path:
+                path = Path(str(source_path))
+                if not path.is_absolute():
+                    raise ValueError("Enter an absolute local file path.")
+                try:
+                    path = path.resolve(strict=True)
+                    size, mtime = file_metadata(path)
+                except (OSError, RuntimeError):
+                    raise ValueError("file is unavailable.")
+                if len(str(path)) > 500:
+                    raise ValueError("selected path is too long for intake.")
+                name = path.name
+                if str(path) in seen_paths:
+                    raise ValueError("Each local source file may appear only once in a batch.")
+                seen_paths.add(str(path))
+            else:
+                if upload is None or not getattr(upload, "name", ""):
+                    raise ValueError("Every queue row requires a source file.")
+                name, size = upload.name, getattr(upload, "size", 1)
+            if size == 0:
+                raise ValueError("empty source files are not allowed.")
+            if size > MAX_UPLOAD_BYTES:
+                raise ValueError("files larger than 50 GiB are not allowed.")
+            if Path(name).suffix.casefold() not in SUPPORTED_VIDEO_SUFFIXES:
+                raise ValueError("unsupported video file type.")
+        except ValueError as exc:
+            problems.append(str(exc))
+        episode, title = None, ""
+        try:
+            if source_path and row.get("episode_id") in (None, "") and row.get("episode") is None:
+                raise ValueError("Choose create a new episode or an explicit existing episode.")
+            episode, title = _row_episode(row, show)
+            key = f"episode:{episode.pk}" if episode else f"new:{title.casefold()}"
+            if key in seen:
+                raise ValueError("Each episode may appear only once in a batch.")
+            seen.add(key)
+        except (ValueError, TypeError) as exc:
+            problems.append(str(exc))
+        mode = row.get("encoding_mode")
+        # Legacy upload callers already carry an explicit boolean. The new
+        # local-path browser rows must carry an explicit mode or boolean.
+        if mode not in ("needs_encoding", "already_encoded") and "encode_before_transfer" not in row:
+            problems.append("Choose already encoded or needs encoding for this file.")
+        for key, label in (("episode_number", "Episode number"), ("runtime_seconds", "Runtime seconds")):
+            value = row.get(key)
+            if value not in (None, "") and (not str(value).isdigit() or int(value) > 2147483647 or (key == "runtime_seconds" and int(value) == 0)):
+                problems.append(f"{label} must be a positive whole number.")
+        if problems:
+            errors[index] = problems
+        validated.append({"upload": upload, "source_path": str(path) if path else None, "name": name,
+                          "episode": episode, "title": title,
+                          "encode_before_transfer": mode == "needs_encoding" if mode else bool(row.get("encode_before_transfer")),
+                          "episode_number": row.get("episode_number", ""), "runtime_seconds": row.get("runtime_seconds", "")})
+    if errors:
+        raise IntakeValidationError(errors)
     return validated
 
 
@@ -163,7 +188,7 @@ def create_media_queue_batch(*, target, show, rows, submission_token=None, label
                     AuditEvent.objects.create(actor=actor, action="create", entity="Episode", entity_id=episode.pk, summary="Episode created from approved media queue intake")
                 prior_versions = list(MediaAsset.objects.filter(episode=episode).values_list("version", flat=True))
                 numbers = [int(value[1:]) for value in prior_versions if value.startswith("v") and value[1:].isdigit()]
-                asset = MediaAsset.objects.create(episode=episode, file_name=_safe_name(row["upload"].name), kind="source", version=f"v{max(numbers or [0]) + 1}", smb_reference=str(path))
+                asset = MediaAsset.objects.create(episode=episode, file_name=_safe_name(row["upload"].name), kind="source" if row["encode_before_transfer"] else "encoded", version=f"v{max(numbers or [0]) + 1}", smb_reference=str(path), local_path=str(path.resolve()), content_identity=digest)
                 AuditEvent.objects.create(actor=actor, action="create", entity="MediaAsset", entity_id=asset.pk, summary="Source asset created from private media queue intake")
                 item = PreparationBatchItem.objects.create(batch=batch, asset=asset, selected_input_path=str(path.resolve()), selected_input_hash=digest, encode_before_transfer=row["encode_before_transfer"], position=position)
             if not UltraNexusTargetSettings.objects.filter(target=target, is_current=True).exists():
@@ -204,6 +229,153 @@ def queue_summary():
     return {"counts": counts, "items": rows, "updated_at": timezone.now().isoformat()}
 
 
+def _active_asset_work(asset_id):
+    return PreparationJob.objects.filter(batch__items__asset_id=asset_id, status="running").exists()
+
+
+def begin_relink_review(asset_id, path, *, actor="owner"):
+    candidate = Path(str(path))
+    if not candidate.is_absolute():
+        raise ValueError("Relink requires an absolute local file path.")
+    candidate = candidate.resolve(strict=True)
+    size, mtime = file_metadata(candidate)
+    if len(str(candidate)) > 500:
+        raise ValueError("Relink path is too long.")
+    with asset_claim(asset_id):
+        asset = MediaAsset.objects.get(pk=asset_id)
+        if _active_asset_work(asset_id):
+            raise ValueError("Wait for active preparation before reviewing a new location.")
+        return MediaRelinkReview.objects.create(asset=asset, proposed_path=str(candidate),
+            file_size=size, mtime_ns=mtime, original_path=asset.local_path,
+            original_identity=asset.content_identity, actor=actor)
+
+
+def process_relink_review(review):
+    """Background candidate identity review, with no inherited verification."""
+    if review.status not in {"queued", "checking", "confirm_queued", "confirming"}:
+        return review
+    try:
+        with asset_claim(review.asset_id):
+            review.refresh_from_db()
+            if review.status not in {"queued", "checking", "confirm_queued", "confirming"}:
+                return review
+            if _active_asset_work(review.asset_id):
+                raise ValueError("Active preparation must finish before relink review.")
+            finalizing = review.status in {"confirm_queued", "confirming"}
+            review.status = "confirming" if finalizing else "checking"
+            review.save(update_fields=["status"])
+            candidate = Path(review.proposed_path)
+            expected = (review.file_size, review.mtime_ns)
+            if file_metadata(candidate) != expected:
+                raise ValueError("The candidate changed; start a fresh relink review.")
+            digest = _sha256_file(candidate)
+            if file_metadata(candidate) != expected:
+                raise ValueError("The candidate changed during review; start a fresh relink review.")
+            asset = MediaAsset.objects.get(pk=review.asset_id)
+            if (asset.local_path, asset.content_identity) != (review.original_path, review.original_identity):
+                raise ValueError("The asset changed in another tab; start a fresh relink review.")
+            review.observed_hash = digest
+            review.status = "matched" if review.original_identity and digest == review.original_identity else "new_version"
+            review.error = "" if review.status == "matched" else "These bytes have a different or unknown identity. Add them as a reviewed new version with fresh preparation."
+            if finalizing and review.status == "matched":
+                review.status = "confirming"
+                review.save(update_fields=["observed_hash", "status", "error"])
+                _commit_relink_review(review)
+                review.refresh_from_db()
+            else:
+                review.save(update_fields=["observed_hash", "status", "error"])
+    except (OSError, RuntimeError, ValueError) as exc:
+        review.status = "failed"
+        review.error = str(exc)
+        review.save(update_fields=["status", "error"])
+    return review
+
+
+def relink_review_result(review):
+    from urllib.parse import urlencode
+    result = {"review_token": str(review.token), "asset_id": review.asset_id,
+              "status": review.status, "error": review.error,
+              "file_size": review.file_size, "mtime_ns": review.mtime_ns,
+              "requires_review": review.status != "confirmed"}
+    if review.status == "new_version":
+        params = {"path": review.proposed_path}
+        if review.asset.episode_id:
+            params.update(show=review.asset.episode.show_id, episode=review.asset.episode_id)
+        result["new_intake_url"] = "/media/?" + urlencode(params)
+    return result
+
+
+def confirm_relink_review(token, *, actor="owner", asset_id=None):
+    """Record explicit intent; final byte verification stays in the worker."""
+    review = MediaRelinkReview.objects.select_related("asset").get(token=token)
+    if asset_id is not None and review.asset_id != asset_id:
+        raise ValueError("This review belongs to a different media asset.")
+    with asset_claim(review.asset_id):
+        review.refresh_from_db()
+        asset = MediaAsset.objects.get(pk=review.asset_id)
+        if review.status in {"confirmed", "confirm_queued", "confirming"}:
+            return asset, False
+        if review.status != "matched" or not review.original_identity or review.observed_hash != review.original_identity:
+            raise ValueError("Background identity review must match before confirmation. Different or unknown bytes require new-version intake.")
+        if _active_asset_work(asset.pk):
+            raise ValueError("Wait for active preparation before confirming a new location.")
+        if (asset.local_path, asset.content_identity) != (review.original_path, review.original_identity):
+            raise ValueError("The asset changed; start a fresh relink review.")
+        if file_metadata(review.proposed_path) != (review.file_size, review.mtime_ns):
+            raise ValueError("The reviewed file changed; start a fresh relink review.")
+        queued = MediaRelinkReview.objects.filter(pk=review.pk, status="matched").update(status="confirm_queued", actor=actor)
+        if not queued:
+            raise ValueError("This review changed; reload before confirming.")
+        return asset, True
+
+
+def _commit_relink_review(review):
+    """Finalize only under the asset claim after worker rehash and metadata check."""
+    with transaction.atomic():
+        # The first SQL write reserves finalization on SQLite. No expensive IO
+        # holds this writer transaction or runs in the confirmation request.
+        reserved = MediaRelinkReview.objects.filter(pk=review.pk, status="confirming").update(status="confirmed")
+        if not reserved:
+            raise ValueError("This review changed; reload before confirming.")
+        asset = MediaAsset.objects.get(pk=review.asset_id)
+        if _active_asset_work(asset.pk):
+            raise ValueError("Active preparation prevents relink finalization.")
+        if (asset.local_path, asset.content_identity) != (review.original_path, review.original_identity):
+            raise ValueError("The asset changed; start a fresh relink review.")
+        if file_metadata(review.proposed_path) != (review.file_size, review.mtime_ns):
+            raise ValueError("The reviewed file changed; start a fresh relink review.")
+        updated = MediaAsset.objects.filter(pk=asset.pk, local_path=review.original_path, content_identity=review.original_identity).update(local_path=review.proposed_path)
+        if updated != 1:
+            raise ValueError("The asset changed; start a fresh relink review.")
+        affected = PreparationBatchItem.objects.filter(asset=asset).exclude(execution_status="ready").exclude(batch__status="cancelled")
+        affected_ids = list(affected.values_list("pk", flat=True))
+        affected_batch_ids = list(affected.values_list("batch_id", flat=True))
+        affected.update(execution_status="blocked", blocker="Source location changed; review this input again before retrying.", approval_1_status="stale")
+        for job in PreparationJob.objects.filter(batch_id__in=affected_batch_ids, status="queued"):
+            selected = (job.result or {}).get("item_ids")
+            # Selective sibling jobs remain eligible. Whole batch jobs are
+            # cancelled; untouched pending siblings get a separate claim.
+            if selected and not set(selected).intersection(affected_ids):
+                continue
+            job.status = "cancelled"
+            job.error = "Input location changed; fresh owner review required."
+            job.finished_at = timezone.now()
+            job.save(update_fields=["status", "error", "finished_at"])
+            pending = list(job.batch.items.filter(execution_status="pending").values_list("pk", flat=True))
+            if pending:
+                PreparationJob.objects.get_or_create(idempotency_key=f"relink-siblings:{job.pk}", defaults={"batch": job.batch, "result": {"item_ids": pending}})
+        AuditEvent.objects.create(actor=review.actor, action="relink", entity="MediaAsset", entity_id=asset.pk,
+            summary=json.dumps({"event": "Matching media bytes moved to a reviewed local path", "old_path": review.original_path, "new_path": review.proposed_path, "identity": review.observed_hash}, ensure_ascii=False))
+        asset.refresh_from_db()
+
+
+def relink_media_asset(asset_id, path, *, actor="owner", expected_identity="", confirm=False):
+    # Compatibility entry point deliberately cannot bypass background review.
+    if confirm:
+        raise ValueError("Create a background relink review and confirm its matched token.")
+    return relink_review_result(begin_relink_review(asset_id, path, actor=actor))
+
+
 def media_queue_summary(request):
     from .models import SchedulePublicationBatch
     from .schedule_preparation import publication_readiness
@@ -219,6 +391,8 @@ def media_queue_summary(request):
 def intake_context(request):
     """Resolve show-context links without trusting unrelated query values."""
     show = Show.objects.filter(pk=request.GET.get("show")).first() if request.GET.get("show") else None
+    if show is None and not request.GET.get("show") and Show.objects.count() == 1:
+        show = Show.objects.first()
     episode = Episode.objects.filter(pk=request.GET.get("episode"), show=show).first() if show and request.GET.get("episode") else None
     asset = MediaAsset.objects.filter(pk=request.GET.get("asset"), episode=episode).first() if episode and request.GET.get("asset") else None
     targets = Device.objects.order_by("name")
@@ -231,16 +405,19 @@ def intake_context(request):
     except (TypeError, ValueError):
         order = 0
     return {"show": show, "episode": episode, "asset": asset, "target": target, "order": order,
-            "item": request.GET.get("item", "")}
+            "item": request.GET.get("item", ""), "has_context": bool(request.GET), "accepted": request.COOKIES.get("media_intake_accepted") == "1", "draft_rows": ([{"source_path": request.GET["path"], "episode_id": str(episode.pk) if episode else "new", "new_title": Path(request.GET["path"]).stem, "encoding_mode": "", "episode_number": "", "runtime_seconds": ""}] if request.GET.get("path") else [])}
 
 
-def create_intake_review(*, target, show, episode=None, asset=None, action="prepare_only", order=0, item="", actor="owner"):
+def create_intake_review(*, target, show, episode=None, asset=None, action="prepare_only", order=0, item="", actor="owner", submission_token=None):
     """Persist the connected intake choice before any preparation is queued."""
-    return MediaIntakeReview.objects.create(
-        target=target, show=show, episode=episode, asset=asset, order=int(order or 0), action=action,
-        payload={"item": str(item or ""), "episode_id": episode.pk if episode else None,
-                 "asset_id": asset.pk if asset else None, "target_id": target.pk}, created_by=actor,
-    )
+    token = uuid.UUID(str(submission_token)) if submission_token else uuid.uuid4()
+    review, created = MediaIntakeReview.objects.get_or_create(token=token, defaults={
+        "target": target, "show": show, "episode": episode, "asset": asset, "order": int(order or 0), "action": action,
+        "payload": {"item": str(item or ""), "episode_id": episode.pk if episode else None,
+                    "asset_id": asset.pk if asset else None, "target_id": target.pk}, "created_by": actor})
+    if (review.target_id, review.show_id, review.action) != (target.pk, show.pk, action):
+        raise ValueError("This review token belongs to different intake choices. Start a fresh review.")
+    return review
 
 
 def _stage_review_rows(review, rows):
@@ -250,12 +427,27 @@ def _stage_review_rows(review, rows):
             raise ValueError("Select local source paths with the file chooser.")
         path = Path(row["source_path"])
         stat = path.stat()
-        staged.append({"path": str(path), "name": _safe_name(row["name"]),
+        staged.append({"path": str(path), "name": row["name"],
                        "size": stat.st_size, "mtime_ns": stat.st_mtime_ns,
                        "episode_id": row["episode"].pk if row["episode"] else None, "new_title": row["title"],
-                       "encode_before_transfer": row["encode_before_transfer"], "position": position})
-    review.payload = {**review.payload, "rows": staged}
-    review.save(update_fields=["payload"])
+                       "encode_before_transfer": row["encode_before_transfer"], "position": position,
+                       "content_identity": "", "episode_number": row.get("episode_number", ""),
+                       "runtime_seconds": row.get("runtime_seconds", "")})
+    if review.payload.get("rows"):
+        if review.payload["rows"] != staged:
+            raise ValueError("The draft changed after this review. Start a fresh intake review.")
+        return staged
+    if review.status != "pending":
+        raise ValueError("This intake review is no longer pending.")
+    initial = review.payload
+    payload = {**initial, "rows": staged}
+    updated = MediaIntakeReview.objects.filter(pk=review.pk, status="pending", payload=initial).update(payload=payload)
+    if not updated:
+        review.refresh_from_db()
+        if review.payload.get("rows") != staged:
+            raise ValueError("This draft was reviewed in another tab. Start a fresh review.")
+    else:
+        review.payload = payload
     return staged
 
 
@@ -369,9 +561,14 @@ def _store_intake_premiere_proposals(review):
 @transaction.atomic
 def confirm_intake_review(review, *, first_premiere_date=None, actor="owner"):
     """Materialize one reviewed intake exactly once, preserving Approval 1."""
-    review = MediaIntakeReview.objects.select_for_update().select_related("show", "target").get(pk=review.pk)
-    if review.status == "confirmed":
-        return PreparationBatch.objects.get(submission_token=review.token), False
+    # Reserve with the first SQL statement. SQLite has no row locks; a read
+    # before this CAS can otherwise race into a read-to-write lock upgrade.
+    reserved = MediaIntakeReview.objects.filter(pk=review.pk, status="pending").update(status="confirming")
+    review = MediaIntakeReview.objects.select_related("show", "target").get(pk=review.pk)
+    if not reserved:
+        if review.status == "confirmed":
+            return PreparationBatch.objects.get(submission_token=review.token), False
+        raise ValueError("This intake is no longer pending; reload to see its result.")
     rows = review.payload.get("rows") or []
     if not rows:
         raise ValueError("This intake review has no staged files; review the files again.")
@@ -412,12 +609,33 @@ def confirm_intake_review(review, *, first_premiere_date=None, actor="owner"):
         if not path.is_file() or len(str(path)) > 500 or metadata != expected:
             raise ValueError("A staged source file changed or is unavailable; review the intake again.")
         episode = Episode.objects.filter(pk=row.get("episode_id"), show=review.show).first() if row.get("episode_id") else None
+        if row.get("episode_id") and episode is None:
+            raise ValueError("The selected existing episode changed; review the intake again.")
         if episode is None:
-            episode = Episode.objects.create(show=review.show, title=row.get("new_title", "").strip())
+            episode = Episode.objects.create(show=review.show, title=row.get("new_title", "").strip(),
+                episode_number=int(row["episode_number"]) if str(row.get("episode_number", "")).isdigit() else None,
+                runtime_seconds=int(row["runtime_seconds"]) if str(row.get("runtime_seconds", "")).isdigit() else None,
+                runtime_provenance="manual" if str(row.get("runtime_seconds", "")).isdigit() else "")
+            AuditEvent.objects.create(actor=actor, action="create", entity="Episode", entity_id=episode.pk, summary="Episode created from reviewed local media intake")
+        elif str(row.get("episode_number", "")).isdigit() or str(row.get("runtime_seconds", "")).isdigit():
+            if str(row.get("episode_number", "")).isdigit():
+                episode.episode_number = int(row["episode_number"])
+            if str(row.get("runtime_seconds", "")).isdigit():
+                episode.runtime_seconds = int(row["runtime_seconds"])
+                episode.runtime_provenance = "manual"
+            episode.save(update_fields=["episode_number", "runtime_seconds", "runtime_provenance"])
+            AuditEvent.objects.create(actor=actor, action="update", entity="Episode", entity_id=episode.pk, summary="Manual episode number/runtime recorded during media intake")
         episodes.append(episode)
         prior = [int(v[1:]) for v in MediaAsset.objects.filter(episode=episode).values_list("version", flat=True) if v.startswith("v") and v[1:].isdigit()]
-        asset = MediaAsset.objects.create(episode=episode, file_name=row["name"], kind="source", version=f"v{max(prior or [0]) + 1}")
-        PreparationBatchItem.objects.create(batch=batch, asset=asset, selected_input_path=str(path), selected_input_hash="", encode_before_transfer=bool(row.get("encode_before_transfer", True)), position=row.get("position", 0))
+        encode = bool(row.get("encode_before_transfer"))
+        asset = MediaAsset.objects.create(episode=episode, file_name=row["name"], kind="source" if encode else "encoded",
+            version=f"v{max(prior or [0]) + 1}", local_path=str(path.resolve()),
+            runtime_seconds=int(row["runtime_seconds"]) if str(row.get("runtime_seconds", "")).isdigit() else None,
+            runtime_provenance="manual" if str(row.get("runtime_seconds", "")).isdigit() else "")
+        AuditEvent.objects.create(actor=actor, action="create", entity="MediaAsset", entity_id=asset.pk, summary="Reviewed local file reference added to library")
+        PreparationBatchItem.objects.create(batch=batch, asset=asset, selected_input_path=str(path),
+            reviewed_file_size=row["size"], reviewed_mtime_ns=row["mtime_ns"],
+            encode_before_transfer=encode, position=row.get("position", 0))
     approve_snapshot(batch, preparation_batch_snapshot(batch), approval=1, actor=actor)
     batch.status = "approved"; batch.save(update_fields=["status"])
     PreparationJob.objects.get_or_create(batch=batch, idempotency_key=f"preparation:{batch.pk}:{batch.approval_1_hash}")
@@ -455,14 +673,42 @@ def media_queue(request):
             asset_id = request.POST.get("asset") or None
             asset = MediaAsset.objects.filter(pk=asset_id, episode=episode).first() if episode and asset_id else None
             response_status = 200
+            connected.update(show=show, target=target)
+            if request.POST.get("draft_rows"):
+                try:
+                    draft = json.loads(request.POST["draft_rows"])
+                    connected["draft_rows"] = draft if isinstance(draft, list) else []
+                except (ValueError, TypeError):
+                    pass
             if show and target:
                 source_paths = request.POST.getlist("source_paths")
-                rows = [{"source_path": source_path, "episode_id": request.POST.get(f"episode_id_{index}"), "new_title": request.POST.get(f"new_title_{index}", ""), "encode_before_transfer": request.POST.get("encode_before_transfer") == "on"} for index, source_path in enumerate(source_paths)]
+                manual_path = (request.POST.get("source_path_manual") or "").strip()
+                if manual_path:
+                    source_paths.append(manual_path)
+                rows = []
+                if request.POST.get("draft_rows"):
+                    try:
+                        rows = json.loads(request.POST["draft_rows"])
+                        if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+                            raise ValueError("Invalid draft rows.")
+                    except (ValueError, TypeError):
+                        connected["error"] = "The intake draft could not be read. Reload your saved draft and try again."
+                        rows = []
+                else:
+                    for index, source_path in enumerate(source_paths):
+                        row = {"source_path": source_path, "episode_id": request.POST.get(f"episode_id_{index}"), "new_title": request.POST.get(f"new_title_{index}", ""), "episode_number": request.POST.get(f"episode_number_{index}"), "runtime_seconds": request.POST.get(f"runtime_seconds_{index}")}
+                        mode = request.POST.get(f"encoding_mode_{index}")
+                        if mode:
+                            row["encoding_mode"] = mode
+                        elif f"encode_before_transfer_{index}" in request.POST or "encode_before_transfer" in request.POST:
+                            row["encode_before_transfer"] = request.POST.get(f"encode_before_transfer_{index}", request.POST.get("encode_before_transfer")) == "on"
+                        rows.append(row)
+                connected.update(show=show, target=target, draft_rows=rows)
+
                 review = None
                 try:
-                    validate_rows(rows, show=show)
                     review = create_intake_review(target=target, show=show, episode=episode, asset=asset,
-                        action=request.POST.get("next_action", "prepare_only"), order=request.POST.get("order", 0), item=request.POST.get("item"))
+                        action="prepare_and_plan" if request.POST.get("next_action") == "prepare_and_plan" else "prepare_only", order=request.POST.get("order", 0), item=request.POST.get("item"), submission_token=request.POST.get("submission_token") or None)
                     _stage_review_rows(review, rows)
                     connected["show"] = show
                     connected["target"] = target
@@ -472,9 +718,10 @@ def media_queue(request):
                         connected["premiere_candidates"] = _store_intake_premiere_proposals(review)
                     connected["reviewed"] = True
                 except (ValueError, ValidationError, OSError) as exc:
-                    if review is not None:
-                        review.delete()
+                    if review is not None and not review.payload.get("rows") and review.status == "pending":
+                        MediaIntakeReview.objects.filter(pk=review.pk, status="pending", payload=review.payload).delete()
                     connected["error"] = str(exc) if isinstance(exc, (ValueError, ValidationError)) else "Unable to stage this intake. Select the files and try again."
+                    connected["row_errors"] = getattr(exc, "row_errors", {})
                     response_status = 400
             else:
                 connected["error"] = "Choose a show and destination before reviewing this intake."
@@ -482,7 +729,7 @@ def media_queue(request):
             batches = accepted_media_batches()
             episodes = list(Episode.objects.order_by("show_id", "title").values("id", "show_id", "title"))
             return render(request, "media_queue.html", {"batches": batches, "queue": queue_summary(), "targets": Device.objects.all(),
-                "shows": Show.objects.all(), "episodes": episodes, "submission_token": request.POST.get("submission_token") or uuid.uuid4(), "connected": connected}, status=response_status)
+                "shows": Show.objects.all(), "episodes": episodes, "submission_token": uuid.uuid4() if connected.get("reviewed") else request.POST.get("submission_token") or uuid.uuid4(), "connected": connected}, status=response_status)
         if action == "confirm_intake":
             review = get_object_or_404(MediaIntakeReview, token=request.POST.get("review_token"))
             try:
@@ -492,7 +739,7 @@ def media_queue(request):
             except (ValueError, ValidationError) as exc:
                 connected.update(
                     show=review.show, target=review.target, review=review,
-                    review_rows=review.payload.get("rows", []), reviewed=True, error=str(exc),
+                    review_rows=review.payload.get("rows", []), draft_rows=[{**row, "episode_id": row["episode_id"] or "new", "source_path": row["path"], "encoding_mode": "needs_encoding" if row["encode_before_transfer"] else "already_encoded"} for row in review.payload.get("rows", [])], reviewed=True, error=str(exc),
                 )
                 if review.action == "prepare_and_plan":
                     connected["premiere_candidates"] = _intake_candidate_context(review)
@@ -510,27 +757,29 @@ def media_queue(request):
                 ]
                 return redirect(f"/schedule/prepare/?{urlencode(params)}")
             messages.success(request, f"Batch {batch.pk} queued." if created else f"Batch {batch.pk} was already accepted.")
-            return redirect("media-queue")
+            response = redirect("media-queue")
+            response.set_cookie("media_intake_accepted", "1", httponly=True, samesite="Strict")
+            return response
         # Keep the show/episode/asset context when the owner chooses the
         # connected premiere planning branch. No schedule is created here.
         if action in {"prepare_and_plan", "prepare_plan", "plan_premieres"}:
             from urllib.parse import urlencode
             params = {key: request.POST.get(key) for key in ("show", "episode", "asset", "target", "item", "order") if request.POST.get(key)}
             return redirect(f"/shows/{request.POST.get('show')}/premieres/?{urlencode(params)}")
-        try:
-            target = get_object_or_404(Device, pk=request.POST.get("target"))
-            show = get_object_or_404(Show, pk=request.POST.get("show"))
-            uploads = request.FILES.getlist("source_files")
-            rows = [{"file": upload, "episode_id": request.POST.get(f"episode_id_{index}"), "new_title": request.POST.get(f"new_title_{index}", ""), "encode_before_transfer": request.POST.get("encode_before_transfer") == "on"} for index, upload in enumerate(uploads)]
-            batch, created = create_media_queue_batch(target=target, show=show, rows=rows, submission_token=request.POST.get("submission_token") or None)
-            messages.success(request, f"Batch {batch.pk} queued." if created else f"Batch {batch.pk} was already accepted; its original approved files are unchanged.")
-        except (ValueError, IntegrityError, ValidationError, OSError) as exc:
-            batches = accepted_media_batches()
-            return render(request, "media_queue.html", {"batches": batches, "queue": queue_summary(), "error": str(exc) if isinstance(exc, (ValueError, ValidationError)) else "Unable to retain this intake. No batch was queued; select the files and try again.", "targets": Device.objects.all(), "shows": Show.objects.all(), "episodes": list(Episode.objects.order_by("show_id", "title").values("id", "show_id", "title")), "submission_token": request.POST.get("submission_token") or uuid.uuid4(), "connected": connected}, status=400)
-        return redirect("media-queue")
+        # Browser intake accepts local references only. Historical preparation
+        # helpers remain available to old records/callers, but this endpoint
+        # never copies uploads or hashes video during an HTTP request.
+        connected["error"] = "Use Add episode files or an absolute local path, then review the intake."
+        return render(request, "media_queue.html", {"batches": accepted_media_batches(), "queue": queue_summary(),
+            "targets": Device.objects.all(), "shows": Show.objects.all(),
+            "episodes": list(Episode.objects.order_by("show_id", "title").values("id", "show_id", "title")),
+            "submission_token": request.POST.get("submission_token") or uuid.uuid4(), "connected": connected}, status=400)
     batches = accepted_media_batches()
     episodes = list(Episode.objects.order_by("show_id", "title").values("id", "show_id", "title"))
-    return render(request, "media_queue.html", {"batches": batches, "queue": queue_summary(), "targets": Device.objects.all(), "shows": Show.objects.all(), "episodes": episodes, "submission_token": uuid.uuid4(), "connected": connected})
+    response = render(request, "media_queue.html", {"batches": batches, "queue": queue_summary(), "targets": Device.objects.all(), "shows": Show.objects.all(), "episodes": episodes, "submission_token": uuid.uuid4(), "connected": connected})
+    if connected["accepted"]:
+        response.delete_cookie("media_intake_accepted")
+    return response
 
 
 def retry_media_queue_item(item_id):
@@ -540,6 +789,8 @@ def retry_media_queue_item(item_id):
         PreparationBatch.objects.select_for_update().get(pk=item.batch_id)
         if item.batch.status == "cancelled":
             raise ValueError("Cancelled media batches cannot be retried.")
+        if item.approval_1_status == "stale":
+            raise ValueError("Source input changed; a fresh intake review is required before resuming.")
         if item.execution_status not in {"failed", "blocked"}:
             raise ValueError("Only failed or blocked items can be retried explicitly.")
         if PreparationJob.objects.filter(batch=item.batch, status__in=("queued", "running")).exists():

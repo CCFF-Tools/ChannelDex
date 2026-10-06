@@ -10,7 +10,8 @@ from django.utils import timezone
 
 from pubtv.operations.automation import process_due_job_state, process_preparation_job
 from pubtv.operations.services import reconcile_passed_premieres
-from pubtv.operations.models import PreparationJob, PublicationJob
+from pubtv.operations.models import PreparationJob, PublicationJob, MediaRelinkReview
+from pubtv.operations.media_queue import process_relink_review
 
 
 class Command(BaseCommand):
@@ -24,9 +25,11 @@ class Command(BaseCommand):
         with transaction.atomic():
             job = PreparationJob.objects.select_for_update().filter(status="queued").order_by("queued_at", "pk").first()
             if job:
+                now = timezone.now()
+                if not PreparationJob.objects.filter(pk=job.pk, status="queued").update(status="running", started_at=now):
+                    return None
                 job.status = "running"
-                job.started_at = timezone.now()
-                job.save(update_fields=["status", "started_at"])
+                job.started_at = now
             return job
 
     def _claim_publication(self):
@@ -86,6 +89,12 @@ class Command(BaseCommand):
             while True:
                 processed = False
                 processed = bool(reconcile_passed_premieres())
+                # A durable queued review survives worker restart. Checking
+                # reviews are also resumable: no asset write occurs here.
+                review = MediaRelinkReview.objects.filter(status__in=("queued", "checking", "confirm_queued", "confirming")).order_by("created_at", "pk").first()
+                if review:
+                    process_relink_review(review)
+                    processed = True
                 preparation = self._claim_preparation()
                 if preparation:
                     process_preparation_job(preparation)

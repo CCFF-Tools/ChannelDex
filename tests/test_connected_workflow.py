@@ -56,6 +56,7 @@ class ConnectedWorkflowTests(TestCase):
             "episode": legacy_episode, "asset": "", "item": "",
         }
         for index in range(files):
+            data[f"encoding_mode_{index}"] = "needs_encoding"
             data[f"episode_id_{index}"] = "new"
             data[f"new_title_{index}"] = f"Episode {index + 1}"
         response = Client().post("/media/", data)
@@ -179,7 +180,7 @@ class ConnectedWorkflowTests(TestCase):
                 "action": "review_intake", "next_action": "prepare_and_plan",
                 "show": self.show.pk, "target": self.target.pk,
                 "source_paths": [str(source)],
-                "episode_id_0": "new", "new_title_0": "Missing slot",
+                "episode_id_0": "new", "new_title_0": "Missing slot", "encoding_mode_0": "needs_encoding",
             })
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "No active premiere slot is configured")

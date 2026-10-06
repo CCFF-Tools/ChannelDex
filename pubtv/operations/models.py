@@ -108,8 +108,10 @@ class Episode(models.Model):
     )
     legacy_producer_reference = models.CharField(max_length=120, blank=True)
     intended_air_order = models.PositiveIntegerField(null=True, blank=True)
+    episode_number = models.PositiveIntegerField(null=True, blank=True)
     intended_premiere_date = models.DateField(null=True, blank=True)
     runtime_seconds = models.PositiveIntegerField(null=True, blank=True)
+    runtime_provenance = models.CharField(max_length=32, blank=True)
     status = models.CharField(max_length=24, choices=[("pending", "Pending"), ("previously_scheduled", "Previously scheduled")], default="pending")
     legacy_received_at = models.DateTimeField(null=True, blank=True)
     def __str__(self): return f"{self.show.code}: {self.title}"
@@ -226,6 +228,12 @@ class MediaAsset(models.Model):
     kind = models.CharField(max_length=16, choices=[("source", "Source"), ("encoded", "Encoded")])
     version = models.CharField(max_length=80, default="v1")
     runtime_seconds = models.PositiveIntegerField(null=True, blank=True)
+    runtime_provenance = models.CharField(max_length=32, blank=True)
+    # The selected source remains a durable reference independent of any
+    # preparation batch.  It is private metadata; ChannelDex never copies or
+    # overwrites the source at relink time.
+    local_path = models.CharField(max_length=500, blank=True)
+    content_identity = models.CharField(max_length=128, blank=True)
     smb_reference = models.CharField(max_length=300, blank=True)
 
     def __init__(self, *args, **kwargs):
@@ -844,6 +852,22 @@ class MediaIntakeReview(models.Model):
         ordering = ["order", "pk"]
 
 
+class MediaRelinkReview(models.Model):
+    STATUS = [(x, x.replace("_", " ").title()) for x in ("queued", "checking", "matched", "new_version", "confirm_queued", "confirming", "failed", "confirmed", "cancelled")]
+    token = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    asset = models.ForeignKey(MediaAsset, on_delete=models.PROTECT, related_name="relink_reviews")
+    proposed_path = models.CharField(max_length=500)
+    file_size = models.PositiveBigIntegerField(default=0)
+    mtime_ns = models.BigIntegerField(default=0)
+    observed_hash = models.CharField(max_length=128, blank=True)
+    original_path = models.CharField(max_length=500, blank=True)
+    original_identity = models.CharField(max_length=128, blank=True)
+    error = models.TextField(blank=True)
+    status = models.CharField(max_length=16, choices=STATUS, default="queued")
+    created_at = models.DateTimeField(default=timezone.now)
+    actor = models.CharField(max_length=120, default="owner")
+
+
 class PreparationBatchItem(models.Model):
     APPROVAL_STATUS = [(x, x.replace("_", " ").title()) for x in ("pending", "approved", "rejected", "stale")]
     batch = models.ForeignKey(PreparationBatch, on_delete=models.CASCADE, related_name="items")
@@ -851,6 +875,8 @@ class PreparationBatchItem(models.Model):
     occurrence = models.ForeignKey(Occurrence, null=True, blank=True, on_delete=models.PROTECT, related_name="preparation_batch_items")
     selected_input_path = models.CharField(max_length=500, blank=True)
     selected_input_hash = models.CharField(max_length=128, blank=True)
+    reviewed_file_size = models.PositiveBigIntegerField(null=True, blank=True)
+    reviewed_mtime_ns = models.BigIntegerField(null=True, blank=True)
     resulting_inspection = models.ForeignKey(MediaInspection, null=True, blank=True, on_delete=models.PROTECT, related_name="resulting_batch_items")
     resulting_binding = models.ForeignKey(MediaBinding, null=True, blank=True, on_delete=models.PROTECT, related_name="resulting_batch_items")
     execution_status = models.CharField(max_length=20, choices=[("pending", "Queued"), ("encoding", "Encoding"), ("validating", "Validating"), ("transferring", "Transferring"), ("verifying", "Verifying"), ("ready", "Ready"), ("blocked", "Needs attention"), ("failed", "Needs attention")], default="pending")
