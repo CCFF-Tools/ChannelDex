@@ -249,6 +249,10 @@ class RequestedUsabilityTests(TestCase):
         self.assertTrue(carried.is_automatic_carry_forward)
         self.assertEqual(occurrence.schedule_context, "Automatic carry-forward replay")
         self.assertContains(response, "Automatic carry-forward replay")
+        self.assertContains(
+            response,
+            '<span class="schedule-context">Automatic carry-forward replay</span>',
+        )
         self.assertContains(response, "can be replaced by an explicit plan")
 
         self.client.get("/week/?date=2099-01-12")

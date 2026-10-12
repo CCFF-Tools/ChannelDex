@@ -264,6 +264,8 @@ class TodoWorkflowTests(TestCase):
         self.assertIn('class="capacity-block available"', scheduled_body)
         self.assertNotIn('class="capacity-block reserved"', scheduled_body)
         self.assertIn('class="week-block scheduled-block"', scheduled_body)
+        self.assertIn('class="schedule-context"', scheduled_body)
+        self.assertNotIn('class="badge">Manual schedule item', scheduled_body)
         self.assertIn('name="view"', scheduled_body)
 
         capacity = client.get("/week/?date=2026-01-05&view=capacity")
