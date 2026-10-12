@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 import uuid
 
 from django.contrib import messages
@@ -124,7 +125,8 @@ def preview_schedule_preparation(target, selections, *, now=None):
                 "reason": entry["reason"], "mappings": entry["mappings"]} for entry in entries]})
     if not rows:
         blockers.append("Choose at least one confirmed cycle")
-    snapshot = {"target_id": target.pk, "target_settings": target_settings_snapshot(target), "cycles": snapshots}
+    snapshot = {"target_id": target.pk, "target_settings": target_settings_snapshot(target),
+        "reviewed_at": now.isoformat(), "cycles": snapshots}
     snapshot["hash"] = canonical_hash(snapshot)
     return {"rows": rows, "included": tuple(included), "excluded": tuple(excluded),
         "blockers": tuple(dict.fromkeys(blockers)), "ready": bool(rows) and not blockers and all(r.readiness == "ready" for r in rows),
@@ -150,7 +152,11 @@ def confirm_schedule_preparation(target, selections, reviewed_snapshot, *, actor
         asset = MediaAsset.objects.select_for_update().get(pk=choice["asset"].pk) if choice.get("asset") else None
         list(Occurrence.objects.select_for_update().filter(weekly_assignment=assignment))
         fresh.append({"assignment": assignment, "asset": asset})
-    preview = preview_schedule_preparation(target, fresh)
+    try:
+        reviewed_at = datetime.fromisoformat(reviewed_snapshot["reviewed_at"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise SchedulePreparationStale("Review time is missing or invalid; preview again") from exc
+    preview = preview_schedule_preparation(target, fresh, now=reviewed_at)
     if reviewed_snapshot != preview["snapshot"]:
         raise SchedulePreparationStale("Cycles, media, target settings or occurrences changed; preview again")
     if preview["blockers"]:

@@ -17,6 +17,7 @@ MIDDLEWARE = [
     "django.middleware.common.CommonMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
+    "pubtv.operations.middleware.StationOriginGuardMiddleware",
 ]
 INSTALLED_APPS = ["django.contrib.contenttypes", "django.contrib.staticfiles", "django.contrib.sessions", "django.contrib.messages", "django.forms", "pubtv.operations"]
 FORM_RENDERER = "django.forms.renderers.TemplatesSetting"

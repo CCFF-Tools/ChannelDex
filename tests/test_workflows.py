@@ -273,7 +273,7 @@ class SchedulingWorkflowTests(TestCase):
         body = response.content.decode()
         self.assertContains(response, "Previous week")
         self.assertContains(response, "Next week")
-        self.assertIn("Week plan", body)
+        self.assertIn("Weekly capacity", body)
 
     def test_dst_wall_clock_stays_local_and_day_filter_does_not_drift(self):
         self.slot.start_time = time(5)

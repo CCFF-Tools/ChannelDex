@@ -16,7 +16,7 @@ def _duration_label(seconds):
     if hours: parts.append(f"{hours} hr")
     if minutes: parts.append(f"{minutes} min")
     if seconds: parts.append(f"{seconds} sec")
-    return " ".join(parts) or "0 min"
+    return " ".join(parts) or "0 min (recorded)"
 
 
 def _clock_label(value):
@@ -222,6 +222,10 @@ class EpisodeWorkflowMilestone(models.Model):
 
 class MediaAsset(models.Model):
     asset_id = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    station = models.ForeignKey(
+        Station, null=True, blank=True, on_delete=models.PROTECT,
+        related_name="media_assets",
+    )
     episode = models.ForeignKey(Episode, null=True, blank=True, on_delete=models.SET_NULL, related_name="assets")
     legacy_label = models.CharField(max_length=160, blank=True)
     file_name = models.CharField(max_length=255, blank=True)
@@ -247,9 +251,16 @@ class MediaAsset(models.Model):
             self.file_name = legacy_label
 
     def save(self, *args, **kwargs):
+        if self.episode_id and not self.station_id:
+            self.station_id = self.episode.show.station_id
         if not self.file_name and self.legacy_label:
             self.file_name = self.legacy_label
         return super().save(*args, **kwargs)
+
+    def clean(self):
+        super().clean()
+        if self.episode_id and self.station_id and self.episode.show.station_id != self.station_id:
+            raise ValidationError("Media asset and episode must belong to the same working channel.")
 
     @property
     def label(self):
@@ -346,17 +357,42 @@ class RecurrenceSlot(models.Model):
         return _duration_label(self.duration_seconds)
 
 class WeeklyEpisodeAssignment(models.Model):
+    class ActiveManager(models.Manager):
+        def get_queryset(self):
+            return super().get_queryset().filter(state="active")
+
     show = models.ForeignKey(Show, on_delete=models.CASCADE, related_name="weekly_assignments")
     week_start = models.DateField()
     premiere_date = models.DateField(null=True, blank=True)
     episode = models.ForeignKey(Episode, null=True, blank=True, on_delete=models.SET_NULL)
     selection_type = models.CharField(max_length=16, choices=[("premiere", "New premiere"), ("rerun", "Selected older rerun"), ("none", "No program")])
     is_automatic_carry_forward = models.BooleanField(default=False)
+    state = models.CharField(
+        max_length=16,
+        choices=[("active", "Active"), ("superseded", "Superseded")],
+        default="active",
+    )
+    superseded_by = models.ForeignKey(
+        "self", null=True, blank=True, on_delete=models.PROTECT,
+        related_name="superseded_assignments",
+    )
+    objects = ActiveManager()
+    all_objects = models.Manager()
     class Meta:
-        constraints = [models.UniqueConstraint(fields=["show", "week_start"], name="unique_show_week")]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["show", "week_start"],
+                condition=Q(state="active"),
+                name="unique_active_show_week",
+            )
+        ]
     def __str__(self):
         return f"{self.show.title} · week of {self.week_start:%Y-%m-%d}"
     def clean(self):
+        if self.state == "active" and self.superseded_by_id:
+            raise ValidationError("An active premiere-cycle assignment cannot be superseded.")
+        if self.superseded_by_id and self.superseded_by_id == self.pk:
+            raise ValidationError("A premiere-cycle assignment cannot supersede itself.")
         if self.week_start and self.week_start.weekday() != 0:
             raise ValidationError("Week start must be a Monday.")
         if self.episode_id and self.episode and self.episode.show_id != self.show_id:
@@ -423,6 +459,8 @@ class Occurrence(models.Model):
             raise ValidationError("Episode must belong to occurrence station and show.")
         if self.asset and self.asset.episode_id and self.episode_id and self.asset.episode_id != self.episode_id:
             raise ValidationError("Asset must belong to occurrence episode.")
+        if self.asset and self.asset.station_id and self.asset.station_id != self.station_id:
+            raise ValidationError("Asset must belong to occurrence station.")
     @property
     def ends_at(self): return self.starts_at + timedelta(seconds=self.planned_duration_seconds)
     @property

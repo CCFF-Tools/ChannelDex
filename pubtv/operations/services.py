@@ -7,6 +7,12 @@ from django.utils import timezone
 from django.core.signing import TimestampSigner, BadSignature
 from .models import Occurrence, Episode, RecurrenceSlot, UploadedScheduleRevision, UploadedOccurrenceCoverage, WeeklyEpisodeAssignment, Preparation, AssetPreparation, AssetTargetTransfer, AiringEvidence, AuditEvent
 
+
+def pending_episode_sort_key(episode):
+    """Canonical pending queue order used by show and bulk planning views."""
+    missing_receipt = datetime.max.replace(tzinfo=ZoneInfo("UTC"))
+    return (episode.intended_air_order is None, episode.intended_air_order or 0, episode.received_at or missing_receipt, episode.pk)
+
 def audit(action, entity, obj=None, summary="", actor="owner"):
     return AuditEvent.objects.create(actor=actor, action=action, entity=entity, entity_id=getattr(obj, "pk", None), revision=getattr(obj, "revision", None), summary=summary)
 
@@ -421,7 +427,7 @@ def preparation_readiness(occurrence):
                 values["slot_assignment"] = ""
                 values["uploaded_schedule_revision"] = ""
     complete = sum(1 for value in values.values() if value not in ("", None, "no", False))
-    return {"complete": complete, "total": len(required), "label": f"{complete}/{len(required)} preparation facts", "ready": complete == len(required)}
+    return {"complete": complete, "total": len(required), "label": f"{complete} of {len(required)} preparation steps recorded", "ready": complete == len(required)}
 
 
 def pending_episode_reason(episode, now=None):

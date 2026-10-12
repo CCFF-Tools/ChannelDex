@@ -129,7 +129,7 @@ PUB-TV/
 
 Names and exact module boundaries may be simplified at implementation. Runtime databases, real producer contacts, source exports, video, credentials, and backups must not enter source control. Use synthetic or owner-sanitized fixtures.
 
-## Proposed delivery sequence
+## Original proposed delivery sequence (historical)
 
 1. **Implement and verify the approved scaffold:** run the focused Django tests and review the local workflow with synthetic data. Real vendor files are optional context and remain outside V1.
 2. **Prove the scheduling rules:** create the approved scaffold, a synthetic PUB-TV station, show episodes and standalone assets, recurrence and weekly assignments, full-day coverage, live events, gap/overlap handling, and history/time-boundary tests. Demonstrate a premiere with linked replays and a preemption.
@@ -147,12 +147,26 @@ Names and exact module boundaries may be simplified at implementation. Runtime d
 4. Reconcile data ownership and add migrations without deleting historical
    provenance; preserve all accepted separation rules.
 5. Run focused tests, then pilot the complete daily workflow with synthetic and
-   owner-sanitized data. Runtime usability and behavioral verification remain
-   pending until those checks occur.
+   owner-sanitized data. The September usability implementation and synthetic
+   pilot were verified as recorded in `DECISIONS.md`; subsequent changes need
+   their own affected-behavior validation.
 
 Future import acceptance must define source namespace plus stable row identity/fingerprint, duplicate file/row no-op behavior, and explicit conflict review when the same identity changes. Retain private originals, mappings, parser versions, and row provenance; commit accepted rows transactionally. Schedule files cannot establish actual airings. Do not promise a format or API before examining representative samples.
 
-All phases after phase 1 are proposals. The project's test scope should follow affected behaviors; documentation changes require structural review, not application tests. Runtime-dependent promises need evidence from the pilot.
+The original sequence above records the planning history, not the current
+implementation status. The project's test scope follows affected behaviors;
+documentation changes require structural review, not application tests.
+Runtime-dependent promises need evidence from tests and the relevant pilot.
+
+## Accepted UI/workspace remediation (2026-10-11)
+
+`UI_WORKFLOW_AUDIT.md` defines the accepted channel-workspace and media-management
+contracts. Channel identity is inherited by ordinary workflows; device identity
+selects a destination within that channel. Catalog records and scheduling must
+remain useful without hardware configuration. Destination-specific preparation
+and attended publication retain their existing identity, evidence, and approval
+boundaries. Historical device ownership and runtime values are not silently
+rewritten to resolve presentation problems.
 # Prepare & Deliver boundary
 
 The station workflow keeps private source intake, preparation, schedule publication, attended activation, and independent observation as separate durable facts. The operator view is a server-rendered stepper over those facts; it does not imply that transfer or airing occurred merely because a batch was queued.

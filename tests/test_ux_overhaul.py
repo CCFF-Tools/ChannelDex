@@ -3,6 +3,7 @@ import unittest
 from datetime import datetime, timezone as dt_timezone
 
 from django.test import Client, TestCase
+from django.urls import reverse
 from pubtv.operations.forms import OccurrenceForm
 from pubtv.operations.models import Episode, MediaAsset, Occurrence, RecurrenceSlot, Show, Station, WeeklyEpisodeAssignment
 
@@ -11,6 +12,39 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class UXOverhaulTests(TestCase):
+  def test_workspace_switch_returns_object_pages_to_neutral_schedule_context(self):
+    first = Station.objects.create(name="PUB-TV")
+    second = Station.objects.create(name="GOV-TV")
+    client = Client()
+    session = client.session
+    session["active_station_id"] = first.pk
+    session.save()
+    response = client.post("/stations/switch/", {"station": second.pk, "next": "/shows/44/?date=2026-10-09&mode=week&show=44"})
+    assert response.status_code == 302
+    assert response["Location"] == "/schedule/?date=2026-10-09&mode=week"
+
+  def test_workspace_switch_maps_object_collections_without_discarding_media_context(self):
+    station = Station.objects.create(name="PUB-TV")
+    client = Client()
+    response = client.post("/stations/switch/", {"station": station.pk, "next": "/shows/44/?q=ignored"})
+    assert response["Location"] == "/shows/"
+    response = client.post("/stations/switch/", {"station": station.pk, "next": "/media/?show=44&readiness=pending"})
+    assert response["Location"] == "/media/?readiness=pending"
+
+  def test_occurrence_workbench_uses_station_local_calendar_date(self):
+    from django.utils import timezone
+    station = Station.objects.create(name="PUB-TV", timezone="America/Detroit")
+    show = Show.objects.create(station=station, title="Late show", code="late-show")
+    occurrence = Occurrence.objects.create(
+      station=station, show=show, item_type="episode", label="Late",
+      starts_at=timezone.make_aware(datetime(2026, 10, 10, 2, 0), dt_timezone.utc),
+      planned_duration_seconds=1800,
+    )
+    client = Client()
+    session = client.session; session["active_station_id"] = station.pk; session.save()
+    response = client.get(f"/occurrences/{occurrence.pk}/")
+    assert response.status_code == 200
+    assert response.context["selected_date"].isoformat() == "2026-10-09"
   def test_primary_navigation_is_owner_facing_and_contextual(self):
     base = (ROOT / "pubtv/templates/base.html").read_text(encoding="utf-8")
     for label in ("Today", "Schedule", "Shows", "History", "Settings"):
@@ -18,6 +52,18 @@ class UXOverhaulTests(TestCase):
     assert "Dashboard" not in base
     assert "Catalog" not in base
     assert "Operations" not in base
+
+  def test_main_list_and_calendar_views_have_specific_browser_titles(self):
+    Station.objects.create(name="PUB-TV")
+    expectations = {
+      "/shows/": "<title>Shows · ChannelDex</title>",
+      "/day/?date=2026-10-09": "<title>Day plan · ChannelDex</title>",
+      "/week/?date=2026-10-09": "<title>Weekly capacity · ChannelDex</title>",
+    }
+    for path, title in expectations.items():
+      response = Client().get(path)
+      assert response.status_code == 200
+      assert title in response.content.decode()
 
   def test_schedule_view_switcher_is_styled_and_marks_the_active_view(self):
     css = (ROOT / "pubtv/static/pubtv.css").read_text(encoding="utf-8")
@@ -46,16 +92,63 @@ class UXOverhaulTests(TestCase):
   def test_today_and_workbench_templates_keep_work_together(self):
     today = (ROOT / "pubtv/templates/dashboard.html").read_text(encoding="utf-8")
     workbench = (ROOT / "pubtv/templates/occurrence_workbench.html").read_text(encoding="utf-8")
-    assert "Day timeline" in today
+    assert "Planned timeline" in today
+    assert "Reserved program times" in today
     assert "Open workbench" in today
     for label in ("Plan", "States", "Asset preparation", "Programming", "Schedule upload coverage", "Air evidence"):
         assert label in workbench
+
+  def test_today_distinguishes_reserved_program_time_from_planned_content(self):
+    from django.utils import timezone
+    selected = timezone.localdate()
+    station = Station.objects.create(name="PUB-TV")
+    show = Show.objects.create(station=station, title="Reserved show", code="reserved-show")
+    RecurrenceSlot.objects.create(
+      station=station, show=show, weekday=selected.weekday(), start_time="07:00",
+      duration_seconds=1800, is_premiere=True,
+    )
+    response = Client().get(f"/?date={selected.isoformat()}")
+    assert response.status_code == 200
+    assert "Reserved program times" in response.content.decode()
+    assert "Reserved show" in response.content.decode()
+    assert not response.context["occurrences"]
 
 
   def test_legacy_routes_and_new_contextual_routes_are_declared(self):
     urls = (ROOT / "pubtv/config/urls.py").read_text(encoding="utf-8")
     for route in ('path("schedule/"', 'path("day/"', 'path("week/"', 'path("agenda/"', 'path("occurrences/<int:pk>/"'):
         assert route in urls
+
+  def test_media_library_is_primary_and_compatibility_routes_are_not_shadowed(self):
+    urls = (ROOT / "pubtv/config/urls.py").read_text(encoding="utf-8")
+    base = (ROOT / "pubtv/templates/base.html").read_text(encoding="utf-8")
+    assert 'href="{% url \'media-library\' %}"' in base
+    assert ">Media</a>" in base
+    assert urls.count('path("schedule/prepare/"') == 1
+    assert urls.count('path("media/status/"') == 1
+    assert reverse("media-library") == "/media/library/"
+    assert reverse("media-queue") == "/media/preparation/"
+
+  def test_stale_workspace_poll_blocks_saving_without_automatic_reload(self):
+    script = (ROOT / "pubtv/static/media_queue_summary.js").read_text(encoding="utf-8")
+    base = (ROOT / "pubtv/templates/base.html").read_text(encoding="utf-8")
+    assert "window.location.reload" not in script
+    assert "blockStaleWorkspace" in script
+    assert "stale-workspace-notice" in base
+    assert "Reload for the current channel" in base
+
+  def test_inline_file_pickers_send_rendered_workspace_origin(self):
+    device = (ROOT / "pubtv/templates/device_settings.html").read_text(encoding="utf-8")
+    guided = (ROOT / "pubtv/templates/guided_delivery.html").read_text(encoding="utf-8")
+    assert "body.append('originating_station', origin)" in device
+    assert "originating_station: origin" in guided
+
+  def test_agenda_preserves_selected_start_date_across_view_controls(self):
+    Station.objects.create(name="PUB-TV")
+    response = Client().get("/schedule/?mode=agenda&date=2026-10-09&days=5")
+    assert response.status_code == 200
+    assert response.context["selected_date"].isoformat() == "2026-10-09"
+    assert 'mode=day&amp;date=2026-10-09' in response.content.decode()
 
 
   def test_history_is_evidence_focused(self):

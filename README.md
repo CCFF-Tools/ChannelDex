@@ -15,8 +15,9 @@ itself proof that a program aired.
 
 The accepted V1 user is one owner/editor on one computer. The server listens on
 loopback (`127.0.0.1`) and does not require cloud hosting, a CDN, an AI runtime,
-accounts, or public access. PUB-TV is the only station boundary in V1; GOV-TV is
-future scope. Dropbox, email, and SMB values are private references only:
+accounts, or public access. PUB-TV is the first channel workspace. The
+**Working channel** selector scopes the catalog, schedule, history, and devices
+to the selected local channel. Dropbox, email, and SMB values are private references only:
 ChannelDex does not fetch them, mount them, or transmit them.
 
 The accepted media workflow records source availability, Adobe Media Encoder
@@ -39,7 +40,7 @@ from opening. Developers can use [the developer guide](docs/DEVELOPMENT.md).
 
 ## Navigation at a glance
 
-The header links are **Today**, **Schedule**, **Shows**, **Media Preparation**,
+The header links are **Today**, **Schedule**, **Shows**, **Media**,
 **History**, **Help**, and **Settings**. The queue strip below the header shows
 active and attention counts.
 
@@ -48,20 +49,21 @@ active and attention counts.
   review, and delivery.
 * [Shows](http://127.0.0.1:8000/shows/) — catalog, show workspaces, episodes, and
   premiere planning.
-* [Media Preparation](http://127.0.0.1:8000/media/) — intake, assets, preparation,
-  and transfer notes.
+* [Media](http://127.0.0.1:8000/media/library/) — library, reusable assets, intake,
+  and contextual preparation for a destination.
 * [History](http://127.0.0.1:8000/history/) — plans, uploads, audit events, and
   airing evidence.
 * [Help](http://127.0.0.1:8000/help/) — in-app workflow instructions.
-* [Settings](http://127.0.0.1:8000/settings/) — PUB-TV defaults and devices.
+* [Settings](http://127.0.0.1:8000/settings/) — active-channel defaults and devices,
+  plus explicitly application-wide database portability.
 
 The URLs above are illustrative for this document. In the application, links use
 Django named URLs so navigation remains correct if a path changes.
 
 ## First-time setup
 
-1. Open [Settings](http://127.0.0.1:8000/settings/) and choose **Set up station**.
-   The station name must be `PUB-TV`; timezone is `America/Detroit` (Eastern),
+1. Open [Settings](http://127.0.0.1:8000/settings/) and create or edit the channel.
+   PUB-TV is the initial channel; timezone is `America/Detroit` (Eastern),
    even if the Mac uses another timezone.
 2. In [Devices](http://127.0.0.1:8000/settings/devices/), add each playback or
    schedule target. The name should match the device's operational identity.
@@ -113,6 +115,12 @@ plans. An explicit episode or **No program** wins; disabling it stops future
 generation and does not delete existing plans. Carry-forward never consumes the
 pending-new queue.
 
+The bulk premiere planner can review replacement of an automatic carry-forward
+cycle with an explicit episode. Existing explicit assignments and No program
+choices remain protected. Replacement retains the old plan and its evidence;
+new planned occurrences require their own preparation/programming and exact
+upload coverage. Review the replacement before confirming it.
+
 ### Prepare the complete broadcast day
 
 Use [Schedule](http://127.0.0.1:8000/schedule/) in **Day**, **Week**, or
@@ -141,29 +149,40 @@ episode that exceeds its fixed slot; it does not shift, trim, add filler, or
 operate broadcast equipment. A complete plan is intentionally distinct from an
 actual-airing record.
 
-### Media Preparation
+### Media library and optional preparation
 
-Open [Media Preparation](http://127.0.0.1:8000/media/). Its intake fields are
-`Show`, `Destination device`, and the `Drop episode videos here or browse files`
-chooser (multiple video, MXF, or MKV files). After each file is chosen, select
-its `Episode`, or choose `Create a new episode` and enter `New episode title`.
-The title is initially suggested from the filename, with underscores and hyphens
-turned into spaces. Keep `Encode before transfer` checked unless an externally
-encoded file is already qualified for that destination. Under `Next step`, choose
-`Prepare and plan premieres` or `Prepare media only`, then choose `Review intake`.
-The review lists each file, its episode/new title, position, and encode choice.
-Confirmation creates a preparation batch once; it does not upload or activate a
-controller.
+Open [Media](http://127.0.0.1:8000/media/library/) to browse the active channel's
+episodes, media versions, and reusable assets. **Add media file** records a
+source or encoded rendition; the episode link is optional. Record its filename,
+local path, version, and runtime as known. This saves metadata without a device,
+copying media, running encoding, or starting a transfer. Missing runtime remains
+distinct from a recorded zero value.
+
+Use **Prepare for destination** when an episode version is ready for the
+optional device workflow. The [Preparation activity](http://127.0.0.1:8000/media/preparation/)
+workspace asks for `Show` and `Destination device`, and accepts a file chooser
+or an absolute local path. Choose the existing `Episode`, or enter a
+`New episode title`, and state whether the file needs encoding or is already
+encoded. Runtime uses hours, minutes, and seconds. Review the files, destination,
+and proposed work before confirming. Confirmation may queue preparation and
+transfer; attended schedule activation remains separate. Preparing media does
+not schedule a premiere or prove airing.
+
+Destination choices belong to the selected **Working channel**. A device name
+is not a channel selector. When several destinations are available, select the
+intended device deliberately. Switching channels keeps media drafts separate
+and returns object-specific pages to the corresponding workspace list.
 
 An asset form displays the disabled `Asset ID` plus `Episode`, `File name`,
 `Kind` (`source` or `encoded`), `Version` (for example `v2`), `Asset duration`
-(for example 0:27:30), and `SMB reference`. The SMB value is a private
+(for example 0:27:30), and a private source/storage reference. The reference is private
 reference; no file operation occurs.
 
 Asset preparation records `Source file available`, `Source available at`,
 `Adobe Media Encoder preset`, `Encoding machine and output notes`, and `Encoding
-completed at`. A transfer record records `Device`, `FTP transfer details`,
-`WinLGX library registration`, `Transfer completed at`, and `Recorded by`.
+completed at`. A transfer record records the device, transfer reference,
+destination library registration, completion time, and actor. Adapter-specific
+details remain applicable when that destination requires them.
 Example FTP details: `ftp://controller.example:21/Vol1/mpeg/SHOW_E02.mxf`;
 record the confirmation actually supplied by the operator, not a guessed path.
 
@@ -218,8 +237,9 @@ not prove airing.
 
 ### Record what aired
 
-Use [History](http://127.0.0.1:8000/history/) and the occurrence workbench to
-record airing evidence separately. `Status` is either `Reported/observed` or
+Use the occurrence workbench to record airing evidence, and
+[History](http://127.0.0.1:8000/history/) to inspect the read-only records.
+`Status` is either `Reported/observed` or
 `Log verified`; `Source` says who or what supports it; `Aired date and
 time` uses `YYYY-MM-DDTHH:MM`; `Notes` capture context; `Supersedes` links a
 correction to earlier evidence. Scheduled status remains distinct from these two
@@ -229,7 +249,7 @@ airing-evidence choices.
 
 ### Station Settings
 
-The station form has `Name` (must be `PUB-TV`) and `Timezone` (accepted value
+The station form has `Name` (the channel's local name) and `Timezone` (accepted value
 `America/Detroit`). **Schedule defaults** has two checkboxes:
 
 * **Keep the most recent episode in its weekly slots until another episode is
@@ -252,6 +272,10 @@ database.
 
 The device form has one field, `Name`: the exact playback or schedule-upload
 device name, such as `WinLGX HD Master`. It is an identifier, not a hostname.
+The active channel owns the device. Manage devices lists that ownership and
+provides separate name-editing and connection-configuration actions. Renaming
+a device does not transfer its history to another channel. If a device appears
+under the wrong channel, review its linked records before correcting ownership.
 
 ### Device Settings: connection
 

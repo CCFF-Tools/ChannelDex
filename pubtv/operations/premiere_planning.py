@@ -11,13 +11,14 @@ import hashlib
 import json
 
 from django.core.exceptions import ValidationError
+from django.contrib import messages
 from django.core.signing import BadSignature, TimestampSigner
 from django.db import IntegrityError, transaction
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
 
-from .models import Episode, RecurrenceSlot, Show, Station, WeeklyEpisodeAssignment
-from .services import active_premiere_slot, audit, materialize_assignment, occurrences_for_cycle
+from .models import Episode, Occurrence, RecurrenceSlot, Show, Station, WeeklyEpisodeAssignment
+from .services import active_premiere_slot, audit, materialize_assignment, occurrences_for_cycle, pending_episode_sort_key
 from .active_station import resolve_active_station
 
 
@@ -37,8 +38,10 @@ def premiere_candidates(show, *, start=None, page=1, page_size=12):
         slot = active_premiere_slot(show, cursor)
         if slot is not None:
             assignment = WeeklyEpisodeAssignment.objects.filter(show=show, week_start=cursor - timedelta(days=cursor.weekday())).first()
-            candidates.append({"date": cursor, "slot": slot, "occupied": bool(assignment),
-                "occupied_by": assignment, "reason": "Already assigned" if assignment else "Available"})
+            replaceable = bool(assignment and assignment.is_automatic_carry_forward)
+            candidates.append({"date": cursor, "slot": slot, "occupied": bool(assignment) and not replaceable,
+                "replaceable": replaceable, "occupied_by": assignment,
+                "reason": "Replace automatic carry-forward" if replaceable else ("Already assigned" if assignment else "Available")})
         cursor += timedelta(days=1)
     offset = (page - 1) * page_size
     page_candidates = candidates[offset:offset + page_size]
@@ -142,8 +145,9 @@ def build_bulk_premiere_preview(*, show, episode_ids, first_premiere_date):
         raise ValidationError("Premiere cycles must use one non-overlapping premiere boundary per seven-day cycle.")
     existing = list(WeeklyEpisodeAssignment.objects.filter(show=show).order_by("week_start", "pk"))
     by_week = {assignment.week_start: assignment for assignment in existing}
-    if any(d - timedelta(days=d.weekday()) in by_week for d in dates):
-        raise ValidationError("One or more proposed premiere cycles is already occupied, including an explicit No program cycle.")
+    occupied = [by_week.get(d - timedelta(days=d.weekday())) for d in dates]
+    if any(assignment and not assignment.is_automatic_carry_forward for assignment in occupied):
+        raise ValidationError("One or more proposed premiere cycles has an explicit episode or No program choice and cannot be replaced in bulk.")
 
     occurrences = []
     for episode, premiere_date in zip(episodes, dates):
@@ -162,12 +166,17 @@ def build_bulk_premiere_preview(*, show, episode_ids, first_premiere_date):
             {
                 "date": occurrence.starts_at.date().isoformat(),
                 "time": occurrence.starts_at.time().isoformat(timespec="minutes"),
+                "date_label": occurrence.starts_at.strftime("%a, %b %-d, %Y"),
+                "time_label": occurrence.starts_at.strftime("%-I:%M %p").lstrip("0"),
                 "premiere": occurrence.schedule_role == "premiere",
                 "slot_id": occurrence.recurrence_slot_id,
             }
             for occurrence in occurrences_for_cycle(assignment)
         ]
-        occurrences.append({"episode_id": episode.pk, "episode_title": episode.title, "premiere_date": premiere_date.isoformat(), "week_start": (premiere_date - timedelta(days=premiere_date.weekday())).isoformat(), "occurrences": sorted(cycle, key=lambda item: (item["date"], item["time"]))})
+        replaced = by_week.get(premiere_date - timedelta(days=premiere_date.weekday()))
+        occurrences.append({"episode_id": episode.pk, "episode_title": episode.title, "premiere_date": premiere_date.isoformat(), "premiere_date_label": premiere_date.strftime("%A, %B %-d, %Y"), "week_start": (premiere_date - timedelta(days=premiere_date.weekday())).isoformat(), "occurrences": sorted(cycle, key=lambda item: (item["date"], item["time"])),
+                            "replaces_assignment_id": replaced.pk if replaced else None,
+                            "replaces_episode_title": replaced.episode.title if replaced and replaced.episode else ""})
 
     fingerprint = _fingerprint(show, episodes, existing, slots, first_date=first_premiere_date, episode_ids=episode_ids)
     payload = {"show_id": show.pk, "episode_ids": [episode.pk for episode in episodes], "first_premiere_date": first_premiere_date.isoformat(), "dates": [item["premiere_date"] for item in occurrences], "fingerprint": fingerprint}
@@ -201,14 +210,35 @@ def confirm_bulk_premiere_plan(*, token, actor="owner"):
     dates = [date.fromisoformat(value) for value in payload["dates"]]
     if len(dates) != len(episodes):
         raise ValidationError("The proposal is incomplete; preview again.")
-    if any(WeeklyEpisodeAssignment.objects.filter(show=show, week_start=d - timedelta(days=d.weekday())).exists() for d in dates):
-        raise ValidationError("A proposed premiere cycle was occupied while confirming; nothing was changed.")
+    by_week = {assignment.week_start: assignment for assignment in assignments}
+    replaced = [by_week.get(d - timedelta(days=d.weekday())) for d in dates]
+    if any(assignment and not assignment.is_automatic_carry_forward for assignment in replaced):
+        raise ValidationError("A proposed premiere cycle now has an explicit episode or No program choice; nothing was changed.")
     created = []
     try:
-        for episode, premiere_date in zip(episodes, dates):
+        for episode, premiere_date, prior in zip(episodes, dates, replaced):
+            if prior:
+                prior.state = "superseded"
+                prior.save(update_fields=["state"])
             assignment = WeeklyEpisodeAssignment(show=show, week_start=premiere_date - timedelta(days=premiere_date.weekday()), premiere_date=premiere_date, episode=episode, selection_type="premiere")
             assignment.full_clean()
             assignment.save()
+            if prior:
+                prior.superseded_by = assignment
+                prior.full_clean()
+                prior.save(update_fields=["superseded_by"])
+                old_occurrences = list(Occurrence.objects.select_for_update().filter(
+                    weekly_assignment=prior, status="planned",
+                ))
+                for occurrence in old_occurrences:
+                    occurrence.status = "rescheduled"
+                    occurrence.reason = f"Automatic carry-forward replaced by reviewed bulk premiere plan {assignment.pk}."
+                    occurrence.save(update_fields=["status", "reason", "revision"])
+                    occurrence.refresh_from_db(fields=["revision"])
+                    audit("reschedule", "Occurrence", occurrence,
+                          f"Automatic carry-forward replaced; history retained for assignment {prior.pk}", actor)
+                audit("supersede", "WeeklyEpisodeAssignment", prior,
+                      f"Automatic carry-forward replaced by assignment {assignment.pk}", actor)
             materialize_assignment(assignment)
             audit("create", "WeeklyEpisodeAssignment", assignment, f"Bulk premiere planned: {episode.title} on {premiere_date}", actor)
             created.append(assignment)
@@ -220,7 +250,8 @@ def confirm_bulk_premiere_plan(*, token, actor="owner"):
 def bulk_premiere_planner(request, show_id):
     station = resolve_active_station(request)
     show = get_object_or_404(Show, pk=show_id, station=station)
-    episodes = list(show.episodes.filter(status="pending").order_by("intended_air_order", "intended_premiere_date", "legacy_received_at", "pk"))
+    episodes = list(show.episodes.filter(status="pending").prefetch_related("deliveries"))
+    episodes.sort(key=pending_episode_sort_key)
     selected_ids = request.POST.getlist("episode_ids") or request.GET.getlist("episode_ids")
     if selected_ids:
         order = {str(value): index for index, value in enumerate(selected_ids)}
@@ -247,7 +278,14 @@ def bulk_premiere_planner(request, show_id):
             except (ValidationError, Show.DoesNotExist) as exc:
                 context["error"] = str(exc)
                 return render(request, "pubtv/bulk_premiere_planner.html", context, status=400)
-            return redirect("week-view")
+            first_created = min(created, key=lambda assignment: assignment.premiere_date)
+            messages.success(
+                request,
+                f"Planned {len(created)} premiere cycle{'s' if len(created) != 1 else ''}; review starts in the scheduled-items week view.",
+            )
+            return redirect(
+                f"/schedule/?mode=week&date={first_created.premiere_date.isoformat()}&view=schedule"
+            )
         try:
             proposal = build_bulk_premiere_preview(show=show, episode_ids=request.POST.getlist("episode_ids"), first_premiere_date=date.fromisoformat(request.POST.get("first_premiere_date", "")))
         except (ValueError, ValidationError) as exc:

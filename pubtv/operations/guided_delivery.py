@@ -62,7 +62,7 @@ def start_guided_encoded_delivery(*, target: Device, show: Show, file_path: str,
         raise ValueError("The episode does not belong to the selected show")
     prior = [int(value[1:]) for value in MediaAsset.objects.filter(episode=episode).values_list("version", flat=True)
              if value.startswith("v") and value[1:].isdigit()]
-    asset = MediaAsset.objects.create(episode=episode, file_name=snapshot["name"], kind="encoded",
+    asset = MediaAsset.objects.create(station=show.station, episode=episode, file_name=snapshot["name"], kind="encoded",
                                       version=f"v{max(prior or [0]) + 1}", smb_reference=snapshot["path"])
     intake = {"target_id": target.pk, "show_id": show.pk, "episode_id": episode.pk,
               "asset_id": asset.pk, "file": snapshot, "encode_before_transfer": False}

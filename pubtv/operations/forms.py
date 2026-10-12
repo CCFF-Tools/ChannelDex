@@ -1,6 +1,7 @@
 from datetime import timedelta
 
 from django import forms
+from django.db.models import Q
 from django.utils import timezone
 
 from .models import (
@@ -33,7 +34,7 @@ class DurationWidget(forms.MultiWidget):
 
     def decompress(self, value):
         if value in (None, ""):
-            return [None, None, 0]
+            return [None, None, None]
         seconds = int(value)
         return [seconds // 3600, (seconds % 3600) // 60, seconds % 60]
 
@@ -89,7 +90,9 @@ class OccurrenceForm(forms.ModelForm):
         if station:
             self.fields["show"].queryset = Show.objects.filter(station=station)
             self.fields["episode"].queryset = Episode.objects.filter(show__station=station)
-            self.fields["asset"].queryset = MediaAsset.objects.filter(episode__show__station=station)
+            self.fields["asset"].queryset = MediaAsset.objects.filter(
+                Q(station=station) | Q(station__isnull=True, episode__show__station=station)
+            )
         self.fields["label"].required = False
         self.fields["label"].help_text = "Used for station IDs, PSAs, filler, live events, and other non-episode items. Episode labels are derived."
 
@@ -154,7 +157,10 @@ class AutomationPreparationForm(forms.Form):
     def __init__(self, *args, station=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.fields["target"].queryset = Device.objects.filter(station=station).order_by("name") if station else Device.objects.none()
-        self.fields["assets"].queryset = (MediaAsset.objects.filter(episode__show__station=station, kind__in=("source", "encoded")).order_by("file_name", "pk") if station else MediaAsset.objects.none())
+        self.fields["assets"].queryset = (MediaAsset.objects.filter(
+            Q(station=station) | Q(station__isnull=True, episode__show__station=station),
+            kind__in=("source", "encoded"),
+        ).order_by("file_name", "pk") if station else MediaAsset.objects.none())
 
 
 class AutomationPublicationForm(forms.Form):
@@ -361,15 +367,25 @@ class AssetForm(forms.ModelForm):
 
     class Meta:
         model = MediaAsset
-        fields = ["episode", "file_name", "kind", "version", "runtime_seconds", "smb_reference"]
-        labels = {"file_name": "File name"}
+        fields = ["episode", "file_name", "kind", "version", "runtime_seconds", "local_path", "smb_reference"]
+        labels = {
+            "episode": "Episode (optional)",
+            "file_name": "File name",
+            "local_path": "Local file path (optional)",
+            "smb_reference": "Source/storage reference",
+        }
         widgets = {"asset_id": forms.TextInput(attrs={"readonly": True}), "label": forms.HiddenInput()}
-        help_texts = {"smb_reference": "A private metadata reference only; ChannelDex does not mount, fetch, move, or rename the file."}
+        help_texts = {
+            "episode": "Leave blank for a reusable station ID, PSA, filler item, or other non-episode asset.",
+            "local_path": "A private reference to the file in its current location. Saving does not copy, inspect, or transfer it.",
+            "smb_reference": "A private metadata reference only; ChannelDex does not mount, fetch, move, or rename the file.",
+        }
 
     def __init__(self, *args, station=None, **kwargs):
         super().__init__(*args, **kwargs)
         if station:
             self.fields["episode"].queryset = Episode.objects.filter(show__station=station)
+        self.fields["episode"].required = False
         initial = kwargs.get("initial") or {}
         if initial.get("episode"):
             self.fields["episode"].initial = initial["episode"]

@@ -2,7 +2,7 @@
   <nav class="schedule-modes" aria-label="Schedule view">
     <a href="{% url 'schedule' %}?mode=day&amp;date={{ selected_date|date:'Y-m-d' }}"{% if request.GET.mode == 'day' or not request.GET.mode and request.path != '/week/' and request.path != '/agenda/' and request.path != '/schedule/recurring/' and request.path != '/schedule/prepare/' and request.path != '/schedule/delivery/' %} aria-current="page"{% endif %}>Day</a>
     <a href="{% url 'schedule' %}?mode=week&amp;date={{ selected_date|date:'Y-m-d' }}"{% if request.GET.mode == 'week' or request.path == '/week/' %} aria-current="page"{% endif %}>Week</a>
-    <a href="{% url 'schedule' %}?mode=agenda&amp;days={{ days|default:'7' }}"{% if request.GET.mode == 'agenda' or request.path == '/agenda/' %} aria-current="page"{% endif %}>Agenda</a>
+    <a href="{% url 'schedule' %}?mode=agenda&amp;date={{ selected_date|date:'Y-m-d' }}&amp;days={{ days|default:'7' }}"{% if request.GET.mode == 'agenda' or request.path == '/agenda/' %} aria-current="page"{% endif %}>Agenda</a>
     <a href="{% url 'schedule' %}?mode=recurring&amp;date={{ selected_date|date:'Y-m-d' }}&amp;days={{ days|default:'7' }}"{% if request.GET.mode == 'recurring' or request.path == '/schedule/recurring/' %} aria-current="page"{% endif %}>Recurring times</a>
   </nav>
   <nav class="schedule-workflow-actions" aria-label="Schedule workflow"><a class="button-link{% if request.path == '/schedule/prepare/' %} primary{% endif %}" href="{% url 'schedule-prepare' %}"{% if request.path == '/schedule/prepare/' %} aria-current="page"{% endif %}>Review schedule</a><a class="button-link{% if request.path == '/schedule/delivery/' %} primary{% endif %}" href="{% url 'schedule-delivery' %}"{% if request.path == '/schedule/delivery/' %} aria-current="page"{% endif %}>Schedule delivery</a></nav>
@@ -13,6 +13,7 @@
       <a href="{% url 'schedule' %}?mode=week&amp;date={{ next_week|date:'Y-m-d' }}&amp;view={{ view_mode }}">Next week</a>
       <a class="button-link primary" href="{% url 'occurrence-create' %}">Add to schedule</a>
     {% elif request.GET.mode == 'agenda' or request.path == '/agenda/' %}
+      <strong>Starting {{ selected_date|date:'M j, Y' }}</strong>
       <a class="button-link primary" href="{% url 'occurrence-create' %}">Add to schedule</a>
     {% elif request.GET.mode != 'recurring' and request.path != '/schedule/recurring/' and request.path != '/schedule/prepare/' and request.path != '/schedule/delivery/' %}
       <a href="{% url 'schedule' %}?mode=day&amp;date={{ previous_date|date:'Y-m-d' }}">Previous day</a>
