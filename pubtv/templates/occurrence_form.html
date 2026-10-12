@@ -1,9 +1,9 @@
 {% extends "base.html" %}
 {% block content %}
 <div class="page-heading">
-  <p class="eyebrow"><a href="{% url 'schedule' %}">Schedule</a> / Add</p>
-  <h1>Add to schedule</h1>
-  <p class="lede">Choose the workflow that matches what you are adding.</p>
+  <p class="eyebrow"><a href="{% url 'schedule' %}">Schedule</a> / {% if occurrence %}Edit{% else %}Add{% endif %}</p>
+  <h1>{{ title }}</h1>
+  <p class="lede">{% if occurrence %}Update this planned item. Its revision is checked before saving so another tab cannot overwrite newer work.{% else %}Choose the workflow that matches what you are adding.{% endif %}</p>
 </div>
 {% if not occurrence %}
 <div class="summary-grid">
@@ -19,7 +19,7 @@
 </div>
 {% endif %}
 <form method="post" class="stacked-form" novalidate>
-  {% csrf_token %}
+  {% csrf_token %}{% include "originating_station_field.html" %}
   {% if form.non_field_errors %}<div class="form-errors">{{ form.non_field_errors }}</div>{% endif %}
   {% for field in form.visible_fields %}
   <div class="field{% if field.errors %} has-error{% endif %}" data-field-name="{{ field.name }}">

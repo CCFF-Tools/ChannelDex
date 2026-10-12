@@ -143,7 +143,7 @@ class TodoWorkflowTests(TestCase):
 
     def test_preparation_readiness_normal_and_live(self):
         normal = Occurrence.objects.create(station=self.station, show=self.show, episode=self.episode, item_type="episode", label="E", starts_at=datetime(2026,1,5,12,tzinfo=dt_timezone.utc), planned_duration_seconds=1800)
-        self.assertEqual(preparation_readiness(normal)["label"], "0/6 preparation facts")
+        self.assertEqual(preparation_readiness(normal)["label"], "0 of 6 preparation steps recorded")
         asset = MediaAsset.objects.create(episode=self.episode, file_name="episode.mov", kind="encoded")
         normal.asset = asset
         normal.save(update_fields=["asset"], skip_revision=True)
@@ -155,9 +155,9 @@ class TodoWorkflowTests(TestCase):
         UploadedOccurrenceCoverage.objects.create(upload=upload, occurrence=normal, occurrence_revision=normal.revision)
         self.assertTrue(preparation_readiness(normal)["ready"])
         live = Occurrence.objects.create(station=self.station, item_type="live", label="Live", starts_at=normal.starts_at, planned_duration_seconds=1800)
-        self.assertEqual(preparation_readiness(live)["label"], "4/6 preparation facts")
+        self.assertEqual(preparation_readiness(live)["label"], "4 of 6 preparation steps recorded")
         OccurrenceProgramming.objects.create(occurrence=live, device=device, slot_assignment="slot")
-        self.assertEqual(preparation_readiness(live)["label"], "5/6 preparation facts")
+        self.assertEqual(preparation_readiness(live)["label"], "5 of 6 preparation steps recorded")
         live_upload = UploadedScheduleRevision.objects.create(device=device, external_reference="live-upload")
         UploadedOccurrenceCoverage.objects.create(upload=live_upload, occurrence=live, occurrence_revision=live.revision)
         self.assertTrue(preparation_readiness(live)["ready"])
@@ -303,7 +303,7 @@ class TodoWorkflowTests(TestCase):
         )
         self.assertContains(Client().get(f"/week/?date={today.isoformat()}&view=schedule"), "Warnings")
         self.assertContains(Client().get("/agenda/?days=31"), "New premiere")
-        self.assertContains(Client().get(f"/?date={today.isoformat()}"), "0/6 preparation facts")
+        self.assertContains(Client().get(f"/?date={today.isoformat()}"), "0 of 6 preparation steps recorded")
 
     def test_named_producer_flow_and_private_optional_membership(self):
         client = Client()

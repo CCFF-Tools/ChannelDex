@@ -4,11 +4,11 @@ ChannelDex is owned, developed, and published by Capital Media Systems. The
 existing `pubtv` Python package, `PUBTV_*` environment variables, and
 `Application Support/PUB-TV` data location are compatibility identifiers.
 
-The 2026-09-17 usability overhaul is accepted as an application implementation
-target. It changes owner-facing navigation and workflows, not the loopback
-runtime, packaging, data-folder, or backup contracts described here. Until the
-staged implementation and pilot are verified, this document must not be read as
-claiming that the new Today/Schedule/Shows/History/Settings IA is complete.
+The local application includes Today, Schedule, Shows, media management,
+History, Help, and Settings. The original usability overhaul was implemented;
+the October 2026 follow-up audit and its accepted remediation contracts are
+tracked in [UI_WORKFLOW_AUDIT.md](docs/UI_WORKFLOW_AUDIT.md). These UI changes do
+not alter the loopback runtime, packaging, data-folder, or backup contracts.
 
 The initial supported test target is macOS 26.x on Apple Silicon. Intel Mac compatibility is deferred for later validation and is not currently promised. The runtime and packaging approach must remain portable enough to evaluate that target separately; do not assume one universal executable.
 
@@ -52,7 +52,11 @@ python manage.py runserver 127.0.0.1:8000
 
 Open `http://127.0.0.1:8000/`. The SQLite database is `pubtv.sqlite3` in this checkout for development; an operational launcher should set a local Application Support path before startup. Keep the server on loopback. Back up only after quitting the server, copying the complete data folder (including SQLite sidecars when present). Qualified media preparation and FTP exchange run only through approved local jobs. Credentials remain in macOS Keychain. Schedule delivery and playout control remain disabled until target-specific research gates pass.
 
-The tested environment is Python 3.11.15 with Django 5.2.17, Gunicorn 23.0.0, WhiteNoise 6.9.0, asgiref 3.12.1, packaging 26.3, and sqlparse 0.6.0. The complete validation suite currently contains 165 deterministic tests, including the UltraNEXUS domain, adapter, approval, and workflow tests.
+The pinned runtime dependencies are recorded in `requirements.lock` and
+`packaging/requirements.lock`. Tests include scheduling, workspace boundaries,
+media tracking, and UltraNEXUS domain, adapter, approval, and workflow behavior.
+Test counts change as coverage grows; use the current test-run output rather
+than a historical count in this guide as validation evidence.
 
 Run the complete focused suite with:
 

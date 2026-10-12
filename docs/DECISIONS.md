@@ -148,6 +148,15 @@ The owner approved the complete V1 scope and Python + Django + SQLite stack on 2
 
 ## Change record
 
+- 2026-10-11: Owner accepted execution of the October 8 UI/workflow audit.
+  The top-level channel selector is the workspace boundary. Media tracking,
+  library management, and ChannelDex scheduling take priority over further
+  vendor-specific expansion. Catalog-only intake and contextual optional
+  preparation/delivery supersede the requirement that every intake queue
+  preparation immediately. Existing device integrations, provenance, and
+  review gates remain. See `UI_WORKFLOW_AUDIT.md` for contracts and data-repair
+  boundaries; acceptance is not evidence of completed runtime validation.
+
 - 2026-09-22: Owner accepted and implementation added recurring show names to reserved capacity blocks in the Week capacity view and Day capacity intervals, including reservations without assigned episodes.
 - 2026-09-22: Owner accepted and implementation standardized owner-facing time labels to lowercase `a.m.`/`p.m.` with spaced hyphens between range endpoints.
 - 2026-09-21: Owner accepted and implementation added the optional global episode carry-forward setting described in D16.

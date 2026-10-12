@@ -35,7 +35,9 @@
     manual = document.getElementById('source-path-manual'), draftInput = document.getElementById('draft-rows'),
     episodes = JSON.parse(document.getElementById('queue-episodes').textContent),
     initial = JSON.parse(document.getElementById('queue-draft').textContent) || [],
-    errors = JSON.parse(document.getElementById('queue-errors').textContent) || {}, key = 'channeldex-media-intake';
+    errors = JSON.parse(document.getElementById('queue-errors').textContent) || {},
+    workspaceKey = document.getElementById('active-workspace')?.dataset.station || 'unknown',
+    key = `channeldex-media-intake:${workspaceKey}`;
   let rows = initial.map(normalize);
   const save = () => {
     draftInput.value = JSON.stringify(rows);
@@ -79,10 +81,15 @@
       };
       episode.addEventListener('change', syncEpisode); syncEpisode();
       title.addEventListener('input', () => {row.new_title = title.value; save();});
-      [['episode_number', 'Episode number (optional) ', 0], ['runtime_seconds', 'Manual runtime seconds (optional) ', 1]].forEach(([name, text, min]) => {
-        const input = document.createElement('input'); input.type = 'number'; input.min = String(min); input.step = '1'; input.value = row[name];
-        field(group, text, input); input.addEventListener('input', () => {row[name] = input.value; save();});
-      });
+      const number = document.createElement('input'); number.type = 'number'; number.min = '0'; number.step = '1'; number.value = row.episode_number;
+      field(group, 'Episode number (optional) ', number); number.addEventListener('input', () => {row.episode_number = number.value; save();});
+      const runtime = document.createElement('fieldset'), runtimeLegend = document.createElement('legend');
+      runtimeLegend.textContent = 'Runtime (optional)'; runtime.append(runtimeLegend);
+      const total = Number.parseInt(row.runtime_seconds || '0', 10) || 0;
+      const units = [['Hours', Math.floor(total / 3600)], ['Minutes', Math.floor(total % 3600 / 60)], ['Seconds', total % 60]];
+      const runtimeInputs = units.map(([label, value], unitIndex) => { const input = document.createElement('input'); input.type = 'number'; input.min = '0'; if (unitIndex) input.max = '59'; input.step = '1'; input.value = value || ''; field(runtime, `${label} `, input); return input; });
+      const saveRuntime = () => { row.runtime_seconds = String((Number(runtimeInputs[0].value) || 0) * 3600 + (Number(runtimeInputs[1].value) || 0) * 60 + (Number(runtimeInputs[2].value) || 0)) || ''; save(); };
+      runtimeInputs.forEach(input => input.addEventListener('input', saveRuntime)); group.append(runtime);
       const mode = document.createElement('select'); mode.required = true;
       [['', 'Choose encoding state'], [modes[0], 'Needs encoding'], [modes[1], 'Already encoded']].forEach(([value, text]) => {
         const option = document.createElement('option'); option.value = value; option.textContent = text; mode.append(option);
@@ -107,7 +114,7 @@
     const button = event.currentTarget; button.disabled = true; status.textContent = 'Opening local chooser…'; save();
     try {
       const response = await fetch(form.dataset.picker, {method: 'POST', headers: {'X-CSRFToken': form.querySelector('[name=csrfmiddlewaretoken]').value,
-        'Content-Type': 'application/x-www-form-urlencoded'}, body: new URLSearchParams({kind: 'files'}), credentials: 'same-origin'});
+        'Content-Type': 'application/x-www-form-urlencoded'}, body: new URLSearchParams({kind: 'files', originating_station: form.querySelector('[name=originating_station]').value}), credentials: 'same-origin'});
       const result = await response.json();
       if (result.cancelled) {status.textContent = 'Chooser cancelled; draft retained.'; return;}
       if (!response.ok || !Array.isArray(result.paths)) throw Error(result.error || 'Chooser failed.');

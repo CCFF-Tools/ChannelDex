@@ -23,7 +23,7 @@ from django.utils import timezone
 
 from .automation import approve_snapshot, canonical_hash, preparation_batch_snapshot, schedule_ready_binding, _sha256_file
 from .media_identity import asset_claim, file_metadata
-from .models import AuditEvent, Device, Episode, MediaAsset, MediaIntakeReview, MediaRelinkReview, PreparationBatch, PreparationBatchItem, PreparationJob, Show, UltraNexusTargetSettings
+from .models import AuditEvent, Device, Episode, MediaAsset, MediaIntakeReview, MediaRelinkReview, PreparationBatch, PreparationBatchItem, PreparationJob, Show, UltraNexusTargetSettings, _duration_label
 from .active_station import resolve_active_station
 
 
@@ -32,14 +32,26 @@ MAX_UPLOAD_BYTES = 50 * 1024 * 1024 * 1024
 SUPPORTED_VIDEO_SUFFIXES = {".mp4", ".mov", ".mxf", ".mpeg", ".mpg", ".m4v", ".avi", ".mkv"}
 
 
-def accepted_media_batches(station=None):
+def accepted_media_batches(station=None, scope=""):
     """Return accepted batches, retaining cancelled ones until explicitly hidden."""
+    batches = PreparationBatch.objects.filter(removed_from_list=False, **({"target__station": station} if station is not None else {}))
+    if scope == "attention":
+        batches = batches.exclude(status="cancelled").filter(items__execution_status__in=("failed", "blocked"))
+    elif scope == "active":
+        batches = batches.exclude(status="cancelled").filter(items__execution_status__in=("pending", "encoding", "validating", "transferring", "verifying"))
     return (
-        PreparationBatch.objects.filter(removed_from_list=False, **({"target__station": station} if station is not None else {}))
+        batches.distinct()
         .select_related("target")
         .prefetch_related("items__asset__episode")
         .order_by("-created_at")[:100]
     )
+
+
+def eligible_destination_devices(station):
+    """Devices with one current adapter configuration, scoped to the workspace."""
+    return Device.objects.filter(
+        station=station, ultranexus_settings__is_current=True,
+    ).distinct().order_by("name", "pk")
 
 
 def _safe_name(name: str) -> str:
@@ -189,7 +201,7 @@ def create_media_queue_batch(*, target, show, rows, submission_token=None, label
                     AuditEvent.objects.create(actor=actor, action="create", entity="Episode", entity_id=episode.pk, summary="Episode created from approved media queue intake")
                 prior_versions = list(MediaAsset.objects.filter(episode=episode).values_list("version", flat=True))
                 numbers = [int(value[1:]) for value in prior_versions if value.startswith("v") and value[1:].isdigit()]
-                asset = MediaAsset.objects.create(episode=episode, file_name=_safe_name(row["upload"].name), kind="source" if row["encode_before_transfer"] else "encoded", version=f"v{max(numbers or [0]) + 1}", smb_reference=str(path), local_path=str(path.resolve()), content_identity=digest)
+                asset = MediaAsset.objects.create(station=show.station, episode=episode, file_name=_safe_name(row["upload"].name), kind="source" if row["encode_before_transfer"] else "encoded", version=f"v{max(numbers or [0]) + 1}", smb_reference=str(path), local_path=str(path.resolve()), content_identity=digest)
                 AuditEvent.objects.create(actor=actor, action="create", entity="MediaAsset", entity_id=asset.pk, summary="Source asset created from private media queue intake")
                 item = PreparationBatchItem.objects.create(batch=batch, asset=asset, selected_input_path=str(path.resolve()), selected_input_hash=digest, encode_before_transfer=row["encode_before_transfer"], position=position)
             if not UltraNexusTargetSettings.objects.filter(target=target, is_current=True).exists():
@@ -215,7 +227,7 @@ def create_media_queue_batch(*, target, show, rows, submission_token=None, label
 
 def queue_summary(station=None):
     """Return a polling-safe global summary without exposing private paths."""
-    items = PreparationBatchItem.objects.select_related("batch", "asset", "asset__episode").order_by("batch__created_at", "position", "pk")
+    items = PreparationBatchItem.objects.filter(batch__removed_from_list=False).select_related("batch", "asset", "asset__episode").order_by("batch__created_at", "position", "pk")
     if station is not None:
         items = items.filter(batch__target__station=station)
     counts = {state: 0 for state in QUEUE_STATES}
@@ -382,10 +394,12 @@ def relink_media_asset(asset_id, path, *, actor="owner", expected_identity="", c
 def media_queue_summary(request):
     from .models import SchedulePublicationBatch
     from .schedule_preparation import publication_readiness
-    result = queue_summary(resolve_active_station(request))
+    station = resolve_active_station(request)
+    result = queue_summary(station)
+    result["station_id"] = station.pk if station else None
     result["publications"] = [{"id": batch.pk, **{
         key: value for key, value in publication_readiness(batch).items() if key != "waiting"
-    }} for batch in SchedulePublicationBatch.objects.filter(target__station=resolve_active_station(request)).select_related("target").order_by("-pk")[:100]]
+    }} for batch in SchedulePublicationBatch.objects.filter(target__station=station).select_related("target").order_by("-pk")[:100]]
     response = JsonResponse(result)
     response["Cache-Control"] = "no-store"
     return response
@@ -400,11 +414,10 @@ def intake_context(request):
         show = station_shows.first() if station_shows.count() == 1 else None
     episode = Episode.objects.filter(pk=request.GET.get("episode"), show=show).first() if show and request.GET.get("episode") else None
     asset = MediaAsset.objects.filter(pk=request.GET.get("asset"), episode=episode).first() if episode and request.GET.get("asset") else None
-    targets = Device.objects.filter(station=station).order_by("name")
+    targets = eligible_destination_devices(station)
     target = Device.objects.filter(pk=request.GET.get("target"), station=station).first() if request.GET.get("target") else None
     if target is None:
-        configured = Device.objects.filter(station=station, ultranexus_settings__is_current=True).order_by("name")
-        target = configured.first() if configured.count() == 1 else (targets.first() if targets.count() == 1 else None)
+        target = targets.first() if targets.count() == 1 else None
     try:
         order = max(0, int(request.GET.get("order", "0")))
     except (TypeError, ValueError):
@@ -432,12 +445,14 @@ def _stage_review_rows(review, rows):
             raise ValueError("Select local source paths with the file chooser.")
         path = Path(row["source_path"])
         stat = path.stat()
+        runtime_seconds = row.get("runtime_seconds", "")
         staged.append({"path": str(path), "name": row["name"],
                        "size": stat.st_size, "mtime_ns": stat.st_mtime_ns,
                        "episode_id": row["episode"].pk if row["episode"] else None, "new_title": row["title"],
                        "encode_before_transfer": row["encode_before_transfer"], "position": position,
                        "content_identity": "", "episode_number": row.get("episode_number", ""),
-                       "runtime_seconds": row.get("runtime_seconds", "")})
+                       "runtime_seconds": runtime_seconds,
+                       "runtime_label": _duration_label(int(runtime_seconds)) if str(runtime_seconds).isdigit() else "Not recorded"})
     if review.payload.get("rows"):
         if review.payload["rows"] != staged:
             raise ValueError("The draft changed after this review. Start a fresh intake review.")
@@ -631,13 +646,25 @@ def confirm_intake_review(review, *, first_premiere_date=None, actor="owner"):
             episode.save(update_fields=["episode_number", "runtime_seconds", "runtime_provenance"])
             AuditEvent.objects.create(actor=actor, action="update", entity="Episode", entity_id=episode.pk, summary="Manual episode number/runtime recorded during media intake")
         episodes.append(episode)
-        prior = [int(v[1:]) for v in MediaAsset.objects.filter(episode=episode).values_list("version", flat=True) if v.startswith("v") and v[1:].isdigit()]
         encode = bool(row.get("encode_before_transfer"))
-        asset = MediaAsset.objects.create(episode=episode, file_name=row["name"], kind="source" if encode else "encoded",
-            version=f"v{max(prior or [0]) + 1}", local_path=str(path.resolve()),
-            runtime_seconds=int(row["runtime_seconds"]) if str(row.get("runtime_seconds", "")).isdigit() else None,
-            runtime_provenance="manual" if str(row.get("runtime_seconds", "")).isdigit() else "")
-        AuditEvent.objects.create(actor=actor, action="create", entity="MediaAsset", entity_id=asset.pk, summary="Reviewed local file reference added to library")
+        asset = None
+        if review.asset_id and len(rows) == 1:
+            asset = MediaAsset.objects.select_for_update().filter(pk=review.asset_id, episode=episode).first()
+            if asset is None:
+                raise ValueError("The selected catalogued media changed; review preparation again.")
+            if asset.local_path and Path(asset.local_path).resolve() != path.resolve():
+                raise ValueError("The catalogued file path changed. Review and confirm a relink before preparation.")
+            if not asset.local_path:
+                asset.local_path = str(path.resolve())
+                asset.save(update_fields=["local_path"])
+            AuditEvent.objects.create(actor=actor, action="prepare", entity="MediaAsset", entity_id=asset.pk, summary="Catalogued media selected for destination preparation")
+        if asset is None:
+            prior = [int(v[1:]) for v in MediaAsset.objects.filter(episode=episode).values_list("version", flat=True) if v.startswith("v") and v[1:].isdigit()]
+            asset = MediaAsset.objects.create(station=review.show.station, episode=episode, file_name=row["name"], kind="source" if encode else "encoded",
+                version=f"v{max(prior or [0]) + 1}", local_path=str(path.resolve()),
+                runtime_seconds=int(row["runtime_seconds"]) if str(row.get("runtime_seconds", "")).isdigit() else None,
+                runtime_provenance="manual" if str(row.get("runtime_seconds", "")).isdigit() else "")
+            AuditEvent.objects.create(actor=actor, action="create", entity="MediaAsset", entity_id=asset.pk, summary="Reviewed local file reference added to library")
         PreparationBatchItem.objects.create(batch=batch, asset=asset, selected_input_path=str(path),
             reviewed_file_size=row["size"], reviewed_mtime_ns=row["mtime_ns"],
             encode_before_transfer=encode, position=row.get("position", 0))
@@ -734,7 +761,7 @@ def media_queue(request):
                 response_status = 400
             batches = accepted_media_batches(station)
             episodes = list(Episode.objects.filter(show__station=station).order_by("show_id", "title").values("id", "show_id", "title"))
-            return render(request, "media_queue.html", {"batches": batches, "queue": queue_summary(station), "targets": Device.objects.filter(station=station),
+            return render(request, "media_queue.html", {"batches": batches, "queue": queue_summary(station), "targets": eligible_destination_devices(station),
                 "shows": Show.objects.filter(station=station), "episodes": episodes, "submission_token": uuid.uuid4() if connected.get("reviewed") else request.POST.get("submission_token") or uuid.uuid4(), "connected": connected}, status=response_status)
         if action == "confirm_intake":
             review = get_object_or_404(MediaIntakeReview, token=request.POST.get("review_token"))
@@ -753,7 +780,7 @@ def media_queue(request):
                     connected["premiere_candidates"] = _intake_candidate_context(review)
                 return render(request, "media_queue.html", {
                     "batches": accepted_media_batches(station),
-                    "queue": queue_summary(station), "targets": Device.objects.filter(station=station), "shows": Show.objects.filter(station=station),
+                    "queue": queue_summary(station), "targets": eligible_destination_devices(station), "shows": Show.objects.filter(station=station),
                     "episodes": list(Episode.objects.filter(show__station=station).order_by("show_id", "title").values("id", "show_id", "title")),
                     "submission_token": uuid.uuid4(), "connected": connected,
                 }, status=400)
@@ -765,7 +792,7 @@ def media_queue(request):
                 ]
                 return redirect(f"/schedule/prepare/?{urlencode(params)}")
             messages.success(request, f"Batch {batch.pk} queued." if created else f"Batch {batch.pk} was already accepted.")
-            response = redirect("media-queue")
+            response = redirect(request.path)
             response.set_cookie("media_intake_accepted", "1", httponly=True, samesite="Strict")
             return response
         # Keep the show/episode/asset context when the owner chooses the
@@ -779,12 +806,13 @@ def media_queue(request):
         # never copies uploads or hashes video during an HTTP request.
         connected["error"] = "Use Add episode files or an absolute local path, then review the intake."
         return render(request, "media_queue.html", {"batches": accepted_media_batches(station), "queue": queue_summary(station),
-            "targets": Device.objects.filter(station=station), "shows": Show.objects.filter(station=station),
+            "targets": eligible_destination_devices(station), "shows": Show.objects.filter(station=station),
             "episodes": list(Episode.objects.filter(show__station=station).order_by("show_id", "title").values("id", "show_id", "title")),
             "submission_token": request.POST.get("submission_token") or uuid.uuid4(), "connected": connected}, status=400)
-    batches = accepted_media_batches(station)
+    scope = request.GET.get("scope", "")
+    batches = accepted_media_batches(station, scope=scope)
     episodes = list(Episode.objects.filter(show__station=station).order_by("show_id", "title").values("id", "show_id", "title"))
-    response = render(request, "media_queue.html", {"batches": batches, "queue": queue_summary(station), "targets": Device.objects.filter(station=station), "shows": Show.objects.filter(station=station), "episodes": episodes, "submission_token": uuid.uuid4(), "connected": connected})
+    response = render(request, "media_queue.html", {"batches": batches, "queue": queue_summary(station), "targets": eligible_destination_devices(station), "shows": Show.objects.filter(station=station), "episodes": episodes, "submission_token": uuid.uuid4(), "connected": connected, "scope": scope})
     if connected["accepted"]:
         response.delete_cookie("media_intake_accepted")
     return response

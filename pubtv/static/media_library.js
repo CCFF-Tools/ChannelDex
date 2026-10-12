@@ -74,7 +74,7 @@
       const button = event.currentTarget; button.disabled = true;
       try {
         const response = await fetch(form.dataset.picker, {method: 'POST', headers: {'Content-Type': 'application/x-www-form-urlencoded',
-          'X-CSRFToken': form.querySelector('[name=csrfmiddlewaretoken]').value}, body: new URLSearchParams({kind: 'file'}), credentials: 'same-origin'});
+          'X-CSRFToken': form.querySelector('[name=csrfmiddlewaretoken]').value}, body: new URLSearchParams({kind: 'file', originating_station: form.querySelector('[name=originating_station]').value}), credentials: 'same-origin'});
         const result = await response.json();
         if (result.cancelled) {status.textContent = 'Chooser cancelled; path retained.'; return;}
         if (!response.ok || !result.path) throw Error(result.error || 'Chooser unavailable. Paste an absolute path.');

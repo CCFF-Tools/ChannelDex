@@ -1,8 +1,9 @@
 {% extends "base.html" %}
+{% block page_title %}{% if view_mode == 'capacity' %}Weekly capacity{% else %}Week plan{% endif %} · ChannelDex{% endblock %}
 {% block content %}
 <div class="page-heading">
   <p class="eyebrow">Schedule / Week</p>
-  <h1>{{ title }}</h1>
+  <h1>{% if view_mode == 'capacity' %}Weekly capacity{% else %}Week plan{% endif %}</h1>
   {% if view_mode == 'capacity' %}
     <p class="lede">A continuous capacity map. Every part of each day is classified as either Available or Reserved; individual scheduled items are intentionally hidden.</p>
   {% else %}

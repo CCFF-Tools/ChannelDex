@@ -10,17 +10,16 @@ class EndUserDocumentationTests(SimpleTestCase):
         response = self.client.get("/help/")
         self.assertEqual(response.status_code, 200)
         html = response.content.decode()
-        for href in ("/settings/", "/settings/devices/", "/shows/", "/", "/schedule/?mode=day", "/schedule/?mode=week", "/schedule/?mode=agenda", "/occurrences/new/", "/schedule/recurring/", "/media/", "/schedule/prepare/", "/schedule/delivery/", "/history/"):
+        for href in ("/settings/", "/settings/devices/", "/shows/", "/", "/schedule/?mode=day", "/schedule/?mode=week", "/schedule/?mode=agenda", "/occurrences/new/", "/schedule/recurring/", "/media/library/", "/media/preparation/", "/schedule/prepare/", "/schedule/delivery/", "/history/"):
             self.assertIn(f'href="{href}"', html)
-        self.assertIn("do not qualify a target", html)
-        self.assertIn("not proof that an item aired", html)
-        self.assertIn("Reported/observed", html)
-        self.assertIn("Log verified", html)
+        self.assertIn("catalog metadata only", html)
+        self.assertIn("do not imply that an item aired", html)
+        self.assertIn("Record received media", html)
+        self.assertIn("Prepare for destination", html)
         airing_labels = [label for _, label in AiringEvidence._meta.get_field("status").choices]
         self.assertEqual(airing_labels, ["Reported/observed", "Log verified"])
         self.assertNotIn("Choose exactly one status: <strong>Observed</strong>", html)
-        self.assertIn("Playback, Review, Existing media, and Controller mappings", html)
-        self.assertIn("Confirm reviewed schedule plan", html)
+        self.assertIn("History</a> is a read-only record", html)
 
     def test_readme_covers_settings_formats_and_schedule_boundaries(self):
         readme = (Path(__file__).parents[1] / "README.md").read_text(encoding="utf-8")

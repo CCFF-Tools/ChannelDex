@@ -351,7 +351,7 @@ class MediaQueueAcceptanceTests(TestCase):
         client = Client()
         self.assertEqual(client.get(f"/media/batches/{batch.pk}/cancel/").status_code, 405)
         response = client.post(f"/media/batches/{batch.pk}/cancel/")
-        self.assertRedirects(response, "/media/")
+        self.assertRedirects(response, "/media/preparation/")
         batch.refresh_from_db()
         self.assertEqual(batch.status, "cancelled")
         summary = queue_summary()
@@ -367,7 +367,7 @@ class MediaQueueAcceptanceTests(TestCase):
         self.assertContains(response, "Remove from list")
 
         response = client.post(f"/media/batches/{batch.pk}/remove/")
-        self.assertRedirects(response, "/media/")
+        self.assertRedirects(response, "/media/preparation/")
         self.assertNotContains(client.get("/media/"), f"batch-{batch.pk}")
         batch.refresh_from_db()
         self.assertTrue(batch.removed_from_list)

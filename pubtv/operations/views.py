@@ -21,7 +21,7 @@ from .forms import OccurrenceForm, StationForm, CarryForwardSettingsForm, Device
 from .models import Episode, EpisodeWorkflowMilestone, Occurrence, Show, Station, Device, Producer, MediaAsset, Delivery, RecurrenceSlot, WeeklyEpisodeAssignment, Preparation, AssetPreparation, AssetTargetTransfer, OccurrenceProgramming, UploadedOccurrenceCoverage, UploadedScheduleRevision, AiringEvidence, AuditEvent, UltraNexusTargetSettings, PreparationBatch, PreparationBatchItem, PreparationJob, SchedulePublicationBatch, ScheduleDeliveryOperation, OccurrenceRevisionSelection, ResearchGate, TransferAttempt, PublicationJob, GuidedEpisodeDelivery
 from .media_queue import begin_relink_review, confirm_relink_review, relink_review_result
 from .models import MediaRelinkReview
-from .services import schedule_alerts, audit, materialize_assignment, ensure_carry_forward_week, next_premiere_date, suggested_pending_episode, confirm_preparation_fact, create_upload_snapshot, revise_airing, sign_upload_preview, load_upload_preview, commit_upload_preview, preparation_readiness, calendar_capacity, pending_episode_reason
+from .services import schedule_alerts, audit, materialize_assignment, ensure_carry_forward_week, next_premiere_date, suggested_pending_episode, confirm_preparation_fact, create_upload_snapshot, revise_airing, sign_upload_preview, load_upload_preview, commit_upload_preview, preparation_readiness, calendar_capacity, pending_episode_reason, pending_episode_sort_key
 from .automation import approve_snapshot, canonical_hash, invalidate_snapshot, preparation_batch_snapshot, publication_snapshot, preview_schedule, approve_preparation_batch, schedule_ready_binding, generate_nmg_artifact, generate_bin_artifact, publication_artifact_blockers
 from .publication_delivery import stage_publication, activate_publication, observe_activation, rollback_publication
 from .guided_delivery import record_guided_delivery, record_guided_observation, record_guided_rollback
@@ -202,8 +202,16 @@ def switch_station(request):
 def _pending_queue(show):
     """Return the premiere queue using only stored fields; receipt is derived."""
     episodes = list(show.episodes.filter(status="pending").prefetch_related("deliveries"))
-    missing_receipt = datetime.max.replace(tzinfo=ZoneInfo("UTC"))
-    return sorted(episodes, key=lambda item: (item.intended_air_order is None, item.intended_air_order or 0, item.received_at or missing_receipt, item.pk))
+    return sorted(episodes, key=pending_episode_sort_key)
+
+
+def _station_local_date(value, station):
+    """Return an occurrence's calendar date in the station's timezone."""
+    try:
+        zone = ZoneInfo(station.timezone)
+    except (ZoneInfoNotFoundError, AttributeError):
+        zone = ZoneInfo("America/Detroit")
+    return timezone.localtime(value, zone).date() if timezone.is_aware(value) else value.date()
 
 def dashboard(request):
     station = resolve_active_station(request)
@@ -247,7 +255,9 @@ def dashboard(request):
     for item in occurrences:
         item.readiness = preparation_readiness(item)
         item.covered = item.pk in covered_ids
-    return render(request, "dashboard.html", {"station": station, "occurrences": occurrences, "selected_date": selected, "previous_date": selected - timedelta(days=1), "next_date": selected + timedelta(days=1), "covered_count": len(covered_ids), "remaining_count": len(occurrences) - len(covered_ids), "alerts": _alerts(occurrences)})
+    capacity = calendar_capacity(station, selected)[0] if station else {"intervals": []}
+    reserved_intervals = [item for item in capacity.get("intervals", []) if item.get("status") == "reserved"]
+    return render(request, "dashboard.html", {"station": station, "occurrences": occurrences, "reserved_intervals": reserved_intervals, "selected_date": selected, "previous_date": selected - timedelta(days=1), "next_date": selected + timedelta(days=1), "covered_count": len(covered_ids), "remaining_count": len(occurrences) - len(covered_ids), "alerts": _alerts(occurrences)})
 
 
 def occurrence_workbench(request, pk):
@@ -263,7 +273,7 @@ def occurrence_workbench(request, pk):
     stale_uploads = [item for item in coverage if item not in uploads]
     evidence = AiringEvidence.objects.filter(occurrence=occurrence).order_by("-aired_at", "-pk")
     activity = AuditEvent.objects.filter(entity="Occurrence", entity_id=occurrence.pk).order_by("-occurred_at")
-    return render(request, "occurrence_workbench.html", {"occurrence": occurrence, "preparation": preparation, "asset_preparation": asset_preparation, "transfers": transfers, "legacy_preparation": legacy_preparation, "programming": programming, "uploads": uploads, "stale_uploads": stale_uploads, "evidence": evidence, "activity": activity, "readiness": preparation_readiness(occurrence), "selected_date": occurrence.starts_at.date()})
+    return render(request, "occurrence_workbench.html", {"occurrence": occurrence, "preparation": preparation, "asset_preparation": asset_preparation, "transfers": transfers, "legacy_preparation": legacy_preparation, "programming": programming, "uploads": uploads, "stale_uploads": stale_uploads, "evidence": evidence, "activity": activity, "readiness": preparation_readiness(occurrence), "selected_date": _station_local_date(occurrence.starts_at, station)})
 
 
 def settings_view(request):
@@ -716,7 +726,7 @@ def automation_dashboard(request):
                 messages.error(request, str(exc))
             return redirect("schedule-delivery")
         if action == "execute_preparation":
-            messages.info(request, "Review and retry individual items in Media Preparation.")
+            messages.info(request, "Review and retry individual items in Preparation activity.")
             return redirect("media-queue")
         if action == "create_publication":
             form = AutomationPublicationForm(request.POST, station=resolve_active_station(request))
@@ -928,7 +938,14 @@ def automation_dashboard(request):
 
 def device_list(request):
     station = resolve_active_station(request)
-    return render(request, "device_list.html", {"devices": Device.objects.filter(station=station).order_by("name"), "station": station})
+    devices = Device.objects.filter(station=station).select_related("station").prefetch_related(
+        Prefetch("ultranexus_settings", queryset=UltraNexusTargetSettings.objects.filter(is_current=True), to_attr="current_connections")
+    ).order_by("name")
+    return render(request, "device_list.html", {"devices": devices, "station": station})
+
+
+def device_edit(request, pk):
+    return _crud(request, Device, DeviceForm, "Edit device", pk=pk)
 
 
 def schedule_view(request):
@@ -1081,7 +1098,12 @@ def show_detail(request, show_id):
     for episode in episodes:
         episode.queue_reason = pending_episode_reason(episode) if episode.status == "pending" else ""
     pending = [episode for episode in episodes if episode.status == "pending"]
-    return render(request, "show_detail.html", {"show": show, "pending": pending, "episodes": episodes})
+    now = timezone.now()
+    upcoming = sorted(
+        [item for item in show.occurrences.all() if item.starts_at >= now and item.status not in {"cancelled", "preempted"}],
+        key=lambda item: (item.starts_at, item.pk),
+    )[:20]
+    return render(request, "show_detail.html", {"show": show, "pending": pending, "episodes": episodes, "upcoming_occurrences": upcoming})
 
 def episode_queue_reorder(request, show_id):
     station = resolve_active_station(request)
@@ -1150,7 +1172,7 @@ def media_library(request):
     show_id = request.GET.get("show") or ""
     readiness = request.GET.get("readiness") or ""
     if query:
-        search = Q(title__icontains=query) | Q(show__title__icontains=query)
+        search = Q(title__icontains=query) | Q(show__title__icontains=query) | Q(assets__file_name__icontains=query)
         if query.isdigit():
             search |= Q(episode_number=int(query))
         episodes = episodes.filter(search)
@@ -1158,16 +1180,24 @@ def media_library(request):
         episodes = episodes.filter(show_id=int(show_id))
     episodes = episodes.distinct().order_by("show__title", F("episode_number").asc(nulls_last=True), "title", "pk")
     rows = []
+    def prepare_asset(asset):
+        asset.available = bool(asset.local_path and Path(asset.local_path).is_file())
+        asset_items = [item for item in asset.preparation_batch_items.all()
+                       if not item.batch.removed_from_list]
+        asset.latest_item = max(asset_items, key=lambda item: item.pk) if asset_items else None
+        asset.ready_targets = [binding.target for binding in asset.ultranexus_bindings.all()
+            if binding.binding_type == "encoded" and binding.is_schedule_ready]
+        asset.readiness = "ready" if asset.ready_targets else (
+            "attention" if any(item.execution_status in {"failed", "blocked"} and item.batch.status != "cancelled" for item in asset_items)
+            else "catalogued"
+        )
+        return asset, asset_items
     for episode in episodes:
         assets = list(episode.assets.all())
         items = []
         for asset in assets:
-            asset.available = bool(asset.local_path and Path(asset.local_path).is_file())
-            asset_items = list(asset.preparation_batch_items.all())
+            asset, asset_items = prepare_asset(asset)
             items.extend(asset_items)
-            asset.latest_item = max(asset_items, key=lambda item: item.pk) if asset_items else None
-            asset.ready_targets = [binding.target for binding in asset.ultranexus_bindings.all()
-                if binding.binding_type == "encoded" and binding.is_schedule_ready]
         prepared = any(asset.ready_targets for asset in assets)
         available = any(asset.available for asset in assets)
         attention = any(item.execution_status in {"failed", "blocked"} for item in items if item.batch.status != "cancelled")
@@ -1178,7 +1208,27 @@ def media_library(request):
             continue
         rows.append({"episode": episode, "assets": assets, "items": items,
                      "available": available, "prepared": prepared, "readiness": state})
+    standalone = MediaAsset.objects.filter(station=station, episode__isnull=True).prefetch_related(
+        "preparation_batch_items__batch", "ultranexus_bindings__local_inspection", "ultranexus_bindings__target",
+    ).order_by("file_name", "pk") if station else MediaAsset.objects.none()
+    if query:
+        standalone = standalone.filter(Q(file_name__icontains=query) | Q(legacy_label__icontains=query))
+    standalone_assets = []
+    for asset in standalone:
+        asset, _items = prepare_asset(asset)
+        if readiness == "ready" and asset.readiness != "ready":
+            continue
+        if readiness == "attention" and asset.readiness != "attention":
+            continue
+        if readiness == "pending" and asset.readiness != "catalogued":
+            continue
+        if readiness == "missing":
+            continue
+        if readiness == "available" and not asset.available:
+            continue
+        standalone_assets.append(asset)
     return render(request, "media_library.html", {"rows": rows,
+        "standalone_assets": standalone_assets,
         "shows": Show.objects.filter(station=station).order_by("title") if station else Show.objects.none(),
         "query": query, "show_id": show_id, "readiness": readiness})
 
@@ -1188,7 +1238,9 @@ def media_asset_relink(request, asset_id):
     if request.method != "POST":
         return JsonResponse({"error": "POST required"}, status=405)
     station = resolve_active_station(request)
-    asset = MediaAsset.objects.filter(pk=asset_id, episode__show__station=station).first()
+    asset = MediaAsset.objects.filter(pk=asset_id).filter(
+        Q(station=station) | Q(station__isnull=True, episode__show__station=station)
+    ).first()
     if asset is None:
         return JsonResponse({"error": "Asset is outside the active station."}, status=404)
     try:
@@ -1214,6 +1266,15 @@ def occurrence_create(request):
     station = resolve_active_station(request)
     if not station: return HttpResponseBadRequest("Create a station first")
     initial = {key: value for key in ("show", "episode") if request.GET.get(key) and (Show.objects.filter(pk=request.GET[key], station=station).exists() if key == "show" else Episode.objects.filter(pk=request.GET[key], show__station=station).exists())}
+    asset = MediaAsset.objects.filter(pk=request.GET.get("asset")).filter(
+        Q(station=station) | Q(station__isnull=True, episode__show__station=station)
+    ).first() if request.GET.get("asset") else None
+    if asset:
+        initial.update({"asset": asset.pk, "episode": asset.episode_id,
+                        "show": asset.episode.show_id if asset.episode_id else None,
+                        "item_type": "episode" if asset.episode_id else "media",
+                        "label": asset.file_name,
+                        "planned_duration_seconds": asset.runtime_seconds})
     form = OccurrenceForm(request.POST or None, station=station, initial=initial)
     if request.method == "POST" and form.is_valid():
         occurrence = form.save(commit=False); occurrence.station = station
@@ -1248,7 +1309,14 @@ def occurrence_edit(request, pk):
 
 def _crud(request, model, form_class, title, pk=None, initial=None, extra_context=None):
     station = resolve_active_station(request)
-    obj = get_object_or_404(model, pk=pk, station=station) if pk and model is Device else (get_object_or_404(model, pk=pk) if pk else None)
+    if pk and model is Device:
+        obj = get_object_or_404(model, pk=pk, station=station)
+    elif pk and model is MediaAsset:
+        obj = get_object_or_404(model.objects.filter(
+            Q(station=station) | Q(station__isnull=True, episode__show__station=station)
+        ), pk=pk)
+    else:
+        obj = get_object_or_404(model, pk=pk) if pk else None
     scoped = {ShowForm, AssetForm, DeliveryForm, DeviceForm}
     kwargs = {"instance": obj}
     if form_class in scoped:
@@ -1258,6 +1326,8 @@ def _crud(request, model, form_class, title, pk=None, initial=None, extra_contex
         obj = form.save(commit=False)
         if isinstance(obj, Device):
             obj.station = station
+        if isinstance(obj, MediaAsset):
+            obj.station = station
         obj.full_clean()
         obj.save()
         if hasattr(form, "save_m2m"):
@@ -1265,7 +1335,8 @@ def _crud(request, model, form_class, title, pk=None, initial=None, extra_contex
         audit("update" if pk else "create", model.__name__, obj, title)
         messages.success(request, f"{title} saved.")
         if isinstance(obj, Show): return redirect("show-detail", show_id=obj.pk)
-        if isinstance(obj, MediaAsset) and obj.episode_id: return redirect("episode-detail", pk=obj.episode_id)
+        if isinstance(obj, MediaAsset):
+            return redirect("episode-detail", pk=obj.episode_id) if obj.episode_id else redirect("media-library")
         if isinstance(obj, Delivery) and obj.episodes.count() == 1: return redirect("episode-detail", pk=obj.episodes.first().pk)
         next_url = request.GET.get("next", "")
         if next_url.startswith("/") and not next_url.startswith("//"):
@@ -1274,10 +1345,14 @@ def _crud(request, model, form_class, title, pk=None, initial=None, extra_contex
     intros = {
         "Create show": "Add the show once, then manage its episodes and weekly air times from the show page.",
         "Edit show": "Delivery method is a preference only; each actual delivery keeps its own provenance.",
-        "Record media asset": "Record a source or encoded rendition as private metadata. ChannelDex does not move or validate the file.",
-        "Record delivery": "Record how a submission was made available and link one or more episodes. ChannelDex does not fetch it.",
+        "Add media file": "Add a source or encoded rendition to the library. ChannelDex records the path as private metadata and does not inspect, copy, prepare, or transfer the file.",
+        "Edit media file": "Update catalog metadata. File inspection, preparation, and transfer remain separate explicit actions.",
+        "Record received media": "Record how media was made available and link one or more episodes. ChannelDex does not fetch it.",
     }
-    context = {"form": form, "title": title, "intro": intros.get(title)}
+    next_url = request.GET.get("next", "")
+    cancel_url = next_url if next_url.startswith("/") and not next_url.startswith("//") else None
+    context = {"form": form, "title": title, "intro": intros.get(title),
+               "submit_label": "Save changes" if pk else "Add", "cancel_url": cancel_url}
     context.update(extra_context or {})
     return render(request, "simple_form.html", context)
 def setup_station(request):
@@ -1285,7 +1360,7 @@ def setup_station(request):
     if request.method == "POST" and request.POST.get("name") != "PUB-TV":
         form = StationForm(request.POST, instance=existing)
         form.add_error("name", "Station setup remains the PUB-TV boundary. Add another channel from Settings.")
-        return render(request, "simple_form.html", {"form": form, "title": "Station setup", "intro": "Edit the canonical PUB-TV station settings."})
+        return render(request, "simple_form.html", {"form": form, "title": "Station setup", "intro": "Edit the PUB-TV station settings."})
     return _crud(request, Station, StationForm, "Station setup", pk=existing.pk if existing else None)
 def setup_device(request): return _crud(request, Device, DeviceForm, "Device setup")
 def show_create(request):
@@ -1435,15 +1510,19 @@ def episode_milestone_create(request, pk):
 def asset_create(request):
     station = resolve_active_station(request)
     episode = get_object_or_404(Episode, pk=request.GET.get("episode"), show__station=station) if request.GET.get("episode") and station else None
-    return _crud(request, MediaAsset, AssetForm, "Record media asset", initial={"episode": episode.pk} if episode else None)
+    return _crud(request, MediaAsset, AssetForm, "Add media file", initial={"episode": episode.pk} if episode else None,
+                 extra_context={"cancel_url": request.GET.get("next") or (f"/episodes/{episode.pk}/" if episode else "/media/library/")})
 def asset_edit(request, pk):
     station = resolve_active_station(request)
-    asset = get_object_or_404(MediaAsset, pk=pk, episode__show__station=station)
-    return _crud(request, MediaAsset, AssetForm, "Edit media asset", pk=asset.pk)
+    asset = get_object_or_404(MediaAsset.objects.filter(
+        Q(station=station) | Q(station__isnull=True, episode__show__station=station)
+    ), pk=pk)
+    return _crud(request, MediaAsset, AssetForm, "Edit media file", pk=asset.pk,
+                 extra_context={"cancel_url": f"/episodes/{asset.episode_id}/" if asset.episode_id else "/media/library/"})
 def delivery_create(request):
     station = resolve_active_station(request)
     episode = get_object_or_404(Episode, pk=request.GET.get("episode"), show__station=station) if request.GET.get("episode") and station else None
-    return _crud(request, Delivery, DeliveryForm, "Record delivery", initial={"episode": episode.pk} if episode else None)
+    return _crud(request, Delivery, DeliveryForm, "Record received media", initial={"episode": episode.pk} if episode else None)
 def slot_create(request):
     station = resolve_active_station(request)
     if not station:
@@ -1769,7 +1848,10 @@ def agenda_view(request):
     except ValueError:
         return HttpResponseBadRequest("Invalid range")
     station = resolve_active_station(request)
-    start = timezone.localdate()
+    try:
+        start = date.fromisoformat(request.GET.get("date", "")) if request.GET.get("date") else timezone.localdate()
+    except ValueError:
+        return HttpResponseBadRequest("Invalid date")
     end = start + timedelta(days=days)
     if station:
         carry_week = start - timedelta(days=start.weekday())
@@ -1787,7 +1869,7 @@ def agenda_view(request):
     ).select_related("show", "episode", "weekly_assignment", "recurrence_slot", "preparation").order_by("starts_at") if station else []
     occurrences = list(occurrences)
     for item in occurrences: item.readiness = preparation_readiness(item)
-    return render(request, "calendar_agenda.html", {"title": "Upcoming agenda", "occurrences": occurrences, "selected_date": start, "alerts": _alerts(occurrences)})
+    return render(request, "calendar_agenda.html", {"title": "Agenda", "occurrences": occurrences, "selected_date": start, "days": days, "alerts": _alerts(occurrences)})
 def history_view(request):
     station = resolve_active_station(request)
     tab = request.GET.get("tab", "uploads")
@@ -1823,29 +1905,31 @@ def preparation_edit(request, pk):
 
 def transfer_create(request, asset_id):
     station = resolve_active_station(request)
-    asset = get_object_or_404(MediaAsset.objects.select_related("episode__show"), pk=asset_id, episode__show__station=station)
-    station = asset.episode.show.station if asset.episode_id else resolve_active_station(request)
+    asset = get_object_or_404(MediaAsset.objects.select_related("episode__show").filter(
+        Q(station=station) | Q(station__isnull=True, episode__show__station=station)
+    ), pk=asset_id)
     form = AssetTargetTransferForm(request.POST or None, station=station, prefix="transfer")
     if request.method == "POST" and form.is_valid():
         transfer = form.save(commit=False); transfer.asset = asset
         transfer.full_clean(); transfer.save()
         audit("create", "AssetTargetTransfer", transfer, "Canonical asset transfer created")
         messages.success(request, "Transfer record saved.")
-        return redirect("episode-detail", pk=asset.episode_id) if asset.episode_id else redirect("dashboard")
+        return redirect("episode-detail", pk=asset.episode_id) if asset.episode_id else redirect("media-library")
     return render(request, "asset_transfer_form.html", {"asset": asset, "form": form, "title": "Add asset transfer"})
 
 
 def transfer_edit(request, asset_id, pk):
     station = resolve_active_station(request)
-    asset = get_object_or_404(MediaAsset.objects.select_related("episode__show"), pk=asset_id, episode__show__station=station)
+    asset = get_object_or_404(MediaAsset.objects.select_related("episode__show").filter(
+        Q(station=station) | Q(station__isnull=True, episode__show__station=station)
+    ), pk=asset_id)
     transfer = get_object_or_404(AssetTargetTransfer, pk=pk, asset=asset, device__station=station)
-    station = asset.episode.show.station if asset.episode_id else resolve_active_station(request)
     form = AssetTargetTransferForm(request.POST or None, instance=transfer, station=station, prefix="transfer")
     if request.method == "POST" and form.is_valid():
         transfer = form.save(commit=False); transfer.asset = asset; transfer.full_clean(); transfer.save()
         audit("update", "AssetTargetTransfer", transfer, "Canonical asset transfer updated")
         messages.success(request, "Transfer record updated.")
-        return redirect("episode-detail", pk=asset.episode_id) if asset.episode_id else redirect("dashboard")
+        return redirect("episode-detail", pk=asset.episode_id) if asset.episode_id else redirect("media-library")
     return render(request, "asset_transfer_form.html", {"asset": asset, "form": form, "title": "Edit asset transfer", "transfer": transfer})
 def programming_create(request, pk):
     station = resolve_active_station(request)

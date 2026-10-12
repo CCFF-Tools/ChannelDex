@@ -1,5 +1,14 @@
 # ChannelDex TODO and usability backlog
 
+## Accepted UI and workspace audit — 2026-10-11
+
+Implemented and independently reviewed; validation evidence and remaining data
+decisions are recorded in [UI_WORKFLOW_AUDIT.md](UI_WORKFLOW_AUDIT.md).
+Prioritize workspace consistency, scheduling correctness, and platform-independent
+media management. Preserve existing device functionality and historical evidence.
+Device ownership repair and reinterpretation of historical zero runtimes require
+record-specific evidence; neither is an automatic migration in this work.
+
 ## UltraNEXUS automation — accepted 2026-09-29
 
 - [x] Close the original-plan local gaps: read-only controller capture and exact

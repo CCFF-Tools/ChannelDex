@@ -1,8 +1,10 @@
+from unittest.mock import patch
+
 from django.test import Client, TestCase
 from django.urls import reverse
 
-from pubtv.operations.forms import AutomationPreparationForm, AutomationPublicationForm, DeviceForm, StationForm
-from pubtv.operations.models import Device, Show, Station
+from pubtv.operations.forms import AssetForm, AutomationPreparationForm, AutomationPublicationForm, DeviceForm, StationForm
+from pubtv.operations.models import Device, MediaAsset, Show, Station
 
 
 class ChannelWorkspaceTests(TestCase):
@@ -57,3 +59,99 @@ class ChannelWorkspaceTests(TestCase):
         self.assertNotIn(foreign_device, prep.fields["target"].queryset)
         publication = AutomationPublicationForm({"target": foreign_device.pk}, station=self.pub)
         self.assertFalse(publication.is_valid())
+
+    def test_stale_form_from_another_workspace_is_rejected_without_writing(self):
+        client = Client()
+        session = client.session
+        session["active_station_id"] = self.other.pk
+        session.save()
+        response = client.post(
+            "/shows/new/",
+            {"originating_station": str(self.pub.pk), "station": self.other.pk,
+             "title": "Wrong workspace", "code": "wrong-workspace"},
+        )
+        self.assertEqual(response.status_code, 303)
+        self.assertEqual(response["Location"], "/shows/new/")
+        self.assertFalse(Show.objects.filter(title="Wrong workspace").exists())
+
+    def test_server_renders_origin_and_browser_post_without_it_is_rejected(self):
+        response = Client().get("/shows/new/")
+        self.assertContains(response, f'name="originating_station" value="{self.pub.pk}"', count=2)
+        response = Client().post(
+            "/shows/new/", {"title": "Missing origin", "code": "missing-origin"},
+            HTTP_SEC_FETCH_SITE="same-origin", HTTP_SEC_FETCH_MODE="navigate",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(Show.objects.filter(code="missing-origin").exists())
+
+    def test_browser_picker_accepts_matching_origin_and_rejects_stale_origin(self):
+        headers = {"HTTP_SEC_FETCH_SITE": "same-origin", "HTTP_SEC_FETCH_MODE": "cors"}
+        with patch("pubtv.operations.views.subprocess.run") as run:
+            run.return_value.returncode = 0
+            run.return_value.stdout = "[]"
+            run.return_value.stderr = ""
+            matching = Client().post(
+                "/settings/browse/", {"kind": "files", "originating_station": str(self.pub.pk)}, **headers,
+            )
+            self.assertEqual(matching.status_code, 200)
+            stale = Client().post(
+                "/settings/browse/", {"kind": "files", "originating_station": str(self.other.pk)}, **headers,
+            )
+            self.assertEqual(stale.status_code, 303)
+            self.assertEqual(stale["Location"], "/settings/browse/")
+            self.assertEqual(run.call_count, 1)
+
+    def test_deleted_session_workspace_falls_back_with_announcement(self):
+        client = Client()
+        session = client.session
+        session["active_station_id"] = self.other.pk
+        session.save()
+        self.other.delete()
+        response = client.get("/")
+        self.assertEqual(response.context["active_station"], self.pub)
+        self.assertContains(response, "previous working channel is unavailable")
+
+    def test_reusable_media_is_owned_and_browsed_only_in_its_workspace(self):
+        client = Client()
+        response = client.post("/assets/new/?next=/media/library/", {
+            "episode": "", "file_name": "station-id.mxf", "kind": "encoded", "version": "v1",
+            "runtime_seconds_0": "0", "runtime_seconds_1": "0", "runtime_seconds_2": "0",
+            "local_path": "/private/media/station-id.mxf", "smb_reference": "",
+        })
+        self.assertRedirects(response, "/media/library/")
+        asset = MediaAsset.objects.get(file_name="station-id.mxf")
+        self.assertEqual(asset.station_id, self.pub.pk)
+        self.assertIsNone(asset.episode_id)
+        self.assertContains(client.get("/media/library/"), "station-id.mxf")
+        session = client.session
+        session["active_station_id"] = self.other.pk
+        session.save()
+        self.assertNotContains(client.get("/media/library/"), "station-id.mxf")
+
+    def test_optional_asset_duration_preserves_unknown_and_explicit_zero(self):
+        base = {"episode": "", "file_name": "asset.mxf", "kind": "encoded", "version": "v1",
+                "local_path": "", "smb_reference": ""}
+        unknown = AssetForm({**base, "runtime_seconds_0": "", "runtime_seconds_1": "", "runtime_seconds_2": ""}, station=self.pub)
+        self.assertTrue(unknown.is_valid(), unknown.errors)
+        self.assertIsNone(unknown.cleaned_data["runtime_seconds"])
+        zero = AssetForm({**base, "runtime_seconds_0": "0", "runtime_seconds_1": "0", "runtime_seconds_2": "0"}, station=self.pub)
+        self.assertTrue(zero.is_valid(), zero.errors)
+        self.assertEqual(zero.cleaned_data["runtime_seconds"], 0)
+
+
+class BootstrapWorkspaceTests(TestCase):
+    def test_no_workspace_origin_allows_first_station_setup_and_disabled_quit(self):
+        client = Client()
+        setup = client.post(
+            "/setup/station/", {"originating_station": "none", "name": "PUB-TV", "timezone": "America/Detroit"},
+            HTTP_SEC_FETCH_SITE="same-origin", HTTP_SEC_FETCH_MODE="navigate",
+        )
+        self.assertEqual(setup.status_code, 302)
+        self.assertTrue(Station.objects.filter(name="PUB-TV").exists())
+        Station.objects.all().delete()
+        with patch.dict("os.environ", {"PUBTV_ENABLE_QUIT": "0"}, clear=False):
+            quit_response = client.post(
+                "/quit/", {"originating_station": "none"},
+                HTTP_SEC_FETCH_SITE="same-origin", HTTP_SEC_FETCH_MODE="navigate",
+            )
+        self.assertEqual(quit_response.status_code, 404)

@@ -1,8 +1,19 @@
 /* Read durable status; badges remain truthful when the endpoint is unavailable. */
 (() => {
   const summary = document.getElementById('media-queue-summary');
+  const stationSelect = document.getElementById('id_active_station');
+  const pageStation = stationSelect ? stationSelect.value : '';
+  const staleNotice = document.getElementById('stale-workspace-notice');
   const labels = {queued: 'Queued', pending: 'Queued', encoding: 'Encoding', validating: 'Validating', transferring: 'Transferring', verifying: 'Verifying', ready: 'Ready', blocked: 'Needs attention', failed: 'Needs attention'};
-  let inFlight = false;
+  let inFlight = false, workspaceStale = false;
+  function blockStaleWorkspace() {
+    workspaceStale = true;
+    if (staleNotice) staleNotice.hidden = false;
+    document.querySelectorAll('form[method="post"], form[method="POST"]').forEach(form => {
+      if (form.action.endsWith('/stations/switch/')) return;
+      form.querySelectorAll('button[type="submit"], input[type="submit"], button:not([type])').forEach(button => { button.disabled = true; });
+    });
+  }
   function setCount(node, value) {
     let valueNode = node.querySelector('[data-queue-value]');
     if (!valueNode && node.children.length) {
@@ -13,12 +24,16 @@
     (valueNode || node).textContent = value;
   }
   async function refresh() {
-    if (inFlight || document.hidden) return;
+    if (inFlight || document.hidden || workspaceStale) return;
     inFlight = true;
     try {
       const response = await fetch('/media/status/', {headers: {Accept: 'application/json'}, cache: 'no-store'});
       if (!response.ok) throw new Error('Queue unavailable');
       const data = await response.json(), counts = data.counts || {};
+      if (pageStation && String(data.station_id || '') !== pageStation) {
+        blockStaleWorkspace();
+        return;
+      }
       const active = ['queued', 'encoding', 'validating', 'transferring', 'verifying'].reduce((n, key) => n + (counts[key] || 0), 0);
       const processing = ['encoding', 'validating', 'transferring', 'verifying'].reduce((n, key) => n + (counts[key] || 0), 0);
       const attention = (counts.blocked || 0) + (counts.failed || 0);

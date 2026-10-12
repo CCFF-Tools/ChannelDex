@@ -1,5 +1,26 @@
 # ChannelDex conceptual data model
 
+## Accepted UI audit contracts (2026-10-11)
+
+The active channel is the workspace boundary, including catalog-only media
+and reusable assets without an episode. Episode-linked asset ownership follows
+the episode's show; a standalone asset needs an explicit channel association.
+Ambiguous historical standalone assets must not be assigned by guessing from
+filenames or device names.
+
+Replacing an automatic carry-forward preserves the old assignment and its
+occurrences, revisions, upload coverage, and airing evidence. A new explicit
+assignment creates fresh occurrences; it does not inherit evidence. Only the
+active assignment occupies a show's cycle. Explicit assignments and No program
+choices remain protected against automatic replacement. This supersedes the
+original assumption that only one historical assignment could ever exist per
+show/week, while retaining one active assignment per cycle.
+
+Media intake and preparation are separate actions. Saving a source or encoded
+version to the library does not imply inspection, destination readiness,
+transfer, scheduling, or airing. Historical zero runtimes and device ownership
+remain unchanged until record-specific corrections are reviewed.
+
 ## Accepted usability contract (2026-09-17)
 
 The model is presented through five owner workflows: Today, unified Schedule,

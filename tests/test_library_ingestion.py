@@ -110,6 +110,25 @@ class LibraryIngestionTests(TestCase):
         _batch, item = self.accept([self.row(encoding_mode="already_encoded")])
         self.assertEqual(item.asset.kind, "encoded"); self.assertFalse(item.encode_before_transfer)
 
+    def test_explicit_preparation_of_catalogued_version_reuses_the_asset(self):
+        asset = MediaAsset.objects.create(
+            station=self.station, episode=self.episode, file_name=self.source.name,
+            kind="encoded", version="v1", local_path=str(self.source),
+        )
+        response = self.client.post("/media/preparation/", {
+            "action": "review_intake", "show": self.show.pk, "episode": self.episode.pk,
+            "asset": asset.pk, "target": self.device.pk,
+            "draft_rows": json.dumps([self.row(
+                episode_id=str(self.episode.pk), new_title="", episode_number="",
+                runtime_seconds="", encoding_mode="already_encoded",
+            )]),
+        })
+        self.assertEqual(response.status_code, 200)
+        batch, created = confirm_intake_review(MediaIntakeReview.objects.latest("pk"))
+        self.assertTrue(created)
+        self.assertEqual(batch.items.get().asset_id, asset.pk)
+        self.assertEqual(MediaAsset.objects.count(), 1)
+
     def test_explicit_encoding_mode_required_for_each_local_row(self):
         with self.assertRaisesMessage(IntakeValidationError, "Choose already encoded or needs encoding"):
             validate_rows([self.row(encoding_mode="")], show=self.show)
@@ -239,6 +258,19 @@ class LibraryIngestionTests(TestCase):
         self.assertEqual(row["assets"][0].pk, asset.pk)
         self.assertContains(response, 'data-plan-episode=')
         self.assertEqual(len(self.client.get("/media/library/?readiness=ready").context["rows"]), 0)
+
+    def test_available_filter_applies_to_reusable_assets_with_present_or_missing_paths(self):
+        present = MediaAsset.objects.create(
+            station=self.station, file_name="station-id.mxf", kind="encoded", version="v1",
+            local_path=str(self.source),
+        )
+        missing = MediaAsset.objects.create(
+            station=self.station, file_name="missing-psa.mxf", kind="encoded", version="v1",
+            local_path=str(self.root / "missing-psa.mxf"),
+        )
+        response = self.client.get("/media/library/?readiness=available")
+        self.assertContains(response, present.file_name)
+        self.assertNotContains(response, missing.file_name)
 
     def relink_asset(self, identity=None):
         return MediaAsset.objects.create(episode=self.episode, kind="source", file_name="original.mp4",
