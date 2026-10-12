@@ -30,7 +30,7 @@
           {% with o=item.occurrence %}<article class="week-block scheduled-block">
             <span class="week-block-time">{{ item.start|date:'g:i a' }} - {{ item.end|date:'g:i a' }}</span>
             <strong>{{ o.display_label }}</strong>
-            <span><span class="badge">{{ o.schedule_context }}</span> {{ o.get_item_type_display }}</span>
+            <span><span class="schedule-context">{{ o.schedule_context }}</span> {{ o.get_item_type_display }}</span>
             <a href="{% url 'occurrence-workbench' o.pk %}">Open workbench</a>
           </article>{% endwith %}
         {% else %}
