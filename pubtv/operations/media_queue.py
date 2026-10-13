@@ -28,23 +28,46 @@ from .active_station import resolve_active_station
 
 
 QUEUE_STATES = ("queued", "encoding", "validating", "transferring", "verifying", "ready", "blocked", "failed", "cancelled")
+STALE_READY_BLOCKER = "Destination verification is no longer current; prepare this file again."
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024 * 1024
 SUPPORTED_VIDEO_SUFFIXES = {".mp4", ".mov", ".mxf", ".mpeg", ".mpg", ".m4v", ".avi", ".mkv"}
+
+
+def effective_preparation_status(item):
+    """Return the shared visible state and actionable explanation for an item."""
+    if item.batch.removed_from_list:
+        return None, ""
+    if item.batch.status == "cancelled":
+        return "cancelled", item.blocker
+    state = "queued" if item.execution_status == "pending" else item.execution_status
+    if state == "ready" and not schedule_ready_binding(item.asset, item.batch.target):
+        return "blocked", STALE_READY_BLOCKER
+    state = state if state in QUEUE_STATES else "blocked"
+    return state, item.blocker
+
+
+def effective_preparation_state(item):
+    return effective_preparation_status(item)[0]
 
 
 def accepted_media_batches(station=None, scope=""):
     """Return accepted batches, retaining cancelled ones until explicitly hidden."""
     batches = PreparationBatch.objects.filter(removed_from_list=False, **({"target__station": station} if station is not None else {}))
-    if scope == "attention":
-        batches = batches.exclude(status="cancelled").filter(items__execution_status__in=("failed", "blocked"))
-    elif scope == "active":
-        batches = batches.exclude(status="cancelled").filter(items__execution_status__in=("pending", "encoding", "validating", "transferring", "verifying"))
-    return (
+    if scope in {"attention", "active"}:
+        wanted = {"failed", "blocked"} if scope == "attention" else {"queued", "encoding", "validating", "transferring", "verifying"}
+        candidate_items = PreparationBatchItem.objects.filter(batch__in=batches).select_related("batch", "asset", "batch__target")
+        batch_ids = {item.batch_id for item in candidate_items if effective_preparation_state(item) in wanted}
+        batches = batches.filter(pk__in=batch_ids)
+    result = list(
         batches.distinct()
         .select_related("target")
         .prefetch_related("items__asset__episode")
         .order_by("-created_at")[:100]
     )
+    for batch in result:
+        for item in batch.items.all():
+            item.effective_state, item.effective_blocker = effective_preparation_status(item)
+    return result
 
 
 def eligible_destination_devices(station):
@@ -233,14 +256,12 @@ def queue_summary(station=None):
     counts = {state: 0 for state in QUEUE_STATES}
     rows = []
     for item in items:
-        state = "cancelled" if item.batch.status == "cancelled" else ("queued" if item.execution_status == "pending" else item.execution_status)
-        if state == "ready" and not schedule_ready_binding(item.asset, item.batch.target):
-            state = "blocked"
-        if state not in QUEUE_STATES:
-            state = "blocked"
+        state, blocker = effective_preparation_status(item)
+        if state is None:
+            continue
         if state != "cancelled":
             counts[state] = counts.get(state, 0) + 1
-        rows.append({"id": item.pk, "batch_id": item.batch_id, "target_id": item.batch.target_id, "target": item.batch.target.name, "episode": getattr(item.asset.episode, "title", ""), "file_name": item.asset.file_name, "state": state, "blocker": item.blocker})
+        rows.append({"id": item.pk, "batch_id": item.batch_id, "target_id": item.batch.target_id, "target": item.batch.target.destination_label, "episode": getattr(item.asset.episode, "title", ""), "file_name": item.asset.file_name, "state": state, "blocker": blocker})
     return {"counts": counts, "items": rows, "updated_at": timezone.now().isoformat()}
 
 

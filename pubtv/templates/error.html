@@ -1,0 +1,4 @@
+{% extends "base.html" %}
+{% block page_title %}{{ status }} · ChannelDex{% endblock %}
+{% block content %}<div class="page-heading"><p class="eyebrow">{{ status }}</p><h1>{{ heading }}</h1><p class="lede">{{ detail }}</p></div>
+<div class="action-bar"><a class="button-link primary" href="{% url 'dashboard' %}">Open Today</a><a class="button-link" href="{% url 'schedule' %}">Open Schedule</a><a class="button-link" href="{% url 'media-library' %}">Open Media library</a></div>{% endblock %}

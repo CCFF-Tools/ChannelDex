@@ -2,12 +2,13 @@
 
 ## Accepted UI and workspace audit — 2026-10-11
 
-Implemented and independently reviewed; validation evidence and remaining data
+The complete finding-by-finding closure, validation evidence, and resolved data
 decisions are recorded in [UI_WORKFLOW_AUDIT.md](UI_WORKFLOW_AUDIT.md).
 Prioritize workspace consistency, scheduling correctness, and platform-independent
 media management. Preserve existing device functionality and historical evidence.
-Device ownership repair and reinterpretation of historical zero runtimes require
-record-specific evidence; neither is an automatic migration in this work.
+The owner confirmed the device ownership and historical zero-runtime corrections
+on 2026-10-12; those specific records were backed up, corrected, audited, and
+verified. No automatic data reinterpretation or audit implementation TODO remains.
 
 ## UltraNEXUS automation — accepted 2026-09-29
 

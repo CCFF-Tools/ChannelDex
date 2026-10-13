@@ -313,6 +313,11 @@ class Device(models.Model):
     def __str__(self):
         return self.name
 
+    @property
+    def destination_label(self):
+        adapter = "UltraNEXUS" if self.ultranexus_settings.filter(is_current=True).exists() else "adapter not configured"
+        return f"{self.name} · {self.station.name} · {adapter}"
+
 class RecurrenceSlot(models.Model):
     WEEKDAYS = list(enumerate(("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")))
     station = models.ForeignKey(Station, on_delete=models.CASCADE, related_name="slots")

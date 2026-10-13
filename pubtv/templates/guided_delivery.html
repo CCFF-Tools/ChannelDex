@@ -14,11 +14,12 @@
     {% csrf_token %}{% include "originating_station_field.html" %}
     <input type="hidden" name="action" value="start">
     <input type="hidden" name="submission_token" value="{{ submission_token }}">
-    <label>Target <select name="target" required>{% for target in targets %}<option value="{{ target.pk }}">{{ target }}</option>{% endfor %}</select></label>
-    <label>Show <select name="show" required>{% for show in shows %}<option value="{{ show.pk }}">{{ show.title }}</option>{% endfor %}</select></label>
-    <label>Existing episode <select name="episode"><option value="">Create from title</option>{% for episode in episodes %}<option value="{{ episode.pk }}">{{ episode.show }} · {{ episode.title }}</option>{% endfor %}</select></label>
-    <label>New episode title <input name="episode_title"></label>
-    <label>Exact local encoded file path <input id="guided-file-path" name="file_path" required></label>
+    <label>Destination device <select name="target" required>{% if not selected_target %}<option value="">Choose a destination</option>{% endif %}{% for target in targets %}<option value="{{ target.pk }}"{% if selected_target.pk == target.pk %} selected{% endif %}>{{ target.destination_label }}</option>{% endfor %}</select></label>
+    <label>Show <select name="show" required>{% for show in shows %}<option value="{{ show.pk }}"{% if selected_show.pk == show.pk %} selected{% endif %}>{{ show.title }}</option>{% endfor %}</select></label>
+    <label>Existing episode <select name="episode"><option value="">Create from title</option>{% for episode in episodes %}<option value="{{ episode.pk }}"{% if selected_episode.pk == episode.pk %} selected{% endif %}>{{ episode.show }} · {{ episode.title }}</option>{% endfor %}</select></label>
+    <input type="hidden" name="asset" value="{{ selected_asset.pk|default:'' }}">
+    <label>New episode title <input name="episode_title" value="{{ bound_episode_title }}"></label>
+    <label>Exact local encoded file path <input id="guided-file-path" name="file_path" required value="{{ display_file_path }}"></label>
     <button id="guided-choose-file" type="button">Choose encoded file</button>
     <span id="guided-file-status" class="helptext"></span>
     <button class="primary" type="submit">Review encoded intake</button>

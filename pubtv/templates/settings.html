@@ -3,11 +3,12 @@
 {% block content %}
 <div class="page-heading">
   <p class="eyebrow">Settings</p>
-  <h1>Station settings</h1>
+  <h1>ChannelDex settings</h1>
   <p class="lede">Infrequent system information, schedule defaults, and device configuration.</p>
   <p><a class="button-link primary" href="{% url 'automation' %}">Open UltraNEXUS schedule delivery</a></p>
 </div>
 
+<h2>Workspace-specific settings</h2>
 <section class="summary-grid">
   <div>
     <h2>Station</h2>
@@ -27,6 +28,7 @@
   </div>
 </section>
 
+<h2>Application-wide settings</h2>
 <section class="list-card">
   <h2>Add channel</h2>
   <p>Channel names are local owner data. Creating one selects it for this browser session.</p>
@@ -37,6 +39,7 @@
   </form>
 </section>
 
+<h2>Workspace-specific settings</h2>
 <section class="list-card">
   <h2>UltraNEXUS connection configuration</h2>
   <p>A recorded destination becomes usable by this adapter only after its UltraNEXUS connection and qualification details are configured. Passwords are kept in the macOS login Keychain.</p>
@@ -71,6 +74,7 @@
 </section>
 {% endif %}
 
+<h2>Application-wide settings</h2>
 <section class="list-card">
   <h2>Database portability</h2>
   {% if pending_import %}<p class="alerts"><strong>Import pending:</strong> quit and reopen ChannelDex to activate the validated database.</p>{% endif %}

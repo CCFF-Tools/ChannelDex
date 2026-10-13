@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% block page_title %}{{ show.title }} · Shows · ChannelDex{% endblock %}
 {% block content %}
 <div class="page-heading"><p class="eyebrow"><a href="{% url 'show-list' %}">Shows</a> / Workspace</p><h1>{{ show.title }}</h1>{% if show.description %}<p class="lede">{{ show.description }}</p>{% endif %}</div>
 <div class="action-bar"><a class="button-link primary" href="{% url 'media-library' %}?show={{ show.pk }}">Open media library</a><a class="button-link" href="{% url 'asset-create' %}?next={% url 'media-library' %}?show={{ show.pk }}">Add media file</a><a class="button-link" href="{% url 'show-edit' show.pk %}">Edit show</a><a class="button-link" href="{% url 'episode-create' %}?show={{ show.pk }}">Add episode</a><a class="button-link" href="{% url 'slot-create' %}?show={{ show.pk }}">Add weekly time</a><a class="button-link" href="{% url 'assignment-create' %}?show={{ show.pk }}">Choose next premiere episode</a><a class="button-link" href="{% url 'bulk-premiere-planner' show.pk %}">Plan multiple premieres</a></div>
@@ -14,7 +15,11 @@
 <section id="weekly-times"><h2>Weekly times</h2><p>Slot length is managed once at the show level: {{ show.slot_duration_label }}.</p>
 {% for slot in show.slots.all %}<article class="list-card show-weekly-time"><strong>{{ slot.get_weekday_display }}</strong><span class="weekly-slot-role"><span class="badge {% if slot.is_premiere %}premiere{% else %}replay{% endif %}">{% if slot.is_premiere %}Premiere{% else %}Replay{% endif %}</span></span><time>{{ slot.start_time|time:'g:i a' }}</time><a href="{% url 'slot-edit' slot.pk %}">Edit time</a></article>{% empty %}<p>No weekly times configured. <a href="{% url 'slot-create' %}?show={{ show.pk }}">Add one</a>.</p>{% endfor %}
 </section>
-<section><h2>Upcoming occurrences</h2><p class="helptext">Current and future planned items are listed in station-local time. Past plans remain in Schedule; airing evidence remains in History.</p>
+<section><h2>Upcoming occurrences</h2><p class="helptext">Current and future planned items are listed in station-local time. Past planned occurrences are available in the section below; airing evidence remains in History.</p>
 {% for o in upcoming_occurrences %}<article class="list-card occurrence-row"><div><strong>{{ o.starts_at|date:'M j, Y g:i a' }}</strong> · {{ o.display_label }}</div><a class="button-link primary" href="{% url 'occurrence-workbench' o.pk %}">Open workbench</a></article>{% empty %}<p>No upcoming occurrences.</p>{% endfor %}
 </section>
+<details id="past-occurrences"><summary>Past planned occurrences ({{ past_occurrences|length }})</summary>
+<p class="helptext">Past plans are listed newest first and remain separate from evidence that they aired.</p>
+{% for o in past_occurrences %}<article class="list-card occurrence-row"><div><strong>{{ o.starts_at|date:'M j, Y g:i a' }}</strong> · {{ o.display_label }}</div><a class="button-link" href="{% url 'occurrence-workbench' o.pk %}">Open workbench</a></article>{% empty %}<p>No past planned occurrences.</p>{% endfor %}
+</details>
 {% endblock %}

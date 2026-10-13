@@ -148,6 +148,16 @@ The owner approved the complete V1 scope and Python + Django + SQLite stack on 2
 
 ## Change record
 
+- 2026-10-12: Owner requested complete audit closure and confirmed that the
+  GOV-TV-named device belongs to GOV-TV and that the three identified zero
+  runtimes mean unknown. These record-specific corrections were backed up,
+  audited, and verified without rewriting schedule or device evidence. The
+  closure pass also completes contextual encoded-media delivery, effective
+  attention states, nested workspace navigation/error recovery, show past
+  plans, and presentation consistency. See `UI_WORKFLOW_AUDIT.md` for the
+  complete disposition of all 29 findings; no successor adapter or hardware
+  qualification is implied.
+
 - 2026-10-11: Owner accepted execution of the October 8 UI/workflow audit.
   The top-level channel selector is the workspace boundary. Media tracking,
   library management, and ChannelDex scheduling take priority over further

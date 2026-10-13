@@ -40,6 +40,7 @@ def _file_snapshot(path: str) -> dict:
 @transaction.atomic
 def start_guided_encoded_delivery(*, target: Device, show: Show, file_path: str,
                                   episode: Episode | None = None,
+                                  asset: MediaAsset | None = None,
                                   episode_title: str = "", actor: str = "owner",
                                   submission_token=None):
     """Create an intake review for bytes that are already encoded.
@@ -49,6 +50,8 @@ def start_guided_encoded_delivery(*, target: Device, show: Show, file_path: str,
     """
     if target is None or show is None or target.pk is None or show.pk is None:
         raise ValueError("A show and target are required")
+    if target.station_id != show.station_id:
+        raise ValueError("The destination and show must belong to the same working channel")
     token = uuid.UUID(str(submission_token)) if submission_token else uuid.uuid4()
     existing = GuidedEpisodeDelivery.objects.filter(token=token).first()
     if existing:
@@ -60,10 +63,17 @@ def start_guided_encoded_delivery(*, target: Device, show: Show, file_path: str,
         episode = Episode.objects.create(show=show, title=episode_title.strip())
     elif episode.show_id != show.pk:
         raise ValueError("The episode does not belong to the selected show")
-    prior = [int(value[1:]) for value in MediaAsset.objects.filter(episode=episode).values_list("version", flat=True)
-             if value.startswith("v") and value[1:].isdigit()]
-    asset = MediaAsset.objects.create(station=show.station, episode=episode, file_name=snapshot["name"], kind="encoded",
-                                      version=f"v{max(prior or [0]) + 1}", smb_reference=snapshot["path"])
+    if asset is not None:
+        if asset.kind != "encoded" or asset.episode_id != episode.pk or asset.episode.show.station_id != show.station_id:
+            raise ValueError("The selected encoded media does not belong to this episode and working channel")
+        recorded_path = asset.local_path or asset.smb_reference
+        if not recorded_path or Path(recorded_path).expanduser().resolve() != Path(snapshot["path"]):
+            raise ValueError("The selected file path must match the recorded media location")
+    else:
+        prior = [int(value[1:]) for value in MediaAsset.objects.filter(episode=episode).values_list("version", flat=True)
+                 if value.startswith("v") and value[1:].isdigit()]
+        asset = MediaAsset.objects.create(station=show.station, episode=episode, file_name=snapshot["name"], kind="encoded",
+                                          version=f"v{max(prior or [0]) + 1}", smb_reference=snapshot["path"])
     intake = {"target_id": target.pk, "show_id": show.pk, "episode_id": episode.pk,
               "asset_id": asset.pk, "file": snapshot, "encode_before_transfer": False}
     delivery = GuidedEpisodeDelivery.objects.create(token=token, target=target, show=show, episode=episode,
@@ -288,6 +298,7 @@ def record_guided_rollback(delivery: GuidedEpisodeDelivery | int, operation, *, 
 
 def guided_delivery_view(request):
     station = resolve_active_station(request)
+    bound = {}
     """Owner-facing entry and progress page; workers remain asynchronous."""
     if request.method == "POST":
         action = request.POST.get("action")
@@ -296,8 +307,12 @@ def guided_delivery_view(request):
                 target = get_object_or_404(Device, pk=request.POST.get("target"), station=station)
                 show = get_object_or_404(Show, pk=request.POST.get("show"), station=station)
                 episode = Episode.objects.filter(pk=request.POST.get("episode"), show=show).first()
+                asset = MediaAsset.objects.filter(pk=request.POST.get("asset"), episode=episode,
+                    episode__show__station=station, kind="encoded").first() if request.POST.get("asset") else None
+                if request.POST.get("asset") and asset is None:
+                    raise ValueError("The selected encoded media is unavailable in this working channel")
                 delivery = start_guided_encoded_delivery(target=target, show=show,
-                    episode=episode, episode_title=request.POST.get("episode_title", ""),
+                    episode=episode, asset=asset, episode_title=request.POST.get("episode_title", ""),
                     file_path=request.POST.get("file_path", ""),
                     submission_token=request.POST.get("submission_token"))
                 messages.success(request, "Encoded intake recorded. Review the exact file, episode, target, and premiere cycle before confirmation.")
@@ -347,6 +362,8 @@ def guided_delivery_view(request):
             return redirect("guided-delivery")
         except (ValueError, OSError, TypeError, KeyError) as exc:
             messages.error(request, str(exc))
+            if request.POST.get("action") == "start":
+                bound = request.POST
     deliveries = list(GuidedEpisodeDelivery.objects.filter(target__station=station, show__station=station).select_related(
         "target", "show", "episode", "asset", "preparation_batch", "publication_batch",
         "cycle_assignment").order_by("-created_at")[:20])
@@ -357,9 +374,25 @@ def guided_delivery_view(request):
         if delivery.publication_batch_id:
             from .publication_review import publication_review
             delivery.guided_review = publication_review(delivery.publication_batch)
+    selected_asset = MediaAsset.objects.filter(pk=request.GET.get("asset"), episode__show__station=station,
+        kind="encoded").select_related("episode__show").first() if request.GET.get("asset") else None
+    if bound.get("asset"):
+        selected_asset = MediaAsset.objects.filter(pk=bound.get("asset"), episode__show__station=station,
+            kind="encoded").select_related("episode__show").first()
+    targets = list(Device.objects.filter(station=station, ultranexus_settings__is_current=True).distinct().order_by("name"))
+    selected_show = Show.objects.filter(pk=bound.get("show"), station=station).first() if bound else (
+        selected_asset.episode.show if selected_asset else None)
+    selected_episode = Episode.objects.filter(pk=bound.get("episode"), show=selected_show).first() if bound and selected_show else (
+        selected_asset.episode if selected_asset else None)
+    selected_target = next((target for target in targets if str(target.pk) == str(bound.get("target"))), None) if bound else (
+        targets[0] if len(targets) == 1 else None)
+    display_file_path = bound.get("file_path", "") if bound else (selected_asset.local_path if selected_asset else "")
     return render(request, "guided_delivery.html", {
-        "deliveries": deliveries, "targets": Device.objects.filter(station=station).order_by("name"),
+        "deliveries": deliveries, "targets": targets,
         "shows": Show.objects.filter(station=station).order_by("title"),
         "episodes": Episode.objects.filter(show__station=station).select_related("show").order_by("show__title", "title"),
         "submission_token": uuid.uuid4(),
+        "selected_asset": selected_asset, "selected_target": selected_target, "selected_show": selected_show,
+        "selected_episode": selected_episode, "display_file_path": display_file_path,
+        "bound_episode_title": bound.get("episode_title", ""),
     })

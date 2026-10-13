@@ -40,6 +40,44 @@ class GuidedEncodedDeliveryTests(TestCase):
             self.assertEqual(delivery.asset.kind, "encoded")
             self.assertEqual(len(delivery.intake_snapshot["file"]["sha256"]), 64)
 
+    def test_recorded_encoded_asset_is_reused_and_prefilled_in_context(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "recorded.mxf"; path.write_bytes(b"encoded bytes")
+            episode = Episode.objects.create(show=self.show, title="Recorded")
+            asset = MediaAsset.objects.create(station=self.station, episode=episode, kind="encoded",
+                file_name=path.name, version="v1", local_path=str(path))
+            delivery = start_guided_encoded_delivery(target=self.target, show=self.show, episode=episode,
+                asset=asset, file_path=str(path))
+            self.assertEqual(delivery.asset_id, asset.pk)
+            self.assertEqual(MediaAsset.objects.filter(episode=episode).count(), 1)
+            response = self.client.get(f"/schedule/guided-delivery/?asset={asset.pk}")
+            self.assertContains(response, f'name="asset" value="{asset.pk}"')
+            self.assertContains(response, self.target.destination_label)
+
+    def test_guided_asset_context_is_workspace_scoped(self):
+        other = Station.objects.create(name="Other")
+        foreign_show = Show.objects.create(station=other, title="Foreign", code="foreign")
+        foreign_episode = Episode.objects.create(show=foreign_show, title="Foreign")
+        foreign = MediaAsset.objects.create(station=other, episode=foreign_episode, kind="encoded", file_name="foreign.mxf", version="v1")
+        response = self.client.get(f"/schedule/guided-delivery/?asset={foreign.pk}")
+        self.assertNotContains(response, f'name="asset" value="{foreign.pk}"')
+
+    def test_invalid_guided_start_preserves_scoped_form_values(self):
+        episode = Episode.objects.create(show=self.show, title="Keep me")
+        asset = MediaAsset.objects.create(station=self.station, episode=episode, kind="encoded",
+            file_name="missing.mxf", version="v1", local_path="/missing/keep-me.mxf")
+        token = self.client.get("/schedule/guided-delivery/").context["submission_token"]
+        response = self.client.post("/schedule/guided-delivery/", {
+            "action": "start", "submission_token": token, "target": self.target.pk,
+            "show": self.show.pk, "episode": episode.pk, "asset": asset.pk,
+            "file_path": "/missing/keep-me.mxf", "episode_title": "Typed title",
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, f'value="{self.target.pk}" selected')
+        self.assertContains(response, f'value="{episode.pk}" selected')
+        self.assertContains(response, 'value="/missing/keep-me.mxf"')
+        self.assertContains(response, 'value="Typed title"')
+
     def test_changed_selected_bytes_block_confirmation(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "episode.mxf"

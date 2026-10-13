@@ -3,6 +3,11 @@ from django.views.generic import RedirectView
 from pubtv.operations import views
 from pubtv.operations import media_queue, premiere_planning, schedule_preparation, guided_delivery
 
+handler400 = views.bad_request
+handler403 = views.permission_denied
+handler404 = views.not_found
+handler500 = views.server_error
+
 urlpatterns = [
     path("stations/switch/", views.switch_station, name="station-switch"),
     path("", views.dashboard, name="dashboard"),
