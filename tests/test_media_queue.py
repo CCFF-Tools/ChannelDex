@@ -10,8 +10,8 @@ from django.core.management import call_command
 from django.test import Client, TestCase, override_settings
 
 from pubtv.operations.automation import process_preparation_job
-from pubtv.operations.media_queue import cancel_media_queue_batch, create_media_queue_batch, queue_summary, remove_cancelled_media_batch, retry_media_queue_item
-from pubtv.operations.models import (Device, Episode, Occurrence, PreparationBatch,
+from pubtv.operations.media_queue import accepted_media_batches, cancel_media_queue_batch, create_media_queue_batch, effective_preparation_state, queue_summary, remove_cancelled_media_batch, retry_media_queue_item
+from pubtv.operations.models import (Device, Episode, MediaAsset, Occurrence, PreparationBatch,
     PreparationBatchItem, PreparationJob, RecurrenceSlot, ResearchGate, Show, Station, AuditEvent,
     TransferAttempt, UltraNexusTargetSettings, MediaBinding)
 from pubtv.ultranexus.ftp import StdlibFTPAdapter, TransferResult
@@ -35,6 +35,46 @@ class MediaQueueAcceptanceTests(TestCase):
     def rows(self, titles, *, encode=True):
         return [{"file": self.upload(f"{i}-{title}.mp4"), "new_title": title,
                  "encode_before_transfer": encode} for i, title in enumerate(titles)]
+
+    def test_effective_state_drives_attention_for_stale_ready_and_excludes_cancelled_removed(self):
+        episode = Episode.objects.create(show=self.show, title="State contract")
+        asset = MediaAsset.objects.create(station=self.station, episode=episode, file_name="state.mxf", kind="encoded", version="v1")
+        stale = PreparationBatch.objects.create(target=self.target, show=self.show, status="complete")
+        stale_item = PreparationBatchItem.objects.create(batch=stale, asset=asset, execution_status="ready")
+        cancelled = PreparationBatch.objects.create(target=self.target, show=self.show, status="cancelled")
+        cancelled_item = PreparationBatchItem.objects.create(batch=cancelled, asset=asset, execution_status="failed")
+        removed = PreparationBatch.objects.create(target=self.target, show=self.show, status="failed", removed_from_list=True)
+        removed_item = PreparationBatchItem.objects.create(batch=removed, asset=asset, execution_status="failed")
+        self.assertEqual(effective_preparation_state(stale_item), "blocked")
+        self.assertEqual(effective_preparation_state(cancelled_item), "cancelled")
+        self.assertIsNone(effective_preparation_state(removed_item))
+        self.assertEqual(list(accepted_media_batches(self.station, "attention")), [stale])
+        summary_item = next(row for row in queue_summary(self.station)["items"] if row["id"] == stale_item.pk)
+        self.assertEqual(summary_item["state"], "blocked")
+        self.assertEqual(summary_item["blocker"], "Destination verification is no longer current; prepare this file again.")
+        response = self.client.get("/media/preparation/?scope=attention")
+        self.assertContains(response, "Needs attention")
+        self.assertContains(response, summary_item["blocker"])
+
+    def test_library_keeps_destination_failure_visible_beside_other_ready_target(self):
+        from django.utils import timezone
+        episode = Episode.objects.create(show=self.show, title="Two destinations")
+        asset = MediaAsset.objects.create(station=self.station, episode=episode, file_name="two.mxf", kind="encoded", version="v1")
+        MediaBinding.objects.create(asset=asset, target=self.target, binding_type="encoded",
+            verification_basis="legacy", external_reference="controller:1", legacy_attestation_hash="a" * 64,
+            legacy_attested_at=timezone.now(), legacy_attested_by="owner")
+        failed_batch = PreparationBatch.objects.create(target=self.other_target, show=self.show, status="failed")
+        failed = PreparationBatchItem.objects.create(batch=failed_batch, asset=asset, execution_status="failed", blocker="Transfer failed")
+        foreign_station = Station.objects.create(name="Foreign")
+        foreign_target = Device.objects.create(station=foreign_station, name="Foreign target")
+        foreign_batch = PreparationBatch.objects.create(target=foreign_target, show=self.show, status="failed")
+        PreparationBatchItem.objects.create(batch=foreign_batch, asset=asset, execution_status="failed", blocker="Foreign")
+        response = self.client.get("/media/library/")
+        self.assertContains(response, "Destination status: <strong>attention</strong>")
+        self.assertContains(response, self.target.destination_label)
+        self.assertContains(response, self.other_target.destination_label)
+        self.assertContains(response, f"scope=attention#item-{failed.pk}")
+        self.assertNotContains(response, foreign_target.destination_label)
 
     def compatible_probe(self):
         return {"streams": [

@@ -148,8 +148,13 @@ class CarryForwardSettingsForm(forms.ModelForm):
         }
 
 
+class DestinationChoiceField(forms.ModelChoiceField):
+    def label_from_instance(self, obj):
+        return obj.destination_label
+
+
 class AutomationPreparationForm(forms.Form):
-    target = forms.ModelChoiceField(queryset=Device.objects.none(), empty_label=None)
+    target = DestinationChoiceField(queryset=Device.objects.none(), empty_label="Choose a destination")
     assets = forms.ModelMultipleChoiceField(queryset=MediaAsset.objects.none(), required=True)
     encode_before_transfer = forms.BooleanField(required=False, initial=True)
     label = forms.CharField(required=False, max_length=160)
@@ -157,6 +162,9 @@ class AutomationPreparationForm(forms.Form):
     def __init__(self, *args, station=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.fields["target"].queryset = Device.objects.filter(station=station).order_by("name") if station else Device.objects.none()
+        self.fields["target"].label = "Destination device"
+        if not self.is_bound and self.fields["target"].queryset.count() == 1:
+            self.initial["target"] = self.fields["target"].queryset.first()
         self.fields["assets"].queryset = (MediaAsset.objects.filter(
             Q(station=station) | Q(station__isnull=True, episode__show__station=station),
             kind__in=("source", "encoded"),
@@ -164,7 +172,7 @@ class AutomationPreparationForm(forms.Form):
 
 
 class AutomationPublicationForm(forms.Form):
-    target = forms.ModelChoiceField(queryset=Device.objects.none(), empty_label=None)
+    target = DestinationChoiceField(queryset=Device.objects.none(), empty_label="Choose a destination")
     occurrences = forms.ModelMultipleChoiceField(queryset=Occurrence.objects.none(), required=True)
     reconciliation_mode = forms.ChoiceField(choices=SchedulePublicationBatch.RECONCILIATION_MODES, initial="preserve")
     workflow_mode = forms.ChoiceField(choices=SchedulePublicationBatch.WORKFLOW_MODES, initial="selected_changes")
@@ -173,6 +181,9 @@ class AutomationPublicationForm(forms.Form):
     def __init__(self, *args, station=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.fields["target"].queryset = Device.objects.filter(station=station).order_by("name") if station else Device.objects.none()
+        self.fields["target"].label = "Destination device"
+        if not self.is_bound and self.fields["target"].queryset.count() == 1:
+            self.initial["target"] = self.fields["target"].queryset.first()
         self.fields["occurrences"].queryset = (Occurrence.objects.filter(station=station, status="planned").select_related("show", "episode").order_by("starts_at") if station else Occurrence.objects.none())
 
     def clean(self):
@@ -245,7 +256,7 @@ class DeviceForm(forms.ModelForm):
 class ShowForm(forms.ModelForm):
     class Meta:
         model = Show
-        fields = ["station", "title", "description", "code", "show_type", "show_type_other", "primary_producer", "website", "youtube", "facebook", "instagram", "primary_delivery_method", "primary_delivery_other"]
+        fields = ["title", "description", "code", "show_type", "show_type_other", "primary_producer", "website", "youtube", "facebook", "instagram", "primary_delivery_method", "primary_delivery_other"]
         labels = {
             "code": "Show code", "youtube": "YouTube link",
             "facebook": "Facebook link", "instagram": "Instagram link",
@@ -260,12 +271,15 @@ class ShowForm(forms.ModelForm):
 
     def __init__(self, *args, station=None, **kwargs):
         super().__init__(*args, **kwargs)
+        self.station = station
         if station:
-            self.fields["station"].queryset = Station.objects.filter(pk=station.pk)
             self.fields["primary_producer"].queryset = Producer.objects.filter(station=station)
 
     def clean(self):
         data = super().clean()
+        posted_station = self.data.get("station") if self.is_bound else None
+        if posted_station and self.station and str(posted_station) != str(self.station.pk):
+            raise forms.ValidationError("The submitted station does not match the active workspace.")
         if data.get("primary_delivery_method") == "other" and not data.get("primary_delivery_other", "").strip():
             self.add_error("primary_delivery_other", "Describe the other delivery method.")
         elif data.get("primary_delivery_method") != "other":
@@ -442,7 +456,7 @@ class SlotForm(forms.ModelForm):
 
     class Meta:
         model = RecurrenceSlot
-        fields = ["station", "show", "weekday", "start_time", "duration_seconds", "is_premiere", "active_from", "active_until"]
+        fields = ["show", "weekday", "start_time", "duration_seconds", "is_premiere", "active_from", "active_until"]
         labels = {"is_premiere": "Primary / new-episode premiere slot"}
         help_texts = {
             "start_time": "Local station time in America/Detroit. Type or step through hours and minutes.",
@@ -458,19 +472,25 @@ class SlotForm(forms.ModelForm):
 
     def __init__(self, *args, station=None, show=None, **kwargs):
         super().__init__(*args, **kwargs)
+        self.station = station
         self.fields["start_time"].input_formats = ["%H:%M"]
         if station:
-            self.fields["station"].queryset = Station.objects.filter(pk=station.pk)
+            self.instance.station = station
             self.fields["show"].queryset = Show.objects.filter(station=station)
-            self.fields["station"].initial = station
         if show:
             self.fields["show"].initial = show
             self.fields["show"].disabled = True
-            self.fields["station"].disabled = True
             if show.slot_duration_seconds:
                 self.fields["duration_seconds"].initial = show.slot_duration_seconds
                 self.fields["duration_seconds"].disabled = True
                 self.fields["duration_seconds"].help_text = "Inherited from the show's time slot length. Change it from the weekly-time manager."
+
+    def clean(self):
+        data = super().clean()
+        posted_station = self.data.get("station") if self.is_bound else None
+        if posted_station and self.station and str(posted_station) != str(self.station.pk):
+            raise forms.ValidationError("The submitted station does not match the active workspace.")
+        return data
 
 
 class AssignmentForm(forms.ModelForm):
@@ -575,6 +595,9 @@ class AssetTargetTransferForm(forms.ModelForm):
         else:
             self.fields["device"].queryset = Device.objects.none()
         self.fields["transferred_at"].input_formats = ["%Y-%m-%dT%H:%M"]
+        self.fields["device"].label_from_instance = lambda obj: obj.destination_label
+        if not self.is_bound and self.fields["device"].queryset.count() == 1:
+            self.initial["device"] = self.fields["device"].queryset.first()
 
 
 class PreparationForm(AssetPreparationForm):
@@ -595,6 +618,9 @@ class ProgrammingForm(forms.ModelForm):
     def __init__(self, *args, station=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.fields["device"].queryset = Device.objects.filter(station=station).order_by("name") if station else Device.objects.none()
+        self.fields["device"].label_from_instance = lambda obj: obj.destination_label
+        if not self.is_bound and self.fields["device"].queryset.count() == 1:
+            self.initial["device"] = self.fields["device"].queryset.first()
 
 
 class UploadForm(forms.ModelForm):
@@ -609,6 +635,10 @@ class UploadForm(forms.ModelForm):
         super().__init__(*args, **kwargs)
         qs = Occurrence.objects.filter(station=station).order_by("starts_at") if station else Occurrence.objects.none()
         self.fields["occurrences"].queryset = qs
+        self.fields["device"].queryset = Device.objects.filter(station=station).order_by("name") if station else Device.objects.none()
+        self.fields["device"].label_from_instance = lambda obj: obj.destination_label
+        if not self.is_bound and self.fields["device"].queryset.count() == 1:
+            self.initial["device"] = self.fields["device"].queryset.first()
 
 
 class AiringForm(forms.ModelForm):

@@ -3,6 +3,7 @@ from urllib.parse import parse_qs, urlencode, urlparse
 import re
 
 from django.shortcuts import redirect
+from django.urls import Resolver404, resolve
 
 from .models import Station
 
@@ -60,19 +61,46 @@ def workspace_safe_url(value, fallback="/"):
     next_url = value or fallback
     parsed = urlparse(next_url)
     collection = None
-    if re.fullmatch(r"/shows/\d+/", parsed.path):
+    if re.fullmatch(r"/shows/\d+/(edit/|premieres/|slots/|slots/length/)?", parsed.path):
         collection = "/schedule/" if any(parse_qs(parsed.query).get(key) for key in ("date", "mode")) else "/shows/"
-    elif re.fullmatch(r"/episodes/\d+(/edit)?/", parsed.path): collection = "/episodes/"
-    elif re.fullmatch(r"/settings/devices/\d+/", parsed.path): collection = "/settings/devices/"
-    elif re.fullmatch(r"/occurrences/\d+(/edit)?/", parsed.path): collection = "/schedule/"
+    elif re.fullmatch(r"/episodes/\d+/(edit/|duplicate/|workflow/new/)?", parsed.path): collection = "/episodes/"
+    elif re.fullmatch(r"/settings/devices/\d+/(edit/)?", parsed.path): collection = "/settings/devices/"
+    elif re.fullmatch(r"/occurrences/\d+/(edit/|preparation/|programming/|airing/)?", parsed.path): collection = "/schedule/"
+    elif re.fullmatch(r"/slots/\d+/edit/", parsed.path): collection = "/schedule/recurring/"
+    elif re.fullmatch(r"/assets/\d+/(edit/|transfers/new/|transfers/\d+/edit/)", parsed.path): collection = "/media/library/"
     elif parsed.path.startswith("/media/assets/"): collection = "/media/library/"
+    elif parsed.path == "/media/preparation/": collection = "/media/preparation/"
+    elif parsed.path == "/schedule/guided-delivery/": collection = "/schedule/guided-delivery/"
+    elif parsed.path in {"/assets/new/", "/episodes/new/", "/occurrences/new/"}: collection = parsed.path
     elif parsed.path in {"/media/", "/media/library/"}: collection = parsed.path
     if collection:
         query = parse_qs(parsed.query, keep_blank_values=True)
         allowed = ({"date", "mode", "days", "view"} if collection == "/schedule/" else
-                   {"readiness", "q"} if collection in {"/media/", "/media/library/"} else set())
+                   {"readiness", "q"} if collection in {"/media/", "/media/library/"} else
+                   {"scope"} if collection == "/media/preparation/" else set())
         keep = {key: value[-1] for key, value in query.items() if key in allowed and value}
         next_url = collection
         if keep:
             next_url += "?" + urlencode(keep)
+    else:
+        try:
+            resolve(parsed.path)
+        except Resolver404:
+            next_url = fallback
+        else:
+            # Collection filters may survive a workspace switch only when they
+            # cannot identify an object from the previous workspace.
+            safe_queries = {
+                "/schedule/": {"date", "mode", "days", "view"},
+                "/day/": {"date"}, "/week/": {"date"}, "/agenda/": {"date", "days"},
+                "/shows/": {"q", "sort", "show_type"},
+                "/media/library/": {"readiness", "q"},
+                "/media/preparation/": {"scope"},
+            }
+            query = parse_qs(parsed.query, keep_blank_values=True)
+            keep = {key: values[-1] for key, values in query.items()
+                    if key in safe_queries.get(parsed.path, set()) and values}
+            next_url = parsed.path
+            if keep:
+                next_url += "?" + urlencode(keep)
     return next_url

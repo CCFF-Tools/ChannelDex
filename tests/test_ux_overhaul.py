@@ -1,6 +1,6 @@
 from pathlib import Path
 import unittest
-from datetime import datetime, timezone as dt_timezone
+from datetime import datetime, timedelta, timezone as dt_timezone
 
 from django.test import Client, TestCase
 from django.urls import reverse
@@ -12,6 +12,70 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class UXOverhaulTests(TestCase):
+  def test_show_workspace_separates_discoverable_past_plans_from_upcoming(self):
+    from django.utils import timezone
+    station = Station.objects.create(name="PUB-TV")
+    show = Show.objects.create(station=station, title="Civic", code="civic")
+    past = Occurrence.objects.create(station=station, show=show, item_type="live", label="Past council",
+      starts_at=timezone.now()-timedelta(days=1), planned_duration_seconds=60)
+    future = Occurrence.objects.create(station=station, show=show, item_type="live", label="Future council",
+      starts_at=timezone.now()+timedelta(days=1), planned_duration_seconds=60)
+    rescheduled = Occurrence.objects.create(station=station, show=show, item_type="live", label="Superseded council",
+      starts_at=timezone.now()+timedelta(days=2), planned_duration_seconds=60, status="rescheduled")
+    response = Client().get(f"/shows/{show.pk}/")
+    assert list(response.context["past_occurrences"]) == [past]
+    assert list(response.context["upcoming_occurrences"]) == [future]
+    assert rescheduled not in response.context["upcoming_occurrences"]
+    assert b'Past planned occurrences' in response.content
+    assert '<title>Civic · Shows · ChannelDex</title>' in response.content.decode()
+
+  def test_agenda_uses_canonical_occurrence_label_without_repeating_show_episode(self):
+    from django.utils import timezone
+    station = Station.objects.create(name="PUB-TV")
+    show = Show.objects.create(station=station, title="Civic", code="civic")
+    episode = Episode.objects.create(show=show, title="Meeting")
+    Occurrence.objects.create(station=station, show=show, episode=episode, item_type="episode",
+      label="Civic · Meeting", starts_at=timezone.now()+timedelta(hours=1), planned_duration_seconds=60)
+    content = Client().get("/agenda/").content.decode()
+    assert "Civic · Meeting · Civic · Meeting" not in content
+    assert "Civic · Meeting" in content
+
+  def test_settings_explicitly_groups_workspace_and_application_scope(self):
+    Station.objects.create(name="PUB-TV")
+    content = Client().get("/settings/").content.decode()
+    assert "Workspace-specific settings" in content
+    assert "Application-wide settings" in content
+
+  def test_workspace_scoped_show_and_slot_forms_inherit_station(self):
+    station = Station.objects.create(name="PUB-TV")
+    client = Client()
+    show_form = client.get("/shows/new/")
+    assert "station" not in show_form.context["form"].fields
+    assert show_form.content.decode().count('name="station"') == 1  # shared workspace selector only
+    response = client.post("/shows/new/", {"station": 99999, "title": "Inherited", "code": "inherited"})
+    assert response.status_code == 200
+    assert not Show.objects.filter(code="inherited").exists()
+    response = client.post("/shows/new/", {"title": "Inherited", "code": "inherited"})
+    assert response.status_code == 302, response.context["form"].errors if response.context else response.content
+    show = Show.objects.get(code="inherited")
+    assert show.station == station
+    slot_form = client.get(f"/slots/new/?show={show.pk}")
+    assert "station" not in slot_form.context["form"].fields
+    response = client.post(f"/slots/new/?show={show.pk}", {
+      "station": 99999, "show": show.pk, "weekday": 0, "start_time": "07:00",
+      "duration_seconds_0": "0", "duration_seconds_1": "30", "duration_seconds_2": "0",
+      "active_from": "", "active_until": "",
+    })
+    assert response.status_code == 200
+    assert not RecurrenceSlot.objects.filter(show=show).exists()
+    response = client.post(f"/slots/new/?show={show.pk}", {
+      "show": show.pk, "weekday": 0, "start_time": "07:00",
+      "duration_seconds_0": "0", "duration_seconds_1": "30", "duration_seconds_2": "0",
+      "active_from": "", "active_until": "",
+    })
+    assert response.status_code == 302, response.context["form"].errors if response.context else response.content
+    assert RecurrenceSlot.objects.get(show=show).station == station
+
   def test_workspace_switch_returns_object_pages_to_neutral_schedule_context(self):
     first = Station.objects.create(name="PUB-TV")
     second = Station.objects.create(name="GOV-TV")

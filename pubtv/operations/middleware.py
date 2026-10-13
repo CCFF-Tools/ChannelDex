@@ -16,10 +16,8 @@ class StationOriginGuardMiddleware:
             origin = request.POST.get("originating_station")
             browser_request = bool(request.META.get("HTTP_SEC_FETCH_SITE"))
             if not origin and browser_request:
-                return HttpResponseBadRequest(
-                    "This browser action is missing its working-channel context. Nothing was saved. "
-                    "Return to the page, reload it deliberately, and try again."
-                )
+                from .views import bad_request
+                return bad_request(request)
             if origin:
                 station = resolve_active_station(request)
                 origin_matches = origin == "none" and station is None

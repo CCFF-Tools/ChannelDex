@@ -19,7 +19,7 @@ from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
 from .forms import OccurrenceForm, StationForm, CarryForwardSettingsForm, DeviceForm, ShowForm, ShowSlotDurationForm, EpisodeForm, ProducerForm, EpisodeMilestoneForm, AssetForm, DeliveryForm, SlotForm, AssignmentForm, AssetPreparationForm, AssetTargetTransferForm, ProgrammingForm, UploadForm, AiringForm, AutomationPreparationForm, AutomationPublicationForm, UltraNexusSettingsForm
 from .models import Episode, EpisodeWorkflowMilestone, Occurrence, Show, Station, Device, Producer, MediaAsset, Delivery, RecurrenceSlot, WeeklyEpisodeAssignment, Preparation, AssetPreparation, AssetTargetTransfer, OccurrenceProgramming, UploadedOccurrenceCoverage, UploadedScheduleRevision, AiringEvidence, AuditEvent, UltraNexusTargetSettings, PreparationBatch, PreparationBatchItem, PreparationJob, SchedulePublicationBatch, ScheduleDeliveryOperation, OccurrenceRevisionSelection, ResearchGate, TransferAttempt, PublicationJob, GuidedEpisodeDelivery
-from .media_queue import begin_relink_review, confirm_relink_review, relink_review_result
+from .media_queue import begin_relink_review, confirm_relink_review, relink_review_result, effective_preparation_status
 from .models import MediaRelinkReview
 from .services import schedule_alerts, audit, materialize_assignment, ensure_carry_forward_week, next_premiere_date, suggested_pending_episode, confirm_preparation_fact, create_upload_snapshot, revise_airing, sign_upload_preview, load_upload_preview, commit_upload_preview, preparation_readiness, calendar_capacity, pending_episode_reason, pending_episode_sort_key
 from .automation import approve_snapshot, canonical_hash, invalidate_snapshot, preparation_batch_snapshot, publication_snapshot, preview_schedule, approve_preparation_batch, schedule_ready_binding, generate_nmg_artifact, generate_bin_artifact, publication_artifact_blockers
@@ -1100,10 +1100,37 @@ def show_detail(request, show_id):
     pending = [episode for episode in episodes if episode.status == "pending"]
     now = timezone.now()
     upcoming = sorted(
-        [item for item in show.occurrences.all() if item.starts_at >= now and item.status not in {"cancelled", "preempted"}],
+        [item for item in show.occurrences.all() if item.starts_at >= now and item.status == "planned"],
         key=lambda item: (item.starts_at, item.pk),
     )[:20]
-    return render(request, "show_detail.html", {"show": show, "pending": pending, "episodes": episodes, "upcoming_occurrences": upcoming})
+    past = sorted(
+        [item for item in show.occurrences.all() if item.starts_at < now],
+        key=lambda item: (item.starts_at, item.pk), reverse=True,
+    )[:100]
+    return render(request, "show_detail.html", {"show": show, "pending": pending, "episodes": episodes,
+        "upcoming_occurrences": upcoming, "past_occurrences": past})
+
+
+def _recoverable_error(request, status, heading, detail):
+    return render(request, "error.html", {"status": status, "heading": heading, "detail": detail}, status=status)
+
+
+def bad_request(request, exception=None):
+    return _recoverable_error(request, 400, "That request could not be used", "Nothing was changed. Return to a safe page and try again.")
+
+
+def permission_denied(request, exception=None):
+    return _recoverable_error(request, 403, "That action is unavailable", "Choose a page in the current working channel.")
+
+
+def not_found(request, exception=None):
+    return _recoverable_error(request, 404, "Page not found", "The item may belong to another working channel or may no longer exist.")
+
+
+def server_error(request):
+    from django.template.loader import render_to_string
+    from django.http import HttpResponse
+    return HttpResponse(render_to_string("500.html"), status=500)
 
 def episode_queue_reorder(request, show_id):
     station = resolve_active_station(request)
@@ -1183,14 +1210,15 @@ def media_library(request):
     def prepare_asset(asset):
         asset.available = bool(asset.local_path and Path(asset.local_path).is_file())
         asset_items = [item for item in asset.preparation_batch_items.all()
-                       if not item.batch.removed_from_list]
+                       if not item.batch.removed_from_list and item.batch.target.station_id == station.pk]
+        for item in asset_items:
+            item.effective_state, item.effective_blocker = effective_preparation_status(item)
         asset.latest_item = max(asset_items, key=lambda item: item.pk) if asset_items else None
         asset.ready_targets = [binding.target for binding in asset.ultranexus_bindings.all()
-            if binding.binding_type == "encoded" and binding.is_schedule_ready]
-        asset.readiness = "ready" if asset.ready_targets else (
-            "attention" if any(item.execution_status in {"failed", "blocked"} and item.batch.status != "cancelled" for item in asset_items)
-            else "catalogued"
-        )
+            if binding.target.station_id == station.pk and binding.binding_type == "encoded"
+            and schedule_ready_binding(asset, binding.target)]
+        asset.attention_items = [item for item in asset_items if item.effective_state in {"failed", "blocked"}]
+        asset.readiness = "attention" if asset.attention_items else "ready" if asset.ready_targets else "catalogued"
         return asset, asset_items
     for episode in episodes:
         assets = list(episode.assets.all())
@@ -1200,8 +1228,8 @@ def media_library(request):
             items.extend(asset_items)
         prepared = any(asset.ready_targets for asset in assets)
         available = any(asset.available for asset in assets)
-        attention = any(item.execution_status in {"failed", "blocked"} for item in items if item.batch.status != "cancelled")
-        state = "ready" if prepared else "attention" if attention else "pending" if assets else "missing"
+        attention = any(item.effective_state in {"failed", "blocked"} for item in items)
+        state = "attention" if attention else "ready" if prepared else "pending" if assets else "missing"
         if readiness in {"ready", "pending", "attention", "missing"} and state != readiness:
             continue
         if readiness == "available" and not available:
@@ -1324,6 +1352,8 @@ def _crud(request, model, form_class, title, pk=None, initial=None, extra_contex
     form = form_class(request.POST or None, initial=initial, **kwargs)
     if request.method == "POST" and form.is_valid():
         obj = form.save(commit=False)
+        if isinstance(obj, Show):
+            obj.station = station
         if isinstance(obj, Device):
             obj.station = station
         if isinstance(obj, MediaAsset):
