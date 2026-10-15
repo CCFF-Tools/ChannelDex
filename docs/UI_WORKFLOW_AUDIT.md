@@ -1,5 +1,11 @@
 # UI and workflow remediation
 
+**Accepted audit scope — 2026-10-14:** a fresh task-based usability review,
+weighted toward media intake, preparation, weekly planning, and daily actions,
+is recorded in [the October 14 audit](usability-audit-2026-10-14/README.md).
+Its redesign recommendations are **proposed**, not implemented or accepted.
+The closure record below concerns the earlier audit only.
+
 **Accepted — 2026-10-11:** implement the October 8 UI audit, with the channel
 selector acting as a workspace switcher. Prioritize platform-independent media
 tracking, management, and scheduling while preserving existing UltraNEXUS
