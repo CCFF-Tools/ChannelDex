@@ -17,7 +17,7 @@ from django.conf import settings
 from django.contrib import messages
 from django.db import IntegrityError, transaction
 from django.core.exceptions import ValidationError
-from django.http import JsonResponse
+from django.http import HttpResponseBadRequest, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
 
@@ -52,7 +52,7 @@ def effective_preparation_state(item):
 
 def accepted_media_batches(station=None, scope=""):
     """Return accepted batches, retaining cancelled ones until explicitly hidden."""
-    batches = PreparationBatch.objects.filter(removed_from_list=False, **({"target__station": station} if station is not None else {}))
+    batches = PreparationBatch.objects.filter(removed_from_list=False, **({"target__station": station} if station is not None else {})).exclude(status__in=("draft", "in_progress"))
     if scope in {"attention", "active"}:
         wanted = {"failed", "blocked"} if scope == "attention" else {"queued", "encoding", "validating", "transferring", "verifying"}
         candidate_items = PreparationBatchItem.objects.filter(batch__in=batches).select_related("batch", "asset", "batch__target")
@@ -250,7 +250,7 @@ def create_media_queue_batch(*, target, show, rows, submission_token=None, label
 
 def queue_summary(station=None):
     """Return a polling-safe global summary without exposing private paths."""
-    items = PreparationBatchItem.objects.filter(batch__removed_from_list=False).select_related("batch", "asset", "asset__episode").order_by("batch__created_at", "position", "pk")
+    items = PreparationBatchItem.objects.filter(batch__removed_from_list=False).exclude(batch__status__in=("draft", "in_progress")).select_related("batch", "asset", "asset__episode").order_by("batch__created_at", "position", "pk")
     if station is not None:
         items = items.filter(batch__target__station=station)
     counts = {state: 0 for state in QUEUE_STATES}
@@ -429,22 +429,107 @@ def media_queue_summary(request):
 def intake_context(request):
     """Resolve show-context links without trusting unrelated query values."""
     station = resolve_active_station(request)
-    show = Show.objects.filter(pk=request.GET.get("show"), station=station).first() if request.GET.get("show") else None
+    def valid_pk(name):
+        value = request.GET.get(name)
+        return value if value and str(value).isdigit() else None
+
+    show_id, episode_id, asset_id, target_id = (valid_pk(name) for name in ("show", "episode", "asset", "target"))
+    show = Show.objects.filter(pk=show_id, station=station).first() if show_id else None
     if show is None and not request.GET.get("show"):
         station_shows = Show.objects.filter(station=station).order_by("pk")
         show = station_shows.first() if station_shows.count() == 1 else None
-    episode = Episode.objects.filter(pk=request.GET.get("episode"), show=show).first() if show and request.GET.get("episode") else None
-    asset = MediaAsset.objects.filter(pk=request.GET.get("asset"), episode=episode).first() if episode and request.GET.get("asset") else None
+    episode = Episode.objects.filter(pk=episode_id, show=show).first() if show and episode_id else None
+    asset = (MediaAsset.objects.filter(pk=asset_id, episode=episode).first() if episode and asset_id else
+             MediaAsset.objects.filter(pk=asset_id, station=station, episode__isnull=True).first() if asset_id else None)
+    if asset and asset.episode_id and episode is None:
+        episode, show = asset.episode, asset.episode.show
+    if asset and not asset.episode_id:
+        episode, show = None, None
     targets = eligible_destination_devices(station)
-    target = Device.objects.filter(pk=request.GET.get("target"), station=station).first() if request.GET.get("target") else None
+    target = Device.objects.filter(pk=target_id, station=station).first() if target_id else None
     if target is None:
         target = targets.first() if targets.count() == 1 else None
     try:
         order = max(0, int(request.GET.get("order", "0")))
     except (TypeError, ValueError):
         order = 0
+    draft_rows = []
+    if request.GET.get("path"):
+        draft_rows = [{"source_path": request.GET["path"], "episode_id": str(episode.pk) if episode else "new", "new_title": Path(request.GET["path"]).stem, "encoding_mode": "", "episode_number": "", "runtime_seconds": ""}]
+    elif asset and asset.local_path:
+        draft_rows = [{"source_path": asset.local_path, "episode_id": str(episode.pk) if episode else "", "new_title": "",
+                       "encoding_mode": "needs_encoding" if asset.kind == "source" else "already_encoded",
+                       "episode_number": "", "runtime_seconds": asset.runtime_seconds or ""}]
     return {"show": show, "episode": episode, "asset": asset, "target": target, "order": order,
-            "item": request.GET.get("item", ""), "has_context": bool(request.GET), "accepted": request.COOKIES.get("media_intake_accepted") == "1", "draft_rows": ([{"source_path": request.GET["path"], "episode_id": str(episode.pk) if episode else "new", "new_title": Path(request.GET["path"]).stem, "encoding_mode": "", "episode_number": "", "runtime_seconds": ""}] if request.GET.get("path") else [])}
+            "item": request.GET.get("item", ""), "has_context": bool(request.GET), "accepted": request.COOKIES.get("media_intake_accepted") == "1", "draft_rows": draft_rows}
+
+
+@transaction.atomic
+def create_existing_asset_review(*, target, asset, submission_token, actor="owner"):
+    """Create a durable, non-executing review for one catalogued asset."""
+    try:
+        token = uuid.UUID(str(submission_token))
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise ValueError("Start a fresh preparation review.") from exc
+    if target.station_id != asset.station_id or not UltraNexusTargetSettings.objects.filter(target=target, is_current=True).exists():
+        raise ValueError("Choose a configured destination in the active station.")
+    path = Path(asset.local_path or "")
+    if not path.is_absolute() or len(str(path)) > 500:
+        raise ValueError("This catalogued media needs an absolute local path before preparation.")
+    try:
+        stat = path.stat()
+    except OSError as exc:
+        raise ValueError("The catalogued local file is unavailable. Relink it before preparation.") from exc
+    if not path.is_file():
+        raise ValueError("The catalogued local path must identify a file.")
+    show = asset.episode.show if asset.episode_id else None
+    batch, created = PreparationBatch.objects.get_or_create(submission_token=token, defaults={
+        "target": target, "show": show, "label": f"{asset.file_name} preparation", "created_by": actor,
+    })
+    if not created:
+        item = batch.items.first()
+        if batch.target_id != target.pk or batch.show_id != (show.pk if show else None) or not item or item.asset_id != asset.pk:
+            raise ValueError("This review token belongs to different preparation choices. Start a fresh review.")
+        return batch, item
+    item = PreparationBatchItem.objects.create(
+        batch=batch, asset=asset, selected_input_path=str(path.resolve()), reviewed_file_size=stat.st_size,
+        reviewed_mtime_ns=stat.st_mtime_ns, encode_before_transfer=asset.kind != "encoded",
+    )
+    AuditEvent.objects.create(actor=actor, action="review", entity="PreparationBatch", entity_id=batch.pk,
+                              summary="Catalogued media and destination saved for owner review")
+    return batch, item
+
+
+@transaction.atomic
+def confirm_existing_asset_review(batch, *, actor="owner"):
+    """Approve one unchanged catalogued asset without creating another asset."""
+    reserved = PreparationBatch.objects.filter(pk=batch.pk, status="draft").update(status="in_progress")
+    batch = PreparationBatch.objects.select_related("target").get(pk=batch.pk)
+    if not reserved:
+        if batch.status in {"approved", "complete", "blocked", "failed"}:
+            return batch, False
+        raise ValueError("This preparation review is no longer pending.")
+    item = batch.items.select_related("asset", "asset__episode__show").get()
+    asset = item.asset
+    if asset.station_id != batch.target.station_id or (asset.episode_id and batch.show_id != asset.episode.show_id) or (not asset.episode_id and batch.show_id is not None):
+        raise ValueError("The catalogued media or destination changed; start a fresh review.")
+    if not UltraNexusTargetSettings.objects.filter(target=batch.target, is_current=True).exists():
+        raise ValueError("The destination configuration changed; start a fresh review.")
+    path = Path(asset.local_path or "")
+    try:
+        stat = path.stat()
+    except OSError as exc:
+        raise ValueError("The reviewed source file is unavailable; relink it and review again.") from exc
+    if (not path.is_file() or str(path.resolve()) != item.selected_input_path or
+            (stat.st_size, stat.st_mtime_ns) != (item.reviewed_file_size, item.reviewed_mtime_ns)):
+        raise ValueError("The reviewed source file changed; review preparation again.")
+    approve_snapshot(batch, preparation_batch_snapshot(batch), approval=1, actor=actor)
+    batch.status = "approved"
+    batch.save(update_fields=["status"])
+    PreparationJob.objects.get_or_create(batch=batch, idempotency_key=f"preparation:{batch.pk}:{batch.approval_1_hash}")
+    AuditEvent.objects.create(actor=actor, action="prepare", entity="MediaAsset", entity_id=asset.pk,
+                              summary=f"Reviewed catalogued media approved for {batch.target.destination_label}")
+    return batch, True
 
 
 def create_intake_review(*, target, show, episode=None, asset=None, action="prepare_only", order=0, item="", actor="owner", submission_token=None):
@@ -717,17 +802,34 @@ def confirm_intake_review(review, *, first_premiere_date=None, actor="owner"):
 def media_queue(request):
     station = resolve_active_station(request)
     connected = intake_context(request)
+    setup_context = bool(request.method == "POST" or request.GET.get("setup") or any(request.GET.get(key) for key in ("asset", "show", "episode", "target", "path")) or connected.get("reviewed"))
     if request.method == "POST":
         action = request.POST.get("action", "prepare_only")
         if action in {"review", "review_intake"}:
-            show = Show.objects.filter(pk=request.POST.get("show"), station=station).first()
-            target = Device.objects.filter(pk=request.POST.get("target"), station=station).first()
-            episode_id = request.POST.get("episode") or None
+            post_pk = lambda name: request.POST.get(name) if str(request.POST.get(name) or "").isdigit() else None
+            show = Show.objects.filter(pk=post_pk("show"), station=station).first() if post_pk("show") else None
+            target = Device.objects.filter(pk=post_pk("target"), station=station).first() if post_pk("target") else None
+            episode_id = post_pk("episode")
             episode = Episode.objects.filter(pk=episode_id, show=show).first() if show and episode_id else None
-            asset_id = request.POST.get("asset") or None
-            asset = MediaAsset.objects.filter(pk=asset_id, episode=episode).first() if episode and asset_id else None
+            asset_id = post_pk("asset")
+            asset = (MediaAsset.objects.filter(pk=asset_id, episode=episode).first() if episode and asset_id else
+                     MediaAsset.objects.filter(pk=asset_id, station=station, episode__isnull=True).first() if asset_id else None)
             response_status = 200
-            connected.update(show=show, target=target)
+            connected.update(show=show, episode=episode, asset=asset, target=target)
+            if asset is not None:
+                try:
+                    if target is None:
+                        raise ValueError("Choose a destination before reviewing this preparation.")
+                    batch, item = create_existing_asset_review(target=target, asset=asset,
+                        submission_token=request.POST.get("submission_token"), actor="owner")
+                    connected.update(existing_batch_review=batch, existing_item=item, reviewed_existing=True)
+                except (ValueError, ValidationError, OSError) as exc:
+                    connected["error"] = str(exc)
+                    response_status = 400
+                batches = accepted_media_batches(station)
+                episodes = list(Episode.objects.filter(show__station=station).order_by("show_id", "title").values("id", "show_id", "title"))
+                return render(request, "media_queue.html", {"batches": batches, "queue": queue_summary(station), "targets": eligible_destination_devices(station),
+                    "shows": Show.objects.filter(station=station), "episodes": episodes, "submission_token": uuid.uuid4(), "connected": connected, "setup_context": True}, status=response_status)
             if request.POST.get("draft_rows"):
                 try:
                     draft = json.loads(request.POST["draft_rows"])
@@ -783,7 +885,7 @@ def media_queue(request):
             batches = accepted_media_batches(station)
             episodes = list(Episode.objects.filter(show__station=station).order_by("show_id", "title").values("id", "show_id", "title"))
             return render(request, "media_queue.html", {"batches": batches, "queue": queue_summary(station), "targets": eligible_destination_devices(station),
-                "shows": Show.objects.filter(station=station), "episodes": episodes, "submission_token": uuid.uuid4() if connected.get("reviewed") else request.POST.get("submission_token") or uuid.uuid4(), "connected": connected}, status=response_status)
+                "shows": Show.objects.filter(station=station), "episodes": episodes, "submission_token": uuid.uuid4() if connected.get("reviewed") else request.POST.get("submission_token") or uuid.uuid4(), "connected": connected, "setup_context": setup_context}, status=response_status)
         if action == "confirm_intake":
             review = get_object_or_404(MediaIntakeReview, token=request.POST.get("review_token"))
             if review.show.station_id != station.pk or review.target.station_id != station.pk:
@@ -803,7 +905,7 @@ def media_queue(request):
                     "batches": accepted_media_batches(station),
                     "queue": queue_summary(station), "targets": eligible_destination_devices(station), "shows": Show.objects.filter(station=station),
                     "episodes": list(Episode.objects.filter(show__station=station).order_by("show_id", "title").values("id", "show_id", "title")),
-                    "submission_token": uuid.uuid4(), "connected": connected,
+                    "submission_token": uuid.uuid4(), "connected": connected, "setup_context": setup_context,
                 }, status=400)
             review.refresh_from_db()
             if review.action == "prepare_and_plan":
@@ -816,6 +918,34 @@ def media_queue(request):
             response = redirect(request.path)
             response.set_cookie("media_intake_accepted", "1", httponly=True, samesite="Strict")
             return response
+        if action == "confirm_existing_asset":
+            token = request.POST.get("submission_token", "")
+            batch_id = request.POST.get("batch_id", "")
+            try:
+                token = str(uuid.UUID(token))
+            except (TypeError, ValueError, AttributeError):
+                token = ""
+            batch = PreparationBatch.objects.filter(pk=batch_id if str(batch_id).isdigit() else None,
+                submission_token=token if token else None, target__station=station).first()
+            if batch is None:
+                connected["error"] = "This preparation review is invalid or no longer available."
+                return render(request, "media_queue.html", {"batches": accepted_media_batches(station), "queue": queue_summary(station),
+                    "targets": eligible_destination_devices(station), "shows": Show.objects.filter(station=station),
+                    "episodes": list(Episode.objects.filter(show__station=station).order_by("show_id", "title").values("id", "show_id", "title")),
+                    "submission_token": uuid.uuid4(), "connected": connected, "setup_context": True}, status=400)
+            try:
+                batch, created = confirm_existing_asset_review(batch)
+            except (ValueError, ValidationError) as exc:
+                item = batch.items.select_related("asset", "asset__episode__show").first()
+                connected.update(asset=item.asset if item else None, episode=item.asset.episode if item and item.asset.episode_id else None,
+                    show=item.asset.episode.show if item and item.asset.episode_id else None, target=batch.target,
+                    existing_batch_review=batch, existing_item=item, reviewed_existing=True, error=str(exc))
+                return render(request, "media_queue.html", {"batches": accepted_media_batches(station), "queue": queue_summary(station),
+                    "targets": eligible_destination_devices(station), "shows": Show.objects.filter(station=station),
+                    "episodes": list(Episode.objects.filter(show__station=station).order_by("show_id", "title").values("id", "show_id", "title")),
+                    "submission_token": uuid.uuid4(), "connected": connected, "setup_context": True}, status=400)
+            messages.success(request, f"Batch {batch.pk} queued." if created else f"Batch {batch.pk} was already accepted.")
+            return redirect(request.path)
         # Keep the show/episode/asset context when the owner chooses the
         # connected premiere planning branch. No schedule is created here.
         if action in {"prepare_and_plan", "prepare_plan", "plan_premieres"}:
@@ -829,11 +959,11 @@ def media_queue(request):
         return render(request, "media_queue.html", {"batches": accepted_media_batches(station), "queue": queue_summary(station),
             "targets": eligible_destination_devices(station), "shows": Show.objects.filter(station=station),
             "episodes": list(Episode.objects.filter(show__station=station).order_by("show_id", "title").values("id", "show_id", "title")),
-            "submission_token": request.POST.get("submission_token") or uuid.uuid4(), "connected": connected}, status=400)
+            "submission_token": request.POST.get("submission_token") or uuid.uuid4(), "connected": connected, "setup_context": setup_context}, status=400)
     scope = request.GET.get("scope", "")
     batches = accepted_media_batches(station, scope=scope)
     episodes = list(Episode.objects.filter(show__station=station).order_by("show_id", "title").values("id", "show_id", "title"))
-    response = render(request, "media_queue.html", {"batches": batches, "queue": queue_summary(station), "targets": eligible_destination_devices(station), "shows": Show.objects.filter(station=station), "episodes": episodes, "submission_token": uuid.uuid4(), "connected": connected, "scope": scope})
+    response = render(request, "media_queue.html", {"batches": batches, "queue": queue_summary(station), "targets": eligible_destination_devices(station), "shows": Show.objects.filter(station=station), "episodes": episodes, "submission_token": uuid.uuid4(), "connected": connected, "scope": scope, "setup_context": setup_context})
     if connected["accepted"]:
         response.delete_cookie("media_intake_accepted")
     return response

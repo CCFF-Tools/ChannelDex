@@ -1,0 +1,6 @@
+{% extends "base.html" %}
+{% block page_title %}Media saved · ChannelDex{% endblock %}
+{% block content %}
+<div class="page-heading"><p class="eyebrow">Media / Library</p><h1>Saved to library</h1><p class="lede">{{ asset.file_name }}{% if asset.episode %} · {{ asset.episode.show.title }} · {{ asset.episode.title }}{% else %} · Reusable station media{% endif %}</p></div>
+<section class="list-card" aria-label="Saved media actions"><p>Catalog saved. Preparation and planning are independent next steps.</p><p><a class="button-link primary" href="{{ prepare_url }}">Prepare for a destination</a> <a class="button-link" href="{{ plan_url }}">Plan / add to schedule</a> <a class="button-link" href="{{ next_url }}">Return to media</a></p></section>
+{% endblock %}

@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime, time, timedelta
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import uuid
 
 from django.contrib import messages
@@ -191,34 +192,82 @@ def publication_readiness(batch):
         "waiting": waiting, "ready": not waiting}
 
 
-def _choices_from_ids(ids, asset_ids):
+def _choices_from_ids(ids, asset_ids, *, station=None):
     if not ids or len(ids) != len(set(ids)):
         raise SchedulePreparationError("Choose one or more distinct confirmed cycles")
     choices = []
     for pk in ids:
-        assignment = WeeklyEpisodeAssignment.objects.select_related("show__station").get(pk=pk)
+        assignment_query = WeeklyEpisodeAssignment.objects.select_related("show__station")
+        if station is not None:
+            assignment_query = assignment_query.filter(show__station=station)
+        assignment = assignment_query.get(pk=pk)
         asset = MediaAsset.objects.get(pk=asset_ids[str(pk)], episode_id=assignment.episode_id)
+        if station is not None and asset.station_id not in (None, station.pk):
+            raise SchedulePreparationError("The selected media belongs to another channel")
         choices.append({"assignment": assignment, "asset": asset})
     return choices
 
 
+def _selected_week(request):
+    """Return the Monday represented by date context, tolerating bad links."""
+    value = request.POST.get("date") if request.method == "POST" else request.GET.get("date")
+    try:
+        selected = date.fromisoformat(value) if value else timezone.localdate()
+    except (TypeError, ValueError):
+        raise ValueError("Choose a valid calendar date.")
+    return selected - timedelta(days=selected.weekday())
+
+
+def _cycle_options(station, selected_date):
+    """Cycles with an occurrence that actually overlaps the selected station week."""
+    if station is None:
+        return []
+    try:
+        zone = ZoneInfo(station.timezone)
+    except (ZoneInfoNotFoundError, ValueError):
+        zone = ZoneInfo("America/Detroit")
+    begins = datetime.combine(selected_date, time.min, zone)
+    ends = datetime.combine(selected_date + timedelta(days=7), time.min, zone)
+    assignments = WeeklyEpisodeAssignment.objects.filter(
+        show__station=station, selection_type__in=("premiere", "rerun"), episode__isnull=False,
+        occurrences__starts_at__lt=ends,
+    ).select_related("show", "episode").distinct().order_by("-week_start", "pk")
+    options = []
+    for assignment in assignments:
+        occurrences = assignment.occurrences.filter(starts_at__lt=ends).select_related("station")
+        if any(item.ends_at > begins for item in occurrences):
+            options.append(assignment)
+    return options
+
+
 def schedule_prepare(request):
     station = resolve_active_station(request)
-    context = {"targets": Device.objects.filter(station=station).order_by("name")}
+    date_error = None
     try:
+        selected_date = _selected_week(request)
+    except ValueError as exc:
+        selected_date = timezone.localdate() - timedelta(days=timezone.localdate().weekday())
+        date_error = str(exc)
+    context = {"targets": Device.objects.filter(station=station).order_by("name"),
+               "selected_date": selected_date}
+    if date_error:
+        context["error"] = date_error
+    try:
+        if date_error:
+            raise SchedulePreparationError(date_error)
         if request.method == "POST":
             if request.POST.get("action") == "confirm":
                 payload = signing.loads(request.POST.get("review_token", ""), salt=SALT, max_age=3600)
                 target = Device.objects.get(pk=payload["target_id"], station=station)
-                choices = _choices_from_ids(payload["ids"], payload["assets"])
+                choices = _choices_from_ids(payload["ids"], payload["assets"], station=station)
                 batch = confirm_schedule_preparation(target, choices, payload["snapshot"],
                     review_token=payload["uuid"], confirm_replacements=request.POST.get("confirm_replacements") == "on")
                 messages.success(request, "Reviewed schedule plan saved. Waiting media can finish independently; delivery remains attended.")
-                return redirect(f"/schedule/delivery/?batch={batch.pk}#publication-{batch.pk}")
+                return redirect(f"/schedule/delivery/?batch={batch.pk}&date={selected_date.isoformat()}#publication-{batch.pk}")
             target = Device.objects.get(pk=request.POST.get("target"), station=station)
             ids = request.POST.getlist("assignment")
             assets = {str(pk): request.POST.get(f"asset_{pk}") for pk in ids}
-            choices = _choices_from_ids(ids, assets)
+            choices = _choices_from_ids(ids, assets, station=station)
             review = preview_schedule_preparation(target, choices)
             context.update(target=target, review=review, rows=review["rows"], review_token=signing.dumps({
                 "target_id": target.pk, "ids": ids, "assets": assets,
@@ -227,12 +276,21 @@ def schedule_prepare(request):
     except (SchedulePreparationError, signing.BadSignature, ValidationError, ValueError, TypeError,
             KeyError, Device.DoesNotExist, WeeklyEpisodeAssignment.DoesNotExist, MediaAsset.DoesNotExist) as exc:
         context["error"] = str(exc) if isinstance(exc, SchedulePreparationError) else "The proposal or selection is invalid or expired. Select all cycles and media versions again."
-    assignments = WeeklyEpisodeAssignment.objects.filter(selection_type__in=("premiere", "rerun"), episode__isnull=False).select_related("show", "episode").order_by("-week_start", "pk")
-    requested_target = Device.objects.filter(pk=request.GET.get("target"), station=station).first() if request.method == "GET" else None
+    assignments = _cycle_options(station, selected_date)
+    requested_target_id = request.POST.get("target") if request.method == "POST" else request.GET.get("target")
+    requested_target = None
+    if requested_target_id and str(requested_target_id).isdigit():
+        requested_target = Device.objects.filter(pk=int(requested_target_id), station=station).first()
     if requested_target:
         context["target"] = requested_target
+    elif requested_target_id:
+        context["error"] = "Choose a destination configured for the current channel."
     context["cycle_options"] = [(a, prepared_asset_suggestions(a, requested_target) if requested_target else MediaAsset.objects.filter(episode=a.episode).order_by("-pk")) for a in assignments]
-    context["connected_assignments"] = request.GET.getlist("assignment")
+    context["connected_assignments"] = request.POST.getlist("assignment") if request.method == "POST" else request.GET.getlist("assignment")
+    if request.method == "GET" and context["connected_assignments"]:
+        available = {str(assignment.pk) for assignment in assignments}
+        if any(value not in available for value in context["connected_assignments"]):
+            context["error"] = "The selected cycle is unavailable for this channel or selected week. Choose a cycle from the refreshed list."
     return render(request, "schedule_preparation.html", context)
 
 

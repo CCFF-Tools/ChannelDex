@@ -3,7 +3,9 @@
 **Accepted scope:** audit the whole application, weighted toward receiving media,
 preparing it, and placing it into the weekly schedule; evaluate daily action guidance.
 **Proposed:** all redesigns and contracts below. Approval of this audit does not approve
-their implementation. No application behavior, operational records, or hardware was changed.
+their implementation. The audit itself changed no application behavior, operational records, or hardware.
+
+**Subsequent accepted direction:** the owner separately authorized product implementation. See [implementation status and validation](implementation.md); the findings below remain the design contract.
 
 ## Finding
 

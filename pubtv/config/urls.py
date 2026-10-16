@@ -1,6 +1,6 @@
 from django.urls import path
 from django.views.generic import RedirectView
-from pubtv.operations import views
+from pubtv.operations import views, media_intake, week_review
 from pubtv.operations import media_queue, premiere_planning, schedule_preparation, guided_delivery
 
 handler400 = views.bad_request
@@ -15,12 +15,14 @@ urlpatterns = [
     path("today/", views.dashboard, name="today"),
     path("schedule-today/", views.scheduling_today, name="scheduling-today"),
     path("schedule/", views.schedule_view, name="schedule"),
+    path("schedule/review/", week_review.week_review, name="week-review"),
+    path("media/intake/saved/<int:asset_id>/", media_intake.intake_saved, name="media-intake-saved"),
     path("schedule/prepare/", schedule_preparation.schedule_prepare, name="schedule-prepare"),
     path("schedule/delivery/", views.automation_dashboard, name="schedule-delivery"),
     path("schedule/guided-delivery/", guided_delivery.guided_delivery_view, name="guided-delivery"),
     path("media/", media_queue.media_queue, name="media-home"),
     path("media/library/", views.media_library, name="media-library"),
-    path("media/preparation/", media_queue.media_queue, name="media-queue"),
+    path("media/preparation/", media_intake.preparation_monitor, name="media-queue"),
     path("media/assets/<int:asset_id>/relink/", views.media_asset_relink, name="media-asset-relink"),
     path("media/status/", media_queue.media_queue_status, name="media-queue-status"),
     path("media/status/summary/", RedirectView.as_view(pattern_name="media-queue-status", permanent=False), name="media-queue-summary"),
@@ -42,7 +44,7 @@ urlpatterns = [
     path("occurrences/<int:pk>/edit/", views.occurrence_edit, name="occurrence-edit"),
     path("setup/station/", views.setup_station, name="setup-station"), path("setup/device/", views.setup_device, name="setup-device"),
     path("shows/new/", views.show_create, name="show-create"), path("episodes/new/", views.episode_create, name="episode-create"),
-    path("assets/new/", views.asset_create, name="asset-create"), path("assets/<int:pk>/edit/", views.asset_edit, name="asset-edit"), path("deliveries/new/", views.delivery_create, name="delivery-create"),
+    path("assets/new/", media_intake.catalog_intake, name="asset-create"), path("assets/<int:pk>/edit/", views.asset_edit, name="asset-edit"), path("deliveries/new/", views.delivery_create, name="delivery-create"),
     path("shows/<int:show_id>/slots/", views.show_slot_manager, name="show-slot-manager"),
     path("shows/<int:show_id>/slots/length/", views.show_slot_duration_edit, name="show-slot-duration-edit"),
     path("slots/new/", views.slot_create, name="slot-create"), path("slots/<int:pk>/edit/", views.slot_edit, name="slot-edit"), path("assignments/new/", views.assignment_create, name="assignment-create"),

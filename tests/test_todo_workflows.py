@@ -262,7 +262,8 @@ class TodoWorkflowTests(TestCase):
         self.assertIn("Street Talk · Episode 1", scheduled_body)
         self.assertNotIn('name="show_type"', scheduled_body)
         self.assertIn('class="capacity-block available"', scheduled_body)
-        self.assertNotIn('class="capacity-block reserved"', scheduled_body)
+        self.assertIn('class="capacity-block reserved"', scheduled_body)
+        self.assertIn('Reserved · content not assigned', scheduled_body)
         self.assertIn('class="week-block scheduled-block"', scheduled_body)
         self.assertIn('class="schedule-context"', scheduled_body)
         self.assertNotIn('class="badge">Manual schedule item', scheduled_body)
@@ -280,8 +281,8 @@ class TodoWorkflowTests(TestCase):
 
         default = client.get("/week/?date=2026-01-05")
         default_body = default.content.decode()
-        self.assertIn('value="capacity" selected', default_body)
-        self.assertNotIn('value="schedule" selected', default_body)
+        self.assertIn('value="schedule" selected', default_body)
+        self.assertNotIn('value="capacity" selected', default_body)
         self.assertLess(default_body.index('value="capacity"'), default_body.index('value="schedule"'))
 
         # Old bookmarks map to the capacity-only view instead of restoring the

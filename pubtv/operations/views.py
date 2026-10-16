@@ -33,6 +33,8 @@ from pubtv.ultranexus.encoding import discover_executables
 from pubtv.ultranexus.ame_bridge import AMEBridge, bridge_root, plugin_manifest_path
 from .database_portability import export_database, stage_import, PortableDatabaseError
 from .active_station import resolve_active_station, switch_station as switch_active_station
+from .action_items import build_daily_work
+from .week_review import planned_columns
 from pathlib import Path
 import re
 import subprocess
@@ -257,7 +259,7 @@ def dashboard(request):
         item.covered = item.pk in covered_ids
     capacity = calendar_capacity(station, selected)[0] if station else {"intervals": []}
     reserved_intervals = [item for item in capacity.get("intervals", []) if item.get("status") == "reserved"]
-    return render(request, "dashboard.html", {"station": station, "occurrences": occurrences, "reserved_intervals": reserved_intervals, "selected_date": selected, "previous_date": selected - timedelta(days=1), "next_date": selected + timedelta(days=1), "covered_count": len(covered_ids), "remaining_count": len(occurrences) - len(covered_ids), "alerts": _alerts(occurrences)})
+    return render(request, "dashboard.html", {"station": station, "occurrences": occurrences, "reserved_intervals": reserved_intervals, "selected_date": selected, "previous_date": selected - timedelta(days=1), "next_date": selected + timedelta(days=1), "covered_count": len(covered_ids), "remaining_count": len(occurrences) - len(covered_ids), "alerts": _alerts(occurrences), **build_daily_work(station, selected)})
 
 
 def occurrence_workbench(request, pk):
@@ -949,7 +951,7 @@ def device_edit(request, pk):
 
 
 def schedule_view(request):
-    mode = request.GET.get("mode", "day")
+    mode = request.GET.get("mode", "week")
     if mode not in {"day", "week", "agenda", "recurring"}:
         mode = "day"
     if mode == "week":
@@ -1206,8 +1208,16 @@ def media_library(request):
     if show_id.isdigit():
         episodes = episodes.filter(show_id=int(show_id))
     episodes = episodes.distinct().order_by("show__title", F("episode_number").asc(nulls_last=True), "title", "pk")
+    next_by_episode, next_by_asset = {}, {}
+    for use in Occurrence.objects.filter(station=station, status="planned", starts_at__gte=timezone.now()).order_by("starts_at", "pk"):
+        next_use = {"url": f"/occurrences/{use.pk}/", "label": timezone.localtime(use.starts_at, ZoneInfo(station.timezone)).strftime("%a %b %d, %-I:%M %p")}
+        if use.episode_id:
+            next_by_episode.setdefault(use.episode_id, next_use)
+        if use.asset_id:
+            next_by_asset.setdefault(use.asset_id, next_use)
     rows = []
     def prepare_asset(asset):
+        asset.next_planned_use = next_by_asset.get(asset.pk)
         asset.available = bool(asset.local_path and Path(asset.local_path).is_file())
         asset_items = [item for item in asset.preparation_batch_items.all()
                        if not item.batch.removed_from_list and item.batch.target.station_id == station.pk]
@@ -1235,7 +1245,8 @@ def media_library(request):
         if readiness == "available" and not available:
             continue
         rows.append({"episode": episode, "assets": assets, "items": items,
-                     "available": available, "prepared": prepared, "readiness": state})
+                     "available": available, "prepared": prepared, "readiness": state,
+                     "next_planned_use": next_by_episode.get(episode.pk)})
     standalone = MediaAsset.objects.filter(station=station, episode__isnull=True).prefetch_related(
         "preparation_batch_items__batch", "ultranexus_bindings__local_inspection", "ultranexus_bindings__target",
     ).order_by("file_name", "pk") if station else MediaAsset.objects.none()
@@ -1293,17 +1304,23 @@ def media_asset_relink(request, asset_id):
 def occurrence_create(request):
     station = resolve_active_station(request)
     if not station: return HttpResponseBadRequest("Create a station first")
-    initial = {key: value for key in ("show", "episode") if request.GET.get(key) and (Show.objects.filter(pk=request.GET[key], station=station).exists() if key == "show" else Episode.objects.filter(pk=request.GET[key], show__station=station).exists())}
+    initial = {key: request.GET[key] for key in ("show", "episode") if request.GET.get(key, "").isdigit() and (Show.objects.filter(pk=request.GET[key], station=station).exists() if key == "show" else Episode.objects.filter(pk=request.GET[key], show__station=station).exists())}
     asset = MediaAsset.objects.filter(pk=request.GET.get("asset")).filter(
         Q(station=station) | Q(station__isnull=True, episode__show__station=station)
-    ).first() if request.GET.get("asset") else None
+    ).first() if request.GET.get("asset", "").isdigit() else None
     if asset:
         initial.update({"asset": asset.pk, "episode": asset.episode_id,
                         "show": asset.episode.show_id if asset.episode_id else None,
                         "item_type": "episode" if asset.episode_id else "media",
                         "label": asset.file_name,
                         "planned_duration_seconds": asset.runtime_seconds})
-    form = OccurrenceForm(request.POST or None, station=station, initial=initial)
+    if request.GET.get("date"):
+        try:
+            selected_day = date.fromisoformat(request.GET["date"])
+            initial["starts_at"] = datetime.combine(selected_day, datetime.min.time(), ZoneInfo(station.timezone))
+        except ValueError:
+            return HttpResponseBadRequest("Invalid schedule date")
+    form = OccurrenceForm(request.POST or None, station=station, initial=initial, instance=Occurrence(station=station))
     if request.method == "POST" and form.is_valid():
         occurrence = form.save(commit=False); occurrence.station = station
         occurrence.full_clean(); occurrence.save(skip_revision=True)
@@ -1827,11 +1844,11 @@ def week_view(request):
     tz = ZoneInfo(station.timezone) if station else ZoneInfo("America/Detroit")
     start = timezone.make_aware(datetime.combine(selected, datetime.min.time()), tz)
     end = timezone.make_aware(datetime.combine(selected + timedelta(days=7), datetime.min.time()), tz)
-    requested_mode = request.GET.get("view", "capacity")
+    requested_mode = request.GET.get("view", "schedule")
     # Preserve old bookmarked URLs while presenting only the two clear modes.
     view_mode = {"scheduled": "schedule", "availability": "capacity"}.get(requested_mode, requested_mode)
     if view_mode not in {"schedule", "capacity"}:
-        view_mode = "capacity"
+        view_mode = "schedule"
     occurrences = Occurrence.objects.filter(
         station=station, status="planned",
         starts_at__lt=end,
@@ -1864,6 +1881,8 @@ def week_view(request):
             items = segments_by_day[day] + [item for item in blocks if item["status"] == "available"]
             items.sort(key=lambda item: (item["start"], 0 if item["kind"] == "occurrence" else 1))
         week_columns.append({"date": day, "items": items})
+    if view_mode == "schedule" and station:
+        week_columns = planned_columns(station, selected, occurrences, capacity)
     return render(request, "calendar_week.html", {
         "title": "Week plan", "view_mode": view_mode, "occurrences": occurrences,
         "day_segments": day_segments, "week_days": days, "week_columns": week_columns,

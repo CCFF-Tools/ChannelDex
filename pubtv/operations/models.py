@@ -907,6 +907,21 @@ class MediaIntakeReview(models.Model):
         ordering = ["order", "pk"]
 
 
+class CatalogIntakeSubmission(models.Model):
+    """Durable idempotency record for one catalog-only intake submission."""
+    station = models.ForeignKey(Station, on_delete=models.PROTECT, related_name="catalog_intake_submissions")
+    token = models.CharField(max_length=120)
+    payload_fingerprint = models.CharField(max_length=64)
+    asset = models.ForeignKey(MediaAsset, null=True, blank=True, on_delete=models.PROTECT,
+                              related_name="catalog_intake_submissions")
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["station", "token"], name="unique_catalog_intake_station_token"),
+        ]
+
+
 class MediaRelinkReview(models.Model):
     STATUS = [(x, x.replace("_", " ").title()) for x in ("queued", "checking", "matched", "new_version", "confirm_queued", "confirming", "failed", "confirmed", "cancelled")]
     token = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)

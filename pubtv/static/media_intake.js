@@ -30,6 +30,7 @@
   if (!root.document) return;
   const document = root.document, form = document.getElementById('media-queue-form');
   if (!form) return;
+  if (!document.getElementById('queue-show')) return;
   const rowsBox = document.getElementById('queue-rows'), show = document.getElementById('queue-show'),
     target = document.getElementById('queue-target'), status = document.getElementById('choose-media-status'),
     manual = document.getElementById('source-path-manual'), draftInput = document.getElementById('draft-rows'),
