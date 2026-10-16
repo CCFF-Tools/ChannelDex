@@ -36,6 +36,11 @@
   }
   document.querySelectorAll('.relink-form').forEach(form => {
     const status = form.querySelector('.relink-status'), actions = form.querySelector('[data-relink-actions]'), input = form.querySelector('[name=path]');
+    if (!form.querySelector('.relink-disclosure')) {
+      const disclosure = document.createElement('p'); disclosure.className = 'helptext relink-disclosure';
+      disclosure.textContent = 'Relinking starts a complete-file identity review. The saved path changes only after a match and explicit confirmation; different bytes must be added as a new version.';
+      form.insertBefore(disclosure, form.querySelector('label'));
+    }
     let generation = 0, polling;
     const cancelPoll = () => {generation++; clearTimeout(polling); actions.replaceChildren();};
     input.addEventListener('input', () => {cancelPoll(); status.textContent = 'Path edited. Start a new review.';});

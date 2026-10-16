@@ -122,7 +122,7 @@ class UXOverhaulTests(TestCase):
     expectations = {
       "/shows/": "<title>Shows · ChannelDex</title>",
       "/day/?date=2026-10-09": "<title>Day plan · ChannelDex</title>",
-      "/week/?date=2026-10-09": "<title>Weekly capacity · ChannelDex</title>",
+      "/week/?date=2026-10-09": "<title>Week plan · ChannelDex</title>",
     }
     for path, title in expectations.items():
       response = Client().get(path)

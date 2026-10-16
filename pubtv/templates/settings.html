@@ -28,18 +28,6 @@
   </div>
 </section>
 
-<h2>Application-wide settings</h2>
-<section class="list-card">
-  <h2>Add channel</h2>
-  <p>Channel names are local owner data. Creating one selects it for this browser session.</p>
-  <form method="post" class="stacked-form">
-    {% csrf_token %}{% include "originating_station_field.html" %}<input type="hidden" name="action" value="create_station">
-    {{ station_form.as_p }}
-    <button class="primary" type="submit">Create channel</button>
-  </form>
-</section>
-
-<h2>Workspace-specific settings</h2>
 <section class="list-card">
   <h2>UltraNEXUS connection configuration</h2>
   <p>A recorded destination becomes usable by this adapter only after its UltraNEXUS connection and qualification details are configured. Passwords are kept in the macOS login Keychain.</p>
@@ -75,6 +63,17 @@
 {% endif %}
 
 <h2>Application-wide settings</h2>
+<section class="list-card">
+  <h2>Add channel</h2>
+  <p>Channel names are local owner data. Creating one selects it for this browser session.</p>
+  <form method="post" class="stacked-form">
+    {% csrf_token %}{% include "originating_station_field.html" %}<input type="hidden" name="action" value="create_station">
+    {{ station_form.as_p }}
+    <button class="primary" type="submit">Create channel</button>
+  </form>
+</section>
+
+
 <section class="list-card">
   <h2>Database portability</h2>
   {% if pending_import %}<p class="alerts"><strong>Import pending:</strong> quit and reopen ChannelDex to activate the validated database.</p>{% endif %}

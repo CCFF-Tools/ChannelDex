@@ -68,16 +68,19 @@ def workspace_safe_url(value, fallback="/"):
     elif re.fullmatch(r"/occurrences/\d+/(edit/|preparation/|programming/|airing/)?", parsed.path): collection = "/schedule/"
     elif re.fullmatch(r"/slots/\d+/edit/", parsed.path): collection = "/schedule/recurring/"
     elif re.fullmatch(r"/assets/\d+/(edit/|transfers/new/|transfers/\d+/edit/)", parsed.path): collection = "/media/library/"
+    elif re.fullmatch(r"/media/intake/saved/\d+/", parsed.path): collection = "/media/library/"
     elif parsed.path.startswith("/media/assets/"): collection = "/media/library/"
     elif parsed.path == "/media/preparation/": collection = "/media/preparation/"
     elif parsed.path == "/schedule/guided-delivery/": collection = "/schedule/guided-delivery/"
+    elif parsed.path in {"/schedule/review/", "/schedule/prepare/"}: collection = parsed.path
     elif parsed.path in {"/assets/new/", "/episodes/new/", "/occurrences/new/"}: collection = parsed.path
     elif parsed.path in {"/media/", "/media/library/"}: collection = parsed.path
     if collection:
         query = parse_qs(parsed.query, keep_blank_values=True)
         allowed = ({"date", "mode", "days", "view"} if collection == "/schedule/" else
                    {"readiness", "q"} if collection in {"/media/", "/media/library/"} else
-                   {"scope"} if collection == "/media/preparation/" else set())
+                   {"scope"} if collection == "/media/preparation/" else
+                   {"date"} if collection in {"/schedule/review/", "/schedule/prepare/"} else set())
         keep = {key: value[-1] for key, value in query.items() if key in allowed and value}
         next_url = collection
         if keep:
@@ -96,6 +99,8 @@ def workspace_safe_url(value, fallback="/"):
                 "/shows/": {"q", "sort", "show_type"},
                 "/media/library/": {"readiness", "q"},
                 "/media/preparation/": {"scope"},
+                "/schedule/review/": {"date"},
+                "/schedule/prepare/": {"date"},
             }
             query = parse_qs(parsed.query, keep_blank_values=True)
             keep = {key: values[-1] for key, values in query.items()

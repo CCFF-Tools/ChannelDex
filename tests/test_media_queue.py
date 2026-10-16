@@ -70,7 +70,7 @@ class MediaQueueAcceptanceTests(TestCase):
         foreign_batch = PreparationBatch.objects.create(target=foreign_target, show=self.show, status="failed")
         PreparationBatchItem.objects.create(batch=foreign_batch, asset=asset, execution_status="failed", blocker="Foreign")
         response = self.client.get("/media/library/")
-        self.assertContains(response, "Destination status: <strong>attention</strong>")
+        self.assertContains(response, "Destination status: <strong>Needs attention</strong>")
         self.assertContains(response, self.target.destination_label)
         self.assertContains(response, self.other_target.destination_label)
         self.assertContains(response, f"scope=attention#item-{failed.pk}")

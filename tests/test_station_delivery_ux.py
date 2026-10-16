@@ -37,11 +37,12 @@ class StationDeliveryUXTests(TestCase):
 
     def test_workspaces_have_separate_media_and_schedule_actions(self):
         response = Client().get("/schedule/delivery/")
-        self.assertContains(response, "Review schedule")
+        self.assertContains(response, "Review cycle delivery")
         self.assertContains(response, "Confirm activation")
         self.assertNotContains(response, "Schedule insertion")
         media = Client().get("/media/")
-        self.assertContains(media, "Queue preparation &amp; transfer")
+        self.assertContains(media, "Preparation monitor")
+        self.assertContains(Client().get("/media/?setup=1"), "Queue preparation &amp; transfer")
         self.assertNotContains(media, "Planned schedule occurrence")
 
     def test_device_setup_requires_password(self):

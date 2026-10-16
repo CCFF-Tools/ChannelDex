@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block page_title %}Add media · ChannelDex{% endblock %}
+{% load static %}{% block content %}
+<div class="page-heading"><p class="eyebrow">Media / Library</p><h1>Add media</h1><p class="lede">Catalog a source or reusable item. Saving records references only; it does not inspect, copy, prepare, or transfer media.</p></div>
+{% if error %}<p class="errorlist" role="alert">{{ error }}</p>{% endif %}
+<form method="post" class="list-card" id="media-intake-form">{% csrf_token %}
+{% include "originating_station_field.html" %}
+<input type="hidden" name="next" value="{{ return_url }}">
+<input type="hidden" name="submission_token" value="{{ submission_token }}">
+<fieldset><legend>Purpose</legend>
+<label><input type="radio" name="purpose" value="new_episode" required{% if values.purpose == 'new_episode' %} checked{% endif %}> New episode</label>
+<label><input type="radio" name="purpose" value="existing_episode"{% if values.purpose == 'existing_episode' %} checked{% endif %}> Existing episode</label>
+<label><input type="radio" name="purpose" value="reusable"{% if values.purpose == 'reusable' %} checked{% endif %}> Reusable station media</label>
+</fieldset>
+<label data-purpose-field="episode">Show <select name="show"><option value="">Choose show</option>{% for show in shows %}<option value="{{ show.pk }}"{% if selected_show.pk == show.pk %} selected{% endif %}>{{ show.title }}</option>{% endfor %}</select></label>
+<label data-purpose-field="existing_episode">Existing episode <select name="episode"><option value="">Choose episode</option>{% for episode in episodes %}<option value="{{ episode.pk }}"{% if selected_episode.pk == episode.pk %} selected{% endif %}>{{ episode.show.title }} · {{ episode.title }}</option>{% endfor %}</select></label>
+<label data-purpose-field="new_episode">New episode title <input name="title" maxlength="160" value="{{ values.title|default:'' }}"></label>
+<label>File or item name <input name="file_name" required maxlength="255" value="{{ values.file_name|default:'' }}"></label>
+<label>Media kind <select name="kind"><option value="source"{% if values.kind != 'encoded' %} selected{% endif %}>Source</option><option value="encoded"{% if values.kind == 'encoded' %} selected{% endif %}>Encoded</option></select></label>
+<label>Version <input name="version" maxlength="80" value="{{ values.version|default:'v1' }}"></label>
+<label>Local file path (optional) <input name="local_path" maxlength="500" value="{{ values.local_path|default:'' }}"><span class="helptext">Reference only; no file is opened or copied.</span></label>
+<label data-purpose-field="new_episode">Episode number <input name="episode_number" inputmode="numeric" value="{{ values.episode_number|default:'' }}"></label>
+<fieldset class="duration-fields"><legend>Runtime (optional)</legend><label>Hours <input name="runtime_seconds_0" inputmode="numeric" min="0" value="{{ values.runtime_seconds_0|default:'' }}"></label><label>Minutes <input name="runtime_seconds_1" inputmode="numeric" min="0" max="59" value="{{ values.runtime_seconds_1|default:'' }}"></label><label>Seconds <input name="runtime_seconds_2" inputmode="numeric" min="0" max="59" value="{{ values.runtime_seconds_2|default:'' }}"></label><span class="helptext">Leave all blank when unknown. Zero is retained when explicitly entered.</span></fieldset>
+<label>Submission source reference <input name="source_reference" maxlength="300" value="{{ values.source_reference|default:'' }}"><span class="helptext">Private provenance such as email, Dropbox, or local note.</span></label>
+<label>Submission method <select name="source_method"><option value="other"{% if values.source_method != 'email_link' and values.source_method != 'dropbox' and values.source_method != 'google_drive' and values.source_method != 'smb_transfer' %} selected{% endif %}>Other / manual reference</option><option value="email_link"{% if values.source_method == 'email_link' %} selected{% endif %}>Email link</option><option value="dropbox"{% if values.source_method == 'dropbox' %} selected{% endif %}>Dropbox</option><option value="google_drive"{% if values.source_method == 'google_drive' %} selected{% endif %}>Google Drive</option><option value="smb_transfer"{% if values.source_method == 'smb_transfer' %} selected{% endif %}>SMB transfer</option></select></label>
+<label>Storage destination reference <input name="storage_reference" maxlength="300" value="{{ values.storage_reference|default:'' }}"><span class="helptext">Private location metadata; ChannelDex does not connect or move files.</span></label>
+<p><button class="primary" type="submit">Save to library</button> <a class="button-link" href="{{ return_url }}">Cancel</a></p>
+</form>
+<script src="{% static 'media_catalog_intake.js' %}" defer></script>
+{% endblock %}

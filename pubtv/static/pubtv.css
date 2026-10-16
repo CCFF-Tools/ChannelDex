@@ -35,3 +35,21 @@
 .intake-options .intake-option>label{display:grid;gap:.15rem;margin:0}
 .intake-options .intake-option-title{font-weight:650}
 .intake-options .intake-option-description{color:var(--muted)}
+
+/* Connected media workflow: shared readable controls and action hierarchy. */
+.skip-link{position:absolute;left:1rem;top:-10rem;z-index:1000;padding:.7rem 1rem;background:var(--white);color:var(--brand);border:2px solid var(--brand)}
+.skip-link:focus{top:1rem}
+main,.field,.list-card,.calendar-grid>section{min-width:0}
+label{font-family:'IBM Plex Sans',system-ui,sans-serif}
+.filter-grid,.media-filter-grid{display:grid;grid-template-columns:minmax(12rem,2fr) minmax(10rem,1fr) minmax(10rem,1fr) auto;gap:1rem;align-items:end}
+.filter-grid label,.media-filter-grid label{display:flex;flex-direction:column;gap:.35rem;margin:0}
+.filter-grid input,.filter-grid select,.media-filter-grid input,.media-filter-grid select{width:100%;max-width:none;min-width:0;box-sizing:border-box}
+.filter-grid button,.media-filter-grid button{min-height:2.6rem}
+.tab-nav a[aria-current=page]{color:var(--white);background:var(--brand);border-color:var(--brand)}
+.stacked-form input:not([type=checkbox]):not([type=radio]),.stacked-form select,.stacked-form textarea{min-width:0;max-width:100%;box-sizing:border-box}
+.action-list{list-style:none;padding:0}.action-list .list-card{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:1rem;align-items:start}.action-list p{margin:.35rem 0}
+.list-card details{margin-top:.6rem}.no-program{background:var(--cream)}.week-block small,.small{font-size:.9rem;color:var(--muted)}
+@media(max-width:900px){.filter-grid,.media-filter-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:560px){.filter-grid,.media-filter-grid,.action-list .list-card{grid-template-columns:1fr}.form-actions{flex-wrap:wrap}.facts{grid-template-columns:1fr}.facts dd{margin-bottom:.7rem}}
+
+#media-intake-form{max-width:48rem}#media-intake-form label{display:flex;flex-direction:column;gap:.3rem}#media-intake-form input:not([type=radio]),#media-intake-form select{width:100%;max-width:none;min-width:0}#media-intake-form fieldset:first-of-type label{flex-direction:row;align-items:center}#media-intake-form fieldset{min-width:0}#media-intake-form .duration-fields{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:.7rem}#media-intake-form .duration-fields legend,#media-intake-form .duration-fields .helptext{grid-column:1/-1}

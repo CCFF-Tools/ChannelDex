@@ -7,7 +7,7 @@
   {% if view_mode == 'capacity' %}
     <p class="lede">A continuous capacity map. Every part of each day is classified as either Available or Reserved; individual scheduled items are intentionally hidden.</p>
   {% else %}
-    <p class="lede">Individual scheduled items appear alongside open Available blocks. Reserved capacity is represented by its scheduled item instead of being repeated.</p>
+    <p class="lede">Plan the full week: assigned content, unassigned reservations, explicit No program choices, and intentional virtual-channel returns stay visible. Unplanned time is not proof of coverage.</p>
   {% endif %}
 </div>
 <form class="calendar-filter" method="get">
@@ -16,7 +16,7 @@
   <label for="week-view">Week view</label>
   <select id="week-view" name="view">
     <option value="capacity"{% if view_mode == 'capacity' %} selected{% endif %}>Availability and reserved blocks</option>
-    <option value="schedule"{% if view_mode == 'schedule' %} selected{% endif %}>Scheduled items and available blocks</option>
+    <option value="schedule"{% if view_mode == 'schedule' %} selected{% endif %}>Planned items and coverage</option>
   </select>
   <button type="submit">Apply</button>
 </form>
@@ -31,7 +31,7 @@
             <span class="week-block-time">{{ item.start|date:'g:i a' }} - {{ item.end|date:'g:i a' }}</span>
             <strong>{{ o.display_label }}</strong>
             <span><span class="schedule-context">{{ o.schedule_context }}</span> {{ o.get_item_type_display }}</span>
-            <a href="{% url 'occurrence-workbench' o.pk %}">Open workbench</a>
+            <span class="small">Preparation: {{ o.readiness.label }}</span><a href="{% url 'occurrence-workbench' o.pk %}">Review item</a>
           </article>{% endwith %}
         {% else %}
           <article class="capacity-block {{ item.status }}">
