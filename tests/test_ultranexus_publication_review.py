@@ -21,7 +21,7 @@ class PublicationReviewTests(TestCase):
     def test_first_approval_uses_displayed_token_and_rejects_changed_revision(self):
         review = publication_review(self.batch)
         self.assertFalse(review['blockers'])
-        response = self.client.get('/schedule/delivery/')
+        response = self.client.get('/schedule/publish/')
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, 'review_token')
         with patch('pubtv.operations.views.preview_schedule', return_value={'blockers': [], 'rows': []}):
@@ -62,7 +62,7 @@ class PublicationReviewTests(TestCase):
         self.batch.save(update_fields=["controller_snapshot", "controller_snapshot_hash"])
         ControllerSnapshot.objects.create(target=self.target, revision=2, snapshot_hash='a'*64, payload={'manual': True})
         self.assertIn('predates', publication_review(self.batch)['blockers'][0])
-        self.assertEqual(self.client.get('/schedule/delivery/').status_code, 200)
+        self.assertEqual(self.client.get('/schedule/publish/').status_code, 200)
 
     def test_staged_cancel_releases_target_without_remote_mutation_and_blocks_reapproval(self):
         from pubtv.operations.automation import approve_snapshot, publication_snapshot

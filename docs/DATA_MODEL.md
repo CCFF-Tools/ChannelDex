@@ -1,5 +1,16 @@
 # ChannelDex conceptual data model
 
+## Accepted records additions (2026-10-17)
+
+`Show.archived_at` and `Episode.archived_at` are nullable timestamps. Active
+library and queue queries exclude archived records; restoration is explicit
+and does not generate new schedule rows. `AuditEvent.station` scopes new
+history records to the working channel, with safe backfill only when the
+referenced entity resolves unambiguously. `MediaIntakeDraft` stores a
+protected station, UUID token, JSON payload, state, positive revision, and
+created/updated timestamps. These are local records; no external credential
+or hardware availability is implied.
+
 ## Accepted UI audit contracts (2026-10-11)
 
 The active channel is the workspace boundary, including catalog-only media

@@ -1,0 +1,8 @@
+{% extends "base.html" %}
+{% block page_title %}Work · ChannelDex{% endblock %}
+{% block content %}
+<div class="page-heading"><p class="eyebrow">Work</p><h1>Incoming and unfinished work</h1><p class="lede">Resolve the work needing your attention, starting with the next airtime. Processing continues in the background.</p><p><a class="button-link primary" href="{% url 'connected-intake' %}">Add media</a> <a class="button-link" href="{% url 'schedule' %}">Open schedule</a></p></div>
+{% if not station %}<section class="empty-state"><h2>Set up PUB-TV</h2><a class="button-link primary" href="{% url 'setup-station' %}">Open station settings</a></section>{% else %}
+{% for group in groups %}<section class="daily-work" aria-labelledby="work-group-{{ forloop.counter }}"><h2 id="work-group-{{ forloop.counter }}">{{ group.title }}</h2>{% for item in group.items %}<article class="list-card action-item"><div><h3>{{ item.title }}</h3><p>{% if item.reason %}{{ item.reason }}{% else %}{{ item.blocker }}{% endif %}</p>{% if item.needed_at or item.next_airtime %}<p class="muted">{% if item.suggested_airtime %}Suggested premiere{% else %}Needed by{% endif %}: {% if item.needed_at %}{{ item.needed_at }}{% else %}{{ item.next_airtime }}{% endif %}</p>{% endif %}</div><div class="item-actions">{% if item.url %}<a class="button-link primary" href="{{ item.url }}">{{ item.action_label|default:'Review work' }}</a>{% elif item.url_name %}<a class="button-link primary" href="{% url item.url_name item.url_args.0 %}">{{ item.action_label|default:'Review work' }}</a>{% endif %}</div></article>{% empty %}<p class="muted">Nothing in this queue.</p>{% endfor %}</section>{% endfor %}
+{% endif %}
+{% endblock %}

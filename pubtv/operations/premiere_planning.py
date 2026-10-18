@@ -124,7 +124,9 @@ def _ordered_episodes(show, episode_ids):
         raise ValidationError("Episode selections must be numeric episode ids.") from exc
     if not ids or len(ids) > 100 or len(ids) != len(set(ids)):
         raise ValidationError("Choose each pending episode once, in the order it should premiere.")
-    episodes = list(Episode.objects.filter(show=show, pk__in=ids))
+    if show.archived_at:
+        raise ValidationError('Restore the show before planning future episodes.')
+    episodes = list(Episode.objects.filter(show=show, pk__in=ids, archived_at__isnull=True))
     by_id = {episode.pk: episode for episode in episodes}
     if len(by_id) != len(ids) or any(by_id[pk].status != "pending" for pk in ids):
         raise ValidationError("Bulk premiere planning only accepts pending episodes from this show.")
@@ -250,7 +252,7 @@ def confirm_bulk_premiere_plan(*, token, actor="owner"):
 def bulk_premiere_planner(request, show_id):
     station = resolve_active_station(request)
     show = get_object_or_404(Show, pk=show_id, station=station)
-    episodes = list(show.episodes.filter(status="pending").prefetch_related("deliveries"))
+    episodes = list(show.episodes.filter(status="pending", archived_at__isnull=True).prefetch_related("deliveries"))
     episodes.sort(key=pending_episode_sort_key)
     selected_ids = request.POST.getlist("episode_ids") or request.GET.getlist("episode_ids")
     if selected_ids:

@@ -61,24 +61,33 @@ def workspace_safe_url(value, fallback="/"):
     next_url = value or fallback
     parsed = urlparse(next_url)
     collection = None
-    if re.fullmatch(r"/shows/\d+/(edit/|premieres/|slots/|slots/length/)?", parsed.path):
-        collection = "/schedule/" if any(parse_qs(parsed.query).get(key) for key in ("date", "mode")) else "/shows/"
-    elif re.fullmatch(r"/episodes/\d+/(edit/|duplicate/|workflow/new/)?", parsed.path): collection = "/episodes/"
+    if re.fullmatch(r"/intake/[0-9a-fA-F-]+/", parsed.path):
+        collection = "/work/"
+    elif re.fullmatch(r"/producers/\d+/edit/", parsed.path):
+        collection = "/library/"
+    elif re.fullmatch(r"/(shows|episodes)/\d+/(archive|restore)/", parsed.path):
+        collection = "/library/"
+    elif re.fullmatch(r"/schedule/cycles/\d+/.*", parsed.path):
+        collection = "/schedule/"
+    elif re.fullmatch(r"/shows/\d+/(edit/|premieres/|slots/|slots/length/)?", parsed.path):
+        collection = "/schedule/" if any(parse_qs(parsed.query).get(key) for key in ("date", "mode")) else "/library/"
+    elif re.fullmatch(r"/episodes/\d+/(edit/|duplicate/|workflow/new/)?", parsed.path): collection = "/library/"
     elif re.fullmatch(r"/settings/devices/\d+/(edit/)?", parsed.path): collection = "/settings/devices/"
     elif re.fullmatch(r"/occurrences/\d+/(edit/|preparation/|programming/|airing/)?", parsed.path): collection = "/schedule/"
     elif re.fullmatch(r"/slots/\d+/edit/", parsed.path): collection = "/schedule/recurring/"
-    elif re.fullmatch(r"/assets/\d+/(edit/|transfers/new/|transfers/\d+/edit/)", parsed.path): collection = "/media/library/"
-    elif re.fullmatch(r"/media/intake/saved/\d+/", parsed.path): collection = "/media/library/"
-    elif parsed.path.startswith("/media/assets/"): collection = "/media/library/"
+    elif re.fullmatch(r"/assets/\d+/(edit/|transfers/new/|transfers/\d+/edit/)", parsed.path): collection = "/library/"
+    elif re.fullmatch(r"/media/intake/saved/\d+/", parsed.path): collection = "/library/"
+    elif parsed.path.startswith("/media/assets/"): collection = "/library/"
     elif parsed.path == "/media/preparation/": collection = "/media/preparation/"
     elif parsed.path == "/schedule/guided-delivery/": collection = "/schedule/guided-delivery/"
     elif parsed.path in {"/schedule/review/", "/schedule/prepare/"}: collection = parsed.path
-    elif parsed.path in {"/assets/new/", "/episodes/new/", "/occurrences/new/"}: collection = parsed.path
-    elif parsed.path in {"/media/", "/media/library/"}: collection = parsed.path
+    elif parsed.path in {"/episodes/new/", "/occurrences/new/"}: collection = parsed.path
+    elif parsed.path in {"/shows/", "/episodes/", "/media/library/"}: collection = "/library/"
+    elif parsed.path in {"/media/", "/prepare/", "/assets/new/"}: collection = "/intake/"
     if collection:
         query = parse_qs(parsed.query, keep_blank_values=True)
         allowed = ({"date", "mode", "days", "view"} if collection == "/schedule/" else
-                   {"readiness", "q"} if collection in {"/media/", "/media/library/"} else
+                   {"readiness", "q"} if collection in {"/library/"} else
                    {"scope"} if collection == "/media/preparation/" else
                    {"date"} if collection in {"/schedule/review/", "/schedule/prepare/"} else set())
         keep = {key: value[-1] for key, value in query.items() if key in allowed and value}
@@ -101,6 +110,10 @@ def workspace_safe_url(value, fallback="/"):
                 "/media/preparation/": {"scope"},
                 "/schedule/review/": {"date"},
                 "/schedule/prepare/": {"date"},
+                "/schedule/publish/": {"date"},
+                "/library/": {"q", "view", "archived"},
+                "/work/": {"scope"},
+                "/intake/": set(),
             }
             query = parse_qs(parsed.query, keep_blank_values=True)
             keep = {key: values[-1] for key, values in query.items()

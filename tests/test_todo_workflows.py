@@ -243,7 +243,7 @@ class TodoWorkflowTests(TestCase):
         self.assertContains(Client().get("/week/?date=2026-01-12&view=capacity"), "Street Talk")
         self.show.show_type = "arts_and_culture"
         self.show.save(update_fields=["show_type"])
-        self.assertContains(Client().get("/shows/?show_type=arts_and_culture"), "Street Talk")
+        self.assertContains(Client().get("/library/?show_type=arts_and_culture"), "Street Talk")
         self.assertContains(Client().get("/day/?date=2026-01-05&show_type=arts_and_culture"), "Reserved")
         self.assertContains(Client().get("/agenda/?days=7"), "E")
 
@@ -306,7 +306,7 @@ class TodoWorkflowTests(TestCase):
         )
         self.assertContains(Client().get(f"/week/?date={today.isoformat()}&view=schedule"), "Warnings")
         self.assertContains(Client().get("/agenda/?days=31"), "New premiere")
-        self.assertContains(Client().get(f"/?date={today.isoformat()}"), "0 of 6 preparation steps recorded")
+        self.assertContains(Client().get(f"/?date={today.isoformat()}"), "Add media for")
 
     def test_named_producer_flow_and_private_optional_membership(self):
         client = Client()
@@ -384,15 +384,18 @@ class TodoWorkflowTests(TestCase):
         from pubtv.operations.services import materialize_assignment
         materialize_assignment(assignment)
         original_pk = self.slot.pk
-        response = Client().post(
-            f"/slots/{original_pk}/edit/",
-            {
+        payload = {
                 "weekday": 1, "start_time": "08:00",
                 "duration_seconds_0": 1, "duration_seconds_1": 0,
                 "duration_seconds_2": 0, "is_premiere": "on",
-                "active_from": "", "active_until": "",
-            },
-        )
+                "active_from": timezone.localdate().isoformat(), "active_until": "",
+        }
+        preview = Client().post(f"/slots/{original_pk}/edit/", payload)
+        self.assertEqual(preview.status_code, 200)
+        self.assertEqual(RecurrenceSlot.objects.filter(show=self.show).count(), 1)
+        response = Client().post(f"/slots/{original_pk}/edit/", {
+            **payload, 'confirm_review': '1', 'review_token': preview.context['recurring_review_token'],
+        })
         self.assertEqual(response.status_code, 302)
         self.assertEqual(RecurrenceSlot.objects.filter(show=self.show).count(), 2)
         original = RecurrenceSlot.objects.get(pk=original_pk)
@@ -417,9 +420,9 @@ class TodoWorkflowTests(TestCase):
 
     def test_navigation_groups_workflows_and_quit_is_separate(self):
         response = Client().get("/")
-        self.assertContains(response, "Today")
+        self.assertContains(response, "Work")
         self.assertContains(response, "Schedule")
-        self.assertContains(response, "Shows")
+        self.assertContains(response, "Library")
         self.assertContains(response, "History")
         self.assertContains(response, "Settings")
         self.assertNotContains(response, "Quit ChannelDex")
@@ -530,7 +533,8 @@ class MediaAssetIdentityMigrationTests(TransactionTestCase):
         self.executor.migrate(self.migrate_to)
 
     def tearDown(self):
-        MigrationExecutor(connection).migrate(self.migrate_to)
+        executor = MigrationExecutor(connection)
+        executor.migrate(executor.loader.graph.leaf_nodes())
         super().tearDown()
 
     def test_existing_assets_receive_distinct_ids_and_filename_backfill(self):

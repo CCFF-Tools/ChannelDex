@@ -4,7 +4,7 @@ from django.test import Client, TestCase, override_settings, RequestFactory
 from django.urls import reverse
 
 from pubtv.operations.forms import AssetForm, AutomationPreparationForm, AutomationPublicationForm, DeviceForm, StationForm
-from pubtv.operations.models import Device, MediaAsset, Show, Station
+from pubtv.operations.models import AuditEvent, Device, MediaAsset, Show, Station
 
 
 class ChannelWorkspaceTests(TestCase):
@@ -17,7 +17,7 @@ class ChannelWorkspaceTests(TestCase):
         response = client.get(reverse("dashboard"))
         self.assertEqual(response.context["active_station"], self.pub)
         response = client.post(reverse("station-switch"), {"station": self.other.pk}, HTTP_REFERER="/shows/")
-        self.assertRedirects(response, "/shows/")
+        self.assertRedirects(response, "/library/", fetch_redirect_response=False)
         self.assertEqual(client.get(reverse("dashboard")).context["active_station"], self.other)
 
     def test_selector_rejects_unknown_station(self):
@@ -31,7 +31,7 @@ class ChannelWorkspaceTests(TestCase):
 
     def test_selector_uses_posted_current_path_without_referrer(self):
         response = Client().post(reverse("station-switch"), {"station": self.other.pk, "next": "/media/"})
-        self.assertRedirects(response, "/media/")
+        self.assertRedirects(response, "/intake/", fetch_redirect_response=False)
 
     def test_selector_rejects_external_posted_next(self):
         response = Client().post(reverse("station-switch"), {"station": self.other.pk, "next": "https://evil.example/"})
@@ -39,20 +39,20 @@ class ChannelWorkspaceTests(TestCase):
 
     def test_workspace_switch_collapses_every_owned_object_route(self):
         cases = {
-            "/shows/7/edit/": "/shows/", "/shows/7/premieres/": "/shows/",
-            "/shows/7/slots/": "/shows/", "/shows/7/slots/length/": "/shows/",
-            "/episodes/8/duplicate/": "/episodes/", "/episodes/8/workflow/new/": "/episodes/",
-            "/assets/9/edit/": "/media/library/", "/assets/9/transfers/new/": "/media/library/",
-            "/assets/9/transfers/3/edit/": "/media/library/", "/slots/4/edit/": "/schedule/recurring/",
+            "/shows/7/edit/": "/library/", "/shows/7/premieres/": "/library/",
+            "/shows/7/slots/": "/library/", "/shows/7/slots/length/": "/library/",
+            "/episodes/8/duplicate/": "/library/", "/episodes/8/workflow/new/": "/library/",
+            "/assets/9/edit/": "/library/", "/assets/9/transfers/new/": "/library/",
+            "/assets/9/transfers/3/edit/": "/library/", "/slots/4/edit/": "/schedule/recurring/",
             "/settings/devices/9/": "/settings/devices/", "/settings/devices/9/edit/": "/settings/devices/",
             "/occurrences/6/preparation/": "/schedule/", "/occurrences/6/programming/": "/schedule/",
             "/occurrences/6/airing/?date=2026-10-12&unsafe=x": "/schedule/?date=2026-10-12",
             "/media/preparation/?show=1&episode=2&asset=3&scope=attention": "/media/preparation/?scope=attention",
             "/schedule/guided-delivery/?asset=3": "/schedule/guided-delivery/",
-            "/assets/new/?episode=2": "/assets/new/", "/episodes/new/?show=1": "/episodes/new/",
+            "/assets/new/?episode=2": "/intake/", "/episodes/new/?show=1": "/episodes/new/",
             "/occurrences/new/?asset=3": "/occurrences/new/",
-            "/shows/?q=civic&sort=title&show=9": "/shows/?q=civic&sort=title",
-            "/episodes/?show=9": "/episodes/",
+            "/shows/?q=civic&sort=title&show=9": "/library/?q=civic",
+            "/episodes/?show=9": "/library/",
             "/old-or-unknown/object/": "/",
         }
         for source, expected in cases.items():
@@ -166,15 +166,15 @@ class ChannelWorkspaceTests(TestCase):
             "runtime_seconds_0": "0", "runtime_seconds_1": "0", "runtime_seconds_2": "0",
             "local_path": "/private/media/station-id.mxf", "smb_reference": "",
         })
-        self.assertRedirects(response, "/media/library/")
+        self.assertRedirects(response, "/media/library/", fetch_redirect_response=False)
         asset = MediaAsset.objects.get(file_name="station-id.mxf")
         self.assertEqual(asset.station_id, self.pub.pk)
         self.assertIsNone(asset.episode_id)
-        self.assertContains(client.get("/media/library/"), "station-id.mxf")
+        self.assertContains(client.get("/library/?view=reusable"), "station-id.mxf")
         session = client.session
         session["active_station_id"] = self.other.pk
         session.save()
-        self.assertNotContains(client.get("/media/library/"), "station-id.mxf")
+        self.assertNotContains(client.get("/library/?view=reusable"), "station-id.mxf")
 
     def test_optional_asset_duration_preserves_unknown_and_explicit_zero(self):
         base = {"episode": "", "file_name": "asset.mxf", "kind": "encoded", "version": "v1",
@@ -196,6 +196,7 @@ class BootstrapWorkspaceTests(TestCase):
         )
         self.assertEqual(setup.status_code, 302)
         self.assertTrue(Station.objects.filter(name="PUB-TV").exists())
+        AuditEvent.objects.all().delete()
         Station.objects.all().delete()
         with patch.dict("os.environ", {"PUBTV_ENABLE_QUIT": "0"}, clear=False):
             quit_response = client.post(

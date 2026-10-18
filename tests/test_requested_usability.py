@@ -135,7 +135,7 @@ class RequestedUsabilityTests(TestCase):
         self.assertEqual(asset.runtime_seconds, 1680)
         self.assertContains(self.client.get(f"/assets/{asset.pk}/edit/"), ">Seconds</span>", html=False)
         detail = self.client.get(f"/episodes/{self.episode.pk}/")
-        self.assertContains(detail, "Duration: 28 min")
+        self.assertContains(detail, "28 min")
         self.assertContains(detail, f"/assets/{asset.pk}/edit/")
 
         update = self.client.post(
@@ -290,6 +290,13 @@ class RequestedUsabilityTests(TestCase):
                 "episode": replacement.pk,
             },
         )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.context["cycle_review_token"])
+        response = self.client.post(
+            f"/schedule/cycles/{WeeklyEpisodeAssignment.objects.get(show=self.show, week_start=date(2099, 1, 12)).pk}/edit/",
+            {"show": self.show.pk, "premiere_date": "2099-01-12", "episode": replacement.pk,
+             "confirm_review": "1", "review_token": response.context["cycle_review_token"]},
+        )
         assignment = WeeklyEpisodeAssignment.objects.get(
             show=self.show,
             week_start=date(2099, 1, 12),
@@ -308,6 +315,13 @@ class RequestedUsabilityTests(TestCase):
         response = self.client.post(
             "/assignments/new/",
             {"show": self.show.pk, "premiere_date": "2099-01-19", "episode": ""},
+        )
+        self.assertEqual(response.status_code, 200)
+        no_program = WeeklyEpisodeAssignment.objects.get(show=self.show, week_start=date(2099, 1, 19))
+        response = self.client.post(
+            f"/schedule/cycles/{no_program.pk}/edit/",
+            {"show": self.show.pk, "premiere_date": "2099-01-19", "episode": "",
+             "confirm_review": "1", "review_token": response.context["cycle_review_token"]},
         )
         no_program = WeeklyEpisodeAssignment.objects.get(
             show=self.show,
@@ -394,6 +408,13 @@ class RequestedUsabilityTests(TestCase):
             {"show": self.show.pk, "premiere_date": "2099-01-05", "episode": self.episode.pk},
         )
 
+        self.assertEqual(response.status_code, 200)
+        token = response.context["cycle_review_token"]
+        response = self.client.post(
+            f"/schedule/cycles/{legacy.pk}/edit/",
+            {"show": self.show.pk, "premiere_date": "2099-01-05", "episode": self.episode.pk,
+             "confirm_review": "1", "review_token": token},
+        )
         self.assertEqual(response.status_code, 302)
         self.assertEqual(WeeklyEpisodeAssignment.objects.filter(show=self.show).count(), 1)
         legacy.refresh_from_db()
@@ -454,7 +475,7 @@ class RequestedUsabilityTests(TestCase):
 
         self.assertContains(self.client.get("/agenda/?days=2"), link)
         self.assertContains(self.client.get(f"/shows/{self.show.pk}/"), "Open workbench")
-        self.assertContains(self.client.get(f"/episodes/{self.episode.pk}/"), "Open workbench")
+        self.assertContains(self.client.get(f"/episodes/{self.episode.pk}/"), f"/occurrences/{occurrence.pk}/")
         selected = timezone.localdate(starts_at)
         self.assertContains(self.client.get(f"/schedule-today/?date={selected.isoformat()}"), link)
 
@@ -464,7 +485,7 @@ class RequestedUsabilityTests(TestCase):
             start_time=time(7), duration_seconds=1800, is_premiere=True,
         )
         day = self.client.get("/schedule/?mode=day&date=2099-01-05")
-        shows = self.client.get("/shows/")
+        shows = self.client.get(f"/shows/{self.show.pk}/")
         detail = self.client.get(f"/shows/{self.show.pk}/")
 
         self.assertContains(day, 'class="schedule-toolbar"')

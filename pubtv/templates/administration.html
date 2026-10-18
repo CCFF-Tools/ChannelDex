@@ -1,0 +1,7 @@
+{% extends "base.html" %}
+{% block page_title %}Administration · ChannelDex{% endblock %}
+{% block content %}
+<div class="page-heading"><p class="eyebrow">Settings</p><h1>Administration</h1><p class="lede">Exceptional record maintenance. For incoming video, start with Add media in Work or Library.</p></div>
+<section class="list-card"><h2>Historical or expected episode</h2><p>Create a record without a video only when maintaining history or an exceptional expected submission. It does not establish preparation, publication, or airing.</p><a class="button-link" href="{% url 'episode-create' %}">Add episode without a file</a></section>
+<section class="list-card"><h2>Evidence</h2><p>Record external preparation and airing evidence from the relevant scheduled play so its episode, target, and revision remain explicit.</p><a class="button-link" href="{% url 'history' %}?tab=audit">Review audit history</a></section>
+{% endblock %}

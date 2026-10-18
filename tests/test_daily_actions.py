@@ -1,9 +1,9 @@
-from datetime import date, datetime, time
 import tempfile
+from datetime import date, datetime, time
+from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 from django.test import TestCase
-from unittest.mock import patch
 
 from pubtv.operations.action_items import build_daily_work
 from pubtv.operations.models import (
@@ -44,6 +44,29 @@ class DailyActionsTests(TestCase):
         source_items = [item for group in work["action_groups"] for item in group["items"] if item["key"] == f"source:{self.asset.pk}"]
         self.assertEqual(len(source_items), 1)
         self.assertIn("Affected uses", source_items[0]["reason"])
+
+    def test_missing_media_is_one_next_action_for_replays(self):
+        for offset in (0, 7):
+            Occurrence.objects.create(
+                station=self.station, show=self.show, episode=self.episode,
+                item_type="episode", label="Episode 1", starts_at=self.when.replace(day=14 + offset),
+                planned_duration_seconds=1800,
+            )
+        work = build_daily_work(self.station, date(2026, 10, 14))
+        items = [item for group in work["action_groups"] for item in group["items"]]
+        self.assertEqual(len([item for item in items if item["key"].startswith("asset:episode:")]), 1)
+        self.assertFalse(any(item["key"].startswith("coverage:") for item in items))
+
+    def test_archived_show_is_absent_from_work(self):
+        self.show.archived_at = self.when
+        self.show.save(update_fields=["archived_at"])
+        Occurrence.objects.create(
+            station=self.station, show=self.show, episode=self.episode, asset=self.asset,
+            item_type="episode", label="Episode 1", starts_at=self.when,
+            planned_duration_seconds=1800,
+        )
+        work = build_daily_work(self.station, date(2026, 10, 14))
+        self.assertFalse(any("Civic Hour" in item["title"] for group in work["action_groups"] for item in group["items"]))
 
     def test_failed_and_waiting_preparation_are_separate(self):
         device = Device.objects.create(station=self.station, name="Playback")

@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% load static %}
+{% block page_title %}Review connected intake · ChannelDex{% endblock %}
+{% block content %}
+<div class="page-heading">
+  <p class="eyebrow">Media / Intake</p><h1>{% if complete %}Intake complete{% else %}Review connected intake{% endif %}</h1>
+  <p class="lede">File facts are observed from the selected path. Metadata, dates, reuse, and preparation choices stay editable until confirmation.</p>
+</div>
+{% if error %}<p class="errorlist" role="alert">{{ error }}</p>{% endif %}
+
+{% if complete %}
+<section class="list-card" aria-labelledby="completion-title"><h2 id="completion-title">Saved successfully</h2>
+  <p>Catalog and premiere-plan records are saved. Preparation is tracked separately and does not claim that media is on the device or that a schedule aired.</p>
+  {% for result in results %}<article>
+    {% for episode_id in result.episode_ids %}<a href="{% url 'episode-detail' episode_id %}">Open episode {{ episode_id }}</a>{% if not forloop.last %} · {% endif %}{% empty %}<a href="{% url 'library' %}?view=reusable">Open reusable media</a>{% endfor %}
+    {% if result.batch_id %} · preparation batch {{ result.batch_id }} queued for validation, encoding when selected, and transfer{% endif %}
+    {% if result.preparation_blocked %} · <strong>Preparation blocked:</strong> choose and configure a destination when ready{% endif %}
+    {% if result.republication_occurrence_ids %}<div><strong>Replacement follow-up:</strong> prepare this version first, then change each affected play explicitly and review publication. Historical versions and exceptions remain unchanged.<ul>{% for occurrence_id in result.republication_occurrence_ids %}<li><a href="{% url 'occurrence-workbench' occurrence_id %}">Review affected planned play {{ occurrence_id }}</a></li>{% endfor %}</ul></div>{% endif %}
+  </article>{% endfor %}
+  <p><a class="button-link primary" href="{{ publish_url }}">Review schedule publishing</a> <a class="button-link" href="/media/preparation/">Preparation activity</a> <a class="button-link" href="{% url 'connected-intake' %}">Start another intake</a></p>
+</section>
+{% else %}
+<form method="post" class="list-card" id="connected-intake-form" data-picker="{{ browse_url }}">{% csrf_token %}{% include "originating_station_field.html" %}
+  <input type="hidden" name="revision" value="{{ draft.revision }}">
+  <h2>{% if rows %}Add or retry local files{% else %}Retry local file selection{% endif %}</h2>
+  {% if draft_context.asset %}<p><strong>Existing catalog record:</strong> {{ draft_context.asset.file_name }}{% if draft_context.episode %} · {{ draft_context.episode.show.title }} · {{ draft_context.episode.title }}{% endif %}</p>{% elif draft_context.episode %}<p><strong>Episode context:</strong> {{ draft_context.episode.show.title }} · {{ draft_context.episode.title }}</p>{% elif draft_context.show %}<p><strong>Show context:</strong> {{ draft_context.show.title }}</p>{% endif %}
+  <p><button type="button" data-choose-files>Choose files in Finder</button> <span data-picker-status role="status"></span></p>
+  <label>Local file paths <textarea name="paths" rows="4" placeholder="One absolute local path per line">{{ pending_paths_text }}</textarea></label>
+  <p class="helptext">Unavailable selections stay on this durable draft. Correct a path or choose the file again, then retry inspection.</p>
+  <button name="action" value="inspect" type="submit">Inspect files</button>
+</form>
+<form method="post" class="list-card" id="connected-intake-review-form">{% csrf_token %}{% include "originating_station_field.html" %}
+  <input type="hidden" name="revision" value="{{ draft.revision }}">
+  {% for row in rows %}<fieldset data-file-row data-row-index="{{ forloop.counter }}"><legend>{% if row.file.name %}{{ row.file.name }}{% else %}Reusable catalog item {{ forloop.counter }}{% endif %}</legend>
+    {% if row.file.path %}<p><code>{{ row.file.path }}</code></p><p class="helptext">{{ row.file.size }} bytes · modified identity {{ row.file.key|slice:':12' }}{% if row.file.runtime_seconds %} · measured runtime {{ row.file.runtime_seconds }} seconds{% endif %}</p>{% else %}<p class="helptext">No file is required now. Preparation stays blocked until a local file and destination are reviewed.</p>{% endif %}
+    <label>Use <select name="kind_{{ forloop.counter }}" data-kind-select><option value="episode"{% if row.kind != 'reusable' %} selected{% endif %}>Episode media</option><option value="reusable"{% if row.kind == 'reusable' %} selected{% endif %}>Reusable station media</option></select></label>
+    <div data-episode-fields>
+      <label>Show <select name="show_id_{{ forloop.counter }}" data-show-select><option value="">Choose show</option>{% for show in shows %}<option value="{{ show.pk }}"{% if row.metadata.show_id == show.pk %} selected{% endif %}>{{ show.title }}</option>{% endfor %}</select></label>
+      <label>Episode decision <select name="episode_id_{{ forloop.counter }}" data-episode-select required><option value="">Choose new or existing</option><option value="new"{% if row.metadata.episode_id == 'new' %} selected{% endif %}>Create a new episode from this title</option>{% for episode in episodes %}<option value="{{ episode.pk }}" data-show="{{ episode.show_id }}"{% if row.metadata.episode_id == episode.pk %} selected{% endif %}>Use existing: {{ episode.show.title }} · {{ episode.title }}</option>{% endfor %}</select></label>
+      <label>Episode title <input name="episode_title_{{ forloop.counter }}" maxlength="160" value="{{ row.metadata.episode_title|default:row.suggestion.episode_title }}"></label>
+      <label>Episode number <input name="episode_number_{{ forloop.counter }}" inputmode="numeric" value="{{ row.metadata.episode_number|default:row.suggestion.episode_number }}"></label>
+      <label><input type="checkbox" name="plan_{{ forloop.counter }}"{% if row.dates.plan %} checked{% endif %}> Plan premiere cycle</label>
+      <label>First premiere date <input type="date" name="premiere_date_{{ forloop.counter }}" value="{{ row.dates.premiere_date|default:row.suggested_premiere_date }}"></label>
+    </div>
+    <div data-reusable-fields><label>Reusable asset name <input name="asset_name_{{ forloop.counter }}" maxlength="255" value="{{ row.metadata.asset_name|default:row.file.name }}"></label></div>
+    {% if row.file.path %}<label>Preparation choice <select name="encoding_mode_{{ forloop.counter }}"><option value="needs_encoding"{% if row.encoding_mode != 'already_encoded' %} selected{% endif %}>Needs encoding</option><option value="already_encoded"{% if row.encoding_mode == 'already_encoded' %} selected{% endif %}>Already encoded – worker must validate target profile</option></select></label>{% endif %}
+    <label>Destination <select name="target_id_{{ forloop.counter }}"><option value="">No destination yet – save catalog and plan only</option>{% for target in targets %}<option value="{{ target.pk }}"{% if row.metadata.target_id == target.pk %} selected{% endif %}>{{ target.name }}</option>{% endfor %}</select></label>
+    {% if not targets %}<p class="helptext"><strong>No destination configured.</strong> You can still save the catalog and premiere plan. <a href="{{ setup_url }}">Configure a destination</a> before preparation.</p>{% endif %}
+    <label>When this path is already catalogued <select name="duplicate_action_{{ forloop.counter }}"><option value="">Choose after ChannelDex detects a match</option><option value="reuse"{% if row.duplicate_action == 'reuse' %} selected{% endif %}>Reuse the existing media version</option><option value="new_version"{% if row.duplicate_action == 'new_version' %} selected{% endif %}>Add as a corrected new version</option></select></label>
+    {% if row.future_plays %}<div class="help-panel"><strong>Future plays affected by a corrected version</strong><p>The earlier media versions and schedule exceptions stay in history. After the replacement is prepared, open each affected play, choose <strong>Change play</strong>, select the prepared version, and review publication:</p><ul>{% for play in row.future_plays %}<li><a href="{% url 'occurrence-workbench' play.id %}">{{ play.starts_at }} · {{ play.role|default:'planned play' }} · {{ play.label }}</a></li>{% endfor %}</ul></div>{% endif %}
+  </fieldset>{% endfor %}
+  <p><button class="primary" name="action" value="resolve" type="submit">Review exact plan and preparation</button></p>
+</form>
+
+{% if draft.payload.step == 'device_review' %}
+<section aria-labelledby="exact-review-title"><h2 id="exact-review-title">Exact confirmation review</h2>
+  {% for group in review_groups %}<article class="list-card">
+    {% if group.target_id %}<p><strong>Preparation:</strong> the reviewed files will create one durable preparation batch. Already-encoded files still enter profile validation before transfer.</p>{% else %}<p><strong>Preparation blocked:</strong> no destination was selected. Catalog and premiere planning can be confirmed now; no preparation job will be created.</p>{% endif %}
+    {% if group.proposal_error %}<p class="errorlist">{{ group.proposal_error }}</p>{% endif %}
+    {% if group.selected_proposal %}<h3>Reviewed plays</h3>{% for cycle in group.selected_proposal.cycles %}<div><strong>{{ cycle.title }} · premiere {{ cycle.premiere_date }}</strong><ul>{% for play in cycle.occurrences %}<li>{{ play.date }} at {{ play.time }} · {{ play.role }}</li>{% endfor %}</ul></div>{% endfor %}{% elif group.first_premiere_date %}<p class="errorlist">The selected premiere date is unavailable in this review. Update metadata and review again.</p>{% else %}<p>No premiere cycle will be created for this group.</p>{% endif %}
+  </article>{% endfor %}
+  <form method="post" class="list-card">{% csrf_token %}{% include "originating_station_field.html" %}<input type="hidden" name="revision" value="{{ draft.revision }}"><p><button class="primary" name="action" value="confirm" type="submit">Confirm catalog, plan, and preparation choices</button></p><p class="helptext">Confirmation rechecks this draft revision, file size and modification time, schedule slots and assignments, destination configuration, and every metadata binding shown above.</p></form>
+</section>
+{% endif %}
+{% endif %}
+<script src="{% static 'connected_intake.js' %}" defer></script>
+{% endblock %}

@@ -162,10 +162,19 @@ def validate_rows(rows, *, show):
             value = row.get(key)
             if value not in (None, "") and (not str(value).isdigit() or int(value) > 2147483647 or (key == "runtime_seconds" and int(value) == 0)):
                 problems.append(f"{label} must be a positive whole number.")
+        asset_id = row.get("asset_id")
+        asset = None
+        if asset_id not in (None, ""):
+            asset = MediaAsset.objects.filter(pk=asset_id, station=show.station, episode=episode).first()
+            if asset is None:
+                problems.append("The catalogued media selected for reuse is unavailable.")
+            elif not path or not asset.local_path or Path(asset.local_path).resolve() != path:
+                problems.append("The catalogued media path no longer matches this file.")
         if problems:
             errors[index] = problems
         validated.append({"upload": upload, "source_path": str(path) if path else None, "name": name,
                           "episode": episode, "title": title,
+                          "asset_id": asset.pk if asset else None,
                           "encode_before_transfer": mode == "needs_encoding" if mode else bool(row.get("encode_before_transfer")),
                           "episode_number": row.get("episode_number", ""), "runtime_seconds": row.get("runtime_seconds", "")})
     if errors:
@@ -556,7 +565,8 @@ def _stage_review_rows(review, rows):
                        "size": stat.st_size, "mtime_ns": stat.st_mtime_ns,
                        "episode_id": row["episode"].pk if row["episode"] else None, "new_title": row["title"],
                        "encode_before_transfer": row["encode_before_transfer"], "position": position,
-                       "content_identity": "", "episode_number": row.get("episode_number", ""),
+                       "content_identity": "", "asset_id": row.get("asset_id"),
+                       "episode_number": row.get("episode_number", ""),
                        "runtime_seconds": runtime_seconds,
                        "runtime_label": _duration_label(int(runtime_seconds)) if str(runtime_seconds).isdigit() else "Not recorded"})
     if review.payload.get("rows"):
@@ -754,8 +764,10 @@ def confirm_intake_review(review, *, first_premiere_date=None, actor="owner"):
         episodes.append(episode)
         encode = bool(row.get("encode_before_transfer"))
         asset = None
-        if review.asset_id and len(rows) == 1:
-            asset = MediaAsset.objects.select_for_update().filter(pk=review.asset_id, episode=episode).first()
+        reusable_asset_id = row.get("asset_id") or (review.asset_id if len(rows) == 1 else None)
+        if reusable_asset_id:
+            asset = MediaAsset.objects.select_for_update().filter(pk=reusable_asset_id, episode=episode,
+                                                                   station=review.show.station).first()
             if asset is None:
                 raise ValueError("The selected catalogued media changed; review preparation again.")
             if asset.local_path and Path(asset.local_path).resolve() != path.resolve():

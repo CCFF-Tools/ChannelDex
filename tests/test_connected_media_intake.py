@@ -76,9 +76,8 @@ class ConnectedMediaIntakeTests(TestCase):
         self.assertFalse(MediaAsset.objects.filter(file_name="bad.mp4").exists())
 
     def test_safe_return_preserves_filters_and_rejects_external(self):
-        self.assertEqual(safe_return_url("/media/library/?q=abc&show=2"),
-                         "/media/library/?q=abc&show=2")
-        self.assertEqual(safe_return_url("https://evil.example/"), "/media/library/")
+        self.assertEqual(safe_return_url("/library/?q=abc&show=2"), "/library/?q=abc&show=2")
+        self.assertEqual(safe_return_url("https://evil.example/"), "/library/")
 
     def test_preparation_monitor_has_recovery_without_device(self):
         request = self.request("get", "/media/preparation/?asset=999")
@@ -181,11 +180,11 @@ class ConnectedMediaIntakeTests(TestCase):
         session = self.client.session
         session[SESSION_KEY] = self.station.pk
         session.save()
-        response = self.client.get(f"/assets/new/?episode={self.episode.pk}")
+        response = self.client.get(f"/intake/?episode={self.episode.pk}")
         self.assertEqual(response.status_code, 200)
         content = response.content.decode()
-        self.assertRegex(content, r'name="submission_token" value="[0-9a-f-]{36}"')
-        self.assertIn('value="existing_episode" checked', content)
+        self.assertIn("Connected intake", content)
+        self.assertIn(self.episode.show.title, content)
 
     def test_existing_episode_asset_post_review_and_confirm_reuses_asset(self):
         self._assert_existing_asset_preparation(reusable=False)

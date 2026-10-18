@@ -57,6 +57,7 @@ class Show(models.Model):
     primary_delivery_method = models.CharField(max_length=20, choices=DELIVERY_METHODS, blank=True)
     primary_delivery_other = models.CharField(max_length=160, blank=True)
     slot_duration_seconds = models.PositiveIntegerField(null=True, blank=True)
+    archived_at = models.DateTimeField(null=True, blank=True)
     class Meta:
         constraints = [models.UniqueConstraint(fields=["station", "code"], name="unique_station_show_code")]
     def __str__(self): return self.title
@@ -114,6 +115,7 @@ class Episode(models.Model):
     runtime_provenance = models.CharField(max_length=32, blank=True)
     status = models.CharField(max_length=24, choices=[("pending", "Pending"), ("previously_scheduled", "Previously scheduled")], default="pending")
     legacy_received_at = models.DateTimeField(null=True, blank=True)
+    archived_at = models.DateTimeField(null=True, blank=True)
     def __str__(self): return f"{self.show.code}: {self.title}"
 
     def clean(self):
@@ -400,6 +402,9 @@ class WeeklyEpisodeAssignment(models.Model):
             raise ValidationError("A premiere-cycle assignment cannot supersede itself.")
         if self.week_start and self.week_start.weekday() != 0:
             raise ValidationError("Week start must be a Monday.")
+        if self.state == 'active' and self.selection_type != 'none' and self.show_id and (self.premiere_date or self.week_start) and (self.premiere_date or self.week_start) >= timezone.localdate():
+            if self.show.archived_at or (self.episode_id and self.episode.archived_at):
+                raise ValidationError('Restore archived records before planning a future cycle.')
         if self.episode_id and self.episode and self.episode.show_id != self.show_id:
             raise ValidationError("Assigned episode must belong to the assigned show.")
         if self.selection_type == "none" and self.episode_id:
@@ -440,6 +445,16 @@ class Occurrence(models.Model):
         choices=[("manual", "Manual schedule item"), ("premiere", "New premiere"), ("replay", "Replay"), ("rerun", "Selected older episode")],
         default="manual",
     )
+    # A recurring play keeps its source cycle identity even when an operator
+    # moves or cancels it.  Materialization uses this stable key so an
+    # exception cannot be recreated or have its episode silently replaced.
+    cycle_key = models.CharField(max_length=160, blank=True, default="")
+    is_exception = models.BooleanField(default=False)
+    exception_of = models.ForeignKey(
+        "self", null=True, blank=True, on_delete=models.PROTECT,
+        related_name="schedule_exceptions",
+    )
+    exception_reason = models.CharField(max_length=80, blank=True, default="")
     def __str__(self):
         show_title = self.show.title if self.show else None
         episode_title = self.episode.title if self.episode else None
@@ -458,6 +473,9 @@ class Occurrence(models.Model):
         return f"{item} · {time_label}"
     def clean(self):
         if self.item_type == "episode" and not self.episode: raise ValidationError("Episode items require an episode.")
+        if self.status == 'planned' and self.starts_at and self.starts_at >= timezone.now():
+            if (self.show_id and self.show.archived_at) or (self.episode_id and (self.episode.archived_at or self.episode.show.archived_at)):
+                raise ValidationError('Restore archived records before planning a future play.')
         if self.item_type == "live" and self.asset: raise ValidationError("Live items cannot have a media asset.")
         if self.show and self.show.station_id != self.station_id: raise ValidationError("Show must belong to occurrence station.")
         if self.episode and (self.episode.show.station_id != self.station_id or (self.show_id and self.episode.show_id != self.show_id)):
@@ -658,6 +676,10 @@ class AiringEvidence(models.Model):
         return f"{item} · {self.get_status_display()} · {self.aired_at:%Y-%m-%d} {_clock_label(self.aired_at)}"
 
 class AuditEvent(models.Model):
+    station = models.ForeignKey(
+        Station, null=True, blank=True, on_delete=models.PROTECT,
+        related_name="audit_events",
+    )
     actor = models.CharField(max_length=120, default="owner")
     occurred_at = models.DateTimeField(default=timezone.now)
     action = models.CharField(max_length=40)
@@ -665,6 +687,22 @@ class AuditEvent(models.Model):
     entity_id = models.PositiveIntegerField(null=True, blank=True)
     revision = models.PositiveIntegerField(null=True, blank=True)
     summary = models.TextField()
+
+    def save(self, *args, **kwargs):
+        if not self.pk and self.station_id is None:
+            from .audit_scope import audit_object, station_id_for
+            self.station_id = station_id_for(audit_object(self.entity, self.entity_id))
+        return super().save(*args, **kwargs)
+
+
+class MediaIntakeDraft(models.Model):
+    station = models.ForeignKey(Station, on_delete=models.PROTECT, related_name="media_intake_drafts")
+    token = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    payload = models.JSONField(default=dict)
+    state = models.CharField(max_length=32, default="draft")
+    revision = models.PositiveIntegerField(default=1)
+    created_at = models.DateTimeField(default=timezone.now)
+    updated_at = models.DateTimeField(auto_now=True)
 
 
 # Durable UltraNEXUS integration records.  These models deliberately store

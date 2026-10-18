@@ -1,0 +1,7 @@
+{% extends "base.html" %}
+{% block page_title %}Publish schedule · ChannelDex{% endblock %}
+{% block content %}
+<div class="page-heading"><p class="eyebrow">Schedule publication</p><h1>Review pending changes</h1><p class="lede">Review exact occurrence revisions and target gates before using the existing staging and activation workflow.</p></div>
+{% for item in batches %}<article class="list-card"><div><h2>{{ item.batch.target }}</h2><p>Status: {{ item.state }}</p>{% for blocker in item.blockers %}<p role="alert">{{ blocker.reason }}</p>{% empty %}<p>No workspace blockers.</p>{% endfor %}</div><a class="button-link primary" href="{% url 'automation' %}?batch={{ item.batch.pk }}">Open existing review</a></article>{% empty %}<section class="empty-state"><p>No pending publication changes.</p></section>{% endfor %}
+<p class="muted">Sent or activated does not prove that the schedule aired.</p>
+{% endblock %}

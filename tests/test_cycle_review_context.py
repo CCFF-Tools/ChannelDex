@@ -94,4 +94,4 @@ class CycleReviewContextTests(TestCase):
     def test_workspace_switch_preserves_date_but_clears_cycle_object_context(self):
         self.assertEqual(workspace_safe_url("/schedule/prepare/?date=2026-10-12&target=4&assignment=9"), "/schedule/prepare/?date=2026-10-12")
         self.assertEqual(workspace_safe_url("/schedule/review/?date=2026-10-12&target=4&assignment=9"), "/schedule/review/?date=2026-10-12")
-        self.assertEqual(workspace_safe_url("/media/intake/saved/42/?next=/media/"), "/media/library/")
+        self.assertEqual(workspace_safe_url("/media/intake/saved/42/?next=/media/"), "/library/")
