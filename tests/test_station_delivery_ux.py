@@ -36,14 +36,14 @@ class StationDeliveryUXTests(TestCase):
         assert response.status_code == 400
 
     def test_workspaces_have_separate_media_and_schedule_actions(self):
-        response = Client().get("/schedule/delivery/")
-        self.assertContains(response, "Review cycle delivery")
+        response = Client().get("/schedule/publish/")
+        self.assertContains(response, "Review pending schedule changes")
         self.assertContains(response, "Confirm activation")
         self.assertNotContains(response, "Schedule insertion")
-        media = Client().get("/media/")
-        self.assertContains(media, "Preparation monitor")
-        self.assertContains(Client().get("/media/?setup=1"), "Queue preparation &amp; transfer")
-        self.assertNotContains(media, "Planned schedule occurrence")
+        media = Client().get("/intake/")
+        self.assertEqual(media.status_code, 400)
+        self.assertContains(media, "Create a station", status_code=400)
+        self.assertNotContains(media, "Planned schedule occurrence", status_code=400)
 
     def test_device_setup_requires_password(self):
         device = Device.objects.create(name="WinLGX")
@@ -194,7 +194,7 @@ class StationDeliveryUXTests(TestCase):
         assert SchedulePublicationBatch.objects.get(target=device).occurrence_selections.count() == 1
 
     def test_legacy_automation_url_renders_schedule_delivery(self):
-        response = Client().get("/automation/")
+        response = Client().get("/schedule/publish/")
         self.assertContains(response, "Schedule delivery")
         for label in ("Review changes", "Generate and validate", "Stage upload", "Confirm activation", "Record independent confirmation"):
             self.assertContains(response, label)

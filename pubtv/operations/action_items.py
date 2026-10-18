@@ -19,14 +19,12 @@ from .media_queue import effective_preparation_status
 from .models import (
     Episode,
     Occurrence,
-    PreparationBatch,
     PreparationBatchItem,
     RecurrenceSlot,
     UploadedOccurrenceCoverage,
     WeeklyEpisodeAssignment,
 )
 from .services import calendar_capacity, schedule_alerts
-
 
 WAITING_STATES = {"queued", "encoding", "validating", "transferring", "verifying"}
 ACTIONABLE_STATES = {"failed", "blocked"}
@@ -74,6 +72,8 @@ def _add(items, key, title, reason, url, *, needed_at=None, destination=None, gr
     current = items.get((group, key))
     if current is None:
         current = _item(key, title, reason, url, needed_at=needed_at, destination=destination)
+        if sort_at is not None:
+            current["sort_at"] = sort_at
         if sort_at is None and needed_at:
             try:
                 sort_at = datetime.combine(date.fromisoformat(needed_at[:10]), time.min, ZoneInfo("America/Detroit"))
@@ -122,17 +122,20 @@ def build_daily_work(station, selected_date):
     if not isinstance(selected_date, date):
         selected_date = date.fromisoformat(str(selected_date))
 
+    # Work must keep unfinished items visible beyond the short near-term
+    # horizon.  Capacity and calendar warnings below remain bounded, while
+    # schedule, preparation, and coverage records are projected until done.
     horizon_end = _week_end(selected_date)
     tz = _zone(station)
     start = timezone.make_aware(datetime.combine(selected_date, time.min), tz)
-    end = timezone.make_aware(datetime.combine(horizon_end + timedelta(days=1), time.min), tz)
     occurrences = list(
-        Occurrence.objects.filter(station=station, starts_at__lt=end)
+        Occurrence.objects.filter(station=station, episode__archived_at__isnull=True,
+                                  show__archived_at__isnull=True)
         .select_related("show", "episode", "asset", "weekly_assignment", "recurrence_slot")
         .prefetch_related("programming")
         .order_by("starts_at", "pk")
     )
-    horizon_occurrences = [o for o in occurrences if o.starts_at >= start and o.starts_at < end and o.ends_at > start]
+    horizon_occurrences = [o for o in occurrences if o.ends_at > start]
     by_asset = {}
     for occurrence in horizon_occurrences:
         if occurrence.asset_id:
@@ -152,6 +155,8 @@ def build_daily_work(station, selected_date):
         target = batch_item.batch.target
         destination = target.destination_label
         asset = batch_item.asset
+        if getattr(getattr(asset, "episode", None), "archived_at", None) is not None or getattr(getattr(getattr(asset, "episode", None), "show", None), "archived_at", None) is not None:
+            continue
         uses = [o.display_label for o in by_asset.get(asset.pk, [])]
         asset_label = asset.file_name or asset.legacy_label or str(asset)
         if state in WAITING_STATES:
@@ -177,16 +182,15 @@ def build_daily_work(station, selected_date):
         label = occurrence.display_label
         when = _when(occurrence.starts_at, station)
         if occurrence.item_type in {"episode", "media"} and asset is None:
-            _add(actions, f"asset:{occurrence.pk}", f"Add media for {label}",
+            identity = f"episode:{occurrence.episode_id}" if occurrence.episode_id else f"occurrence:{occurrence.pk}"
+            item = _add(actions, f"asset:{identity}", f"Add media for {label}",
                  "This planned item has no media asset attached.",
                  _context_url("occurrence-workbench", selected_date, occurrence.pk),
                      needed_at=when, group="attention", sort_at=occurrence.starts_at)
+            item["_uses"].append(f"{label} at {when}")
         if asset is None:
-            if not _active_coverage(occurrence).exists():
-                _add(actions, f"coverage:{occurrence.pk}:unscoped", f"Review delivery for {label}",
-                     "No active upload coverage exists for this exact schedule revision.",
-                     _context_url("occurrence-workbench", selected_date, occurrence.pk),
-                     needed_at=when, group="upcoming")
+            # Missing media is the next meaningful action. Delivery cannot be
+            # reviewed yet, and a replay must not create a second card.
             continue
         asset_prep = getattr(asset, "preparation_record", None)
         relevant_items = list(PreparationBatchItem.objects.filter(
@@ -232,38 +236,48 @@ def build_daily_work(station, selected_date):
                     continue
                 destination = None
                 destination_text = "No active upload coverage exists for this exact schedule revision."
-                action_key = f"coverage:{occurrence.pk}:unscoped"
+                identity = f"episode:{occurrence.episode_id}" if occurrence.episode_id else f"asset:{asset.pk}"
+                action_key = f"coverage:{identity}:unscoped"
             elif device.pk not in covered_devices:
                 destination = device.destination_label
                 destination_text = f"No active upload coverage exists for this exact schedule revision on {device.name}."
-                action_key = f"coverage:{occurrence.pk}:{device.pk}"
+                identity = f"episode:{occurrence.episode_id}" if occurrence.episode_id else f"asset:{asset.pk}"
+                action_key = f"coverage:{identity}:{device.pk}"
             else:
                 continue
-            _add(actions, action_key,
+            item = _add(actions, action_key,
                      f"Review delivery for {label}",
                      destination_text,
                      _context_url("occurrence-workbench", selected_date, occurrence.pk),
                      needed_at=when, destination=destination, group="upcoming", sort_at=occurrence.starts_at)
+            item["_uses"].append(f"{label} at {when}")
 
     # Capacity marks genuinely unplanned time as a separate schedule action.
     # Virtual-channel filler inside a reservation is intentionally not included.
     capacity_days = calendar_capacity(station, selected_date, days=(horizon_end - selected_date).days + 1)
+    unplanned_days = []
     for day_capacity in capacity_days:
         if any(interval.get("status") == "available" for interval in day_capacity.get("intervals", [])):
-            day = day_capacity["date"]
-            _add(actions, f"unplanned:{day.isoformat()}", "Review unplanned time",
-                 "This day has coverage intervals without an explicit schedule item.",
-                 _context_url("day-view", day), needed_at=day.isoformat(), group="upcoming")
+            unplanned_days.append(day_capacity["date"])
+    if unplanned_days:
+        first_day = min(unplanned_days)
+        labels = ", ".join(day.strftime("%b %-d") for day in unplanned_days)
+        _add(actions, "unplanned:summary", "Review unplanned time",
+             f"Coverage intervals without an explicit schedule item: {labels}.",
+             _context_url("day-view", first_day), needed_at=first_day.isoformat(), group="upcoming",
+             sort_at=timezone.make_aware(datetime.combine(first_day, time.min), tz))
 
     # Runtime and schedule conflicts are distinct from intentional virtual-channel time.
     for occurrence in horizon_occurrences:
         if occurrence.status != "planned":
             continue
         when = _when(occurrence.starts_at, station)
-        if occurrence.item_type in {"episode", "media"} and occurrence.actual_runtime_seconds is None:
-            _add(actions, f"runtime:{occurrence.pk}", f"Record runtime for {occurrence.display_label}",
+        if occurrence.item_type in {"episode", "media"} and occurrence.asset_id and occurrence.actual_runtime_seconds is None:
+            identity = f"episode:{occurrence.episode_id}" if occurrence.episode_id else f"occurrence:{occurrence.pk}"
+            item = _add(actions, f"runtime:{identity}", f"Record runtime for {occurrence.display_label}",
                  "Runtime is unknown; review the plan before relying on this fixed slot.",
                  _context_url("occurrence-workbench", selected_date, occurrence.pk), needed_at=when, group="upcoming", sort_at=occurrence.starts_at)
+            item["_uses"].append(f"{occurrence.display_label} at {when}")
         if occurrence.over_slot:
             _add(actions, f"overrun:{occurrence.pk}", f"Review overrun for {occurrence.display_label}",
                  "The recorded runtime exceeds the fixed schedule slot.",
@@ -279,6 +293,8 @@ def build_daily_work(station, selected_date):
     # assignments intentionally stop carry-forward and therefore do not become actions.
     slots = RecurrenceSlot.objects.filter(station=station, is_premiere=True).select_related("show")
     for slot in slots:
+        if slot.show.archived_at is not None:
+            continue
         cursor = selected_date
         while cursor <= horizon_end:
             if cursor.weekday() == slot.weekday and (not slot.active_from or cursor >= slot.active_from) and (not slot.active_until or cursor <= slot.active_until):
@@ -296,6 +312,7 @@ def build_daily_work(station, selected_date):
     # Past premiere exceptions are kept separate and never described as airing failures.
     past = Occurrence.objects.filter(
         station=station, item_type="episode", schedule_role="premiere", status__in=("planned", "cancelled", "preempted"), starts_at__lt=start,
+        episode__archived_at__isnull=True, show__archived_at__isnull=True,
     ).select_related("episode")
     for occurrence in past:
         if occurrence.status in {"cancelled", "preempted"} or not _active_coverage(occurrence).exists():
@@ -306,7 +323,8 @@ def build_daily_work(station, selected_date):
 
     # Optional lower-priority catalog housekeeping for episodes with no scheduled use.
     scheduled_episode_ids = set(Occurrence.objects.filter(station=station, episode__isnull=False).values_list("episode_id", flat=True))
-    for episode in Episode.objects.filter(show__station=station).prefetch_related("assets"):
+    for episode in Episode.objects.filter(show__station=station, archived_at__isnull=True,
+                                          show__archived_at__isnull=True).prefetch_related("assets"):
         if episode.pk not in scheduled_episode_ids and not episode.assets.exists():
             _add(actions, f"catalog:{episode.pk}", f"Add media for {episode.show.title} · {episode.title}",
                  "No scheduled date; catalog work is lower priority and has no invented deadline.",

@@ -10,12 +10,11 @@ class EndUserDocumentationTests(SimpleTestCase):
         response = self.client.get("/help/")
         self.assertEqual(response.status_code, 200)
         html = response.content.decode()
-        for href in ("/settings/", "/settings/devices/", "/shows/", "/", "/schedule/?mode=day", "/schedule/?mode=week", "/schedule/?mode=agenda", "/occurrences/new/", "/schedule/recurring/", "/media/library/", "/media/preparation/", "/schedule/prepare/", "/schedule/delivery/", "/history/"):
+        for href in ("/settings/", "/settings/devices/", "/library/", "/", "/schedule/?mode=day", "/schedule/?mode=week", "/schedule/?mode=agenda", "/occurrences/new/", "/schedule/recurring/", "/intake/", "/media/preparation/", "/schedule/publish/", "/history/"):
             self.assertIn(f'href="{href}"', html)
-        self.assertIn("catalog metadata only", html)
+        self.assertIn("Library contains shows", html)
         self.assertIn("do not imply that an item aired", html)
-        self.assertIn("Record received media", html)
-        self.assertIn("Prepare for destination", html)
+        self.assertIn("Preparation uses configured tools", html)
         airing_labels = [label for _, label in AiringEvidence._meta.get_field("status").choices]
         self.assertEqual(airing_labels, ["Reported/observed", "Log verified"])
         self.assertNotIn("Choose exactly one status: <strong>Observed</strong>", html)
@@ -35,7 +34,7 @@ class EndUserDocumentationTests(SimpleTestCase):
             "Destination device",
             "Source BIN slot",
             "observed_active",
-            "New episode title",
+            "Episode title",
             "disabled `Asset ID`",
         ):
             self.assertIn(wording, readme)

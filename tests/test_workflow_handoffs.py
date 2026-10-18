@@ -33,7 +33,7 @@ class WorkflowHandoffTests(TestCase):
     def test_library_links_next_planned_use_and_schedule_defaults_to_week(self):
         item = Occurrence.objects.create(station=self.station, show=self.show, episode=self.episode,
             item_type="episode", starts_at=timezone.now() + timedelta(days=1), planned_duration_seconds=1800)
-        response = self.client.get("/media/library/")
+        response = self.client.get("/library/")
         self.assertEqual(response.context["rows"][0]["next_planned_use"]["url"], f"/occurrences/{item.pk}/")
         self.assertContains(response, "Next planned use")
         self.assertContains(self.client.get("/schedule/"), "Week plan")

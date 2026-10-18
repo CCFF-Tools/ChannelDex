@@ -1,5 +1,16 @@
 # ChannelDex scheduling and media-tracking plan
 
+## Accepted workspace navigation (2026-10-17)
+
+V1 presents Work, Schedule, and Library as the primary workspaces, with
+History, Settings, and Help as secondary destinations. Library combines show,
+episode, and reusable-media discovery with station-scoped search. Intake
+handles connected media drafts and review; Schedule → Publish handles future
+publication review. Legacy GET URLs redirect to these surfaces while legacy
+POST contracts remain compatible. Archive and restore preserve history and do
+not silently replan. Hardware qualification remains unverified until manual
+evidence is recorded.
+
 ## Usability overhaul — accepted for implementation (2026-09-17)
 
 The owner accepted the complete usability and information-architecture overhaul

@@ -105,7 +105,7 @@ class ConnectedWorkflowTests(TestCase):
     def test_prepare_only_does_not_create_schedule_cycles(self):
         review = self._review(action="prepare_only")
         response = Client().post("/media/", {"action": "confirm_intake", "review_token": review.token})
-        self.assertRedirects(response, "/media/")
+        self.assertRedirects(response, "/media/", fetch_redirect_response=False)
         self.assertEqual(PreparationJob.objects.count(), 1)
         self.assertFalse(WeeklyEpisodeAssignment.objects.exists())
         item = PreparationBatch.objects.get().items.get()
@@ -167,7 +167,7 @@ class ConnectedWorkflowTests(TestCase):
         self.assertContains(response, "file is unavailable", status_code=400)
 
     def test_show_context_prefills_the_media_intake(self):
-        response = Client().get(f"/media/?show={self.show.pk}")
+        response = Client().get(f"/intake/?show={self.show.pk}")
         self.assertContains(response, f'value="{self.show.pk}" selected')
         self.assertContains(response, f'value="{self.target.pk}" selected')
 

@@ -24,16 +24,20 @@ from .forms import AssetForm
 from .models import AuditEvent, CatalogIntakeSubmission, Delivery, Device, Episode, MediaAsset, Show
 
 PURPOSES = {"new_episode", "existing_episode", "reusable"}
-SAFE_RETURN_PATHS = {"/media/", "/media/library/", "/media/preparation/"}
+SAFE_RETURN_PATHS = {
+    "/library/", "/intake/", "/schedule/publish/",
+    "/media/", "/media/library/", "/media/preparation/",
+}
 
-def safe_return_url(value: str | None, fallback: str = "/media/library/") -> str:
+def safe_return_url(value: str | None, fallback: str = "/library/") -> str:
     """Keep only same-origin collection/context URLs supplied by the browser."""
     parsed = urlparse(value or "")
     if parsed.scheme or parsed.netloc or not parsed.path.startswith("/") or parsed.path.startswith("//"):
         return fallback
     if parsed.path not in SAFE_RETURN_PATHS:
         return fallback
-    allowed = {"q", "show", "readiness", "scope"}
+    allowed = {"q", "show", "readiness", "scope", "view", "archived",
+               "episode", "asset", "target", "date"}
     query = {key: values[-1] for key, values in parse_qs(parsed.query, keep_blank_values=True).items()
              if key in allowed and values}
     return parsed.path + (("?" + urlencode(query)) if query else "")

@@ -359,12 +359,17 @@ def guided_delivery_view(request):
                     expected_rollback_hash=delivery.rollback_hash)
                 record_guided_rollback(delivery, operation)
                 messages.success(request, "Known-good BIN restored and LOADSCH acknowledged.")
-            return redirect("guided-delivery")
+            return redirect(f"/schedule/publish/?guided={delivery.pk}")
         except (ValueError, OSError, TypeError, KeyError) as exc:
             messages.error(request, str(exc))
             if request.POST.get("action") == "start":
                 bound = request.POST
-    deliveries = list(GuidedEpisodeDelivery.objects.filter(target__station=station, show__station=station).select_related(
+    deliveries_query = GuidedEpisodeDelivery.objects.filter(target__station=station, show__station=station)
+    resume_id = request.GET.get("guided") or request.POST.get("delivery")
+    if resume_id:
+        selected_delivery = get_object_or_404(deliveries_query, pk=resume_id)
+        deliveries_query = deliveries_query.filter(pk=selected_delivery.pk)
+    deliveries = list(deliveries_query.select_related(
         "target", "show", "episode", "asset", "preparation_batch", "publication_batch",
         "cycle_assignment").order_by("-created_at")[:20])
     for delivery in deliveries:
@@ -388,7 +393,7 @@ def guided_delivery_view(request):
         targets[0] if len(targets) == 1 else None)
     display_file_path = bound.get("file_path", "") if bound else (selected_asset.local_path if selected_asset else "")
     return render(request, "guided_delivery.html", {
-        "deliveries": deliveries, "targets": targets,
+        "deliveries": deliveries, "targets": targets, "resume_only": bool(resume_id),
         "shows": Show.objects.filter(station=station).order_by("title"),
         "episodes": Episode.objects.filter(show__station=station).select_related("show").order_by("show__title", "title"),
         "submission_token": uuid.uuid4(),

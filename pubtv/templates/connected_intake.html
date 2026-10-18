@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% load static %}
+{% block page_title %}Connected intake · ChannelDex{% endblock %}
+{% block content %}
+<div class="page-heading">
+  <p class="eyebrow">Media / Intake</p>
+  <h1>Connected intake</h1>
+  <p class="lede">Choose existing local files, inspect their facts, resolve episode matches, and review the exact premiere and preparation work before saving.</p>
+</div>
+{% if error %}<p class="errorlist" role="alert">{{ error }}</p>{% endif %}
+{% if station_missing %}
+<section class="list-card"><h2>Set up a working channel</h2><p>Media intake needs a station boundary before it can save a draft.</p><a class="button-link primary" href="/setup/station/">Create station</a></section>
+{% else %}
+<form method="post" class="list-card" id="connected-intake-form" data-picker="{% url 'browse-path' %}">{% csrf_token %}{% include "originating_station_field.html" %}
+  {% if initial.show %}<input type="hidden" name="show" value="{{ initial.show.pk }}">{% endif %}
+  {% if initial.episode %}<input type="hidden" name="episode" value="{{ initial.episode.pk }}">{% endif %}
+  {% if initial.asset %}<input type="hidden" name="asset" value="{{ initial.asset.pk }}">{% endif %}
+  {% if initial.target %}<input type="hidden" name="target" value="{{ initial.target.pk }}">{% endif %}
+  <h2>Select local media</h2>
+  {% if initial.asset %}<p><strong>Existing catalog record:</strong> {{ initial.asset.file_name }}{% if initial.episode %} · {{ initial.episode.show.title }} · {{ initial.episode.title }}{% endif %}{% if initial.target %} · prepare for {{ initial.target.name }}{% endif %}</p>{% endif %}
+  {% if initial.episode and not initial.asset %}<p><strong>Episode context:</strong> {{ initial.episode.show.title }} · {{ initial.episode.title }}{% if initial.target %} · prepare for {{ initial.target.name }}{% endif %}</p>{% elif initial.show and not initial.asset %}<p><strong>Show context:</strong> {{ initial.show.title }}{% if initial.target %} · prepare for {{ initial.target.name }}{% endif %}</p>{% endif %}
+  {% if initial.asset_missing_path %}<p class="errorlist" role="alert">This catalog record has no local file path. Use its Media Library relink review to keep the same record, or select a file below to add a new version.</p>{% endif %}
+  <p><button type="button" data-choose-files>Choose files in Finder</button> <span data-picker-status role="status"></span></p>
+  <label>Local file paths <textarea name="paths" rows="5" placeholder="One absolute local path per line">{{ initial_path }}</textarea></label>
+  <p class="helptext">ChannelDex keeps references to these existing files. It does not copy them. Full-file hashing and output-profile validation happen only after preparation is approved.</p>
+  <p><button class="primary" name="action" value="inspect" type="submit">Inspect selected files</button></p>
+</form>
+<form method="post" class="list-card">{% csrf_token %}{% include "originating_station_field.html" %}
+  <h2>Reusable media without a file</h2>
+  <p>Record a station ID, PSA, filler, or other reusable item now and attach a file later.</p>
+  <button name="action" value="add_reusable" type="submit">Add reusable catalog item</button>
+</form>
+{% if recent_drafts %}<section><h2>Resume unfinished intake</h2>{% for item in recent_drafts %}<article class="list-card"><strong>{{ item.updated_at|date:'M j, Y g:i a' }}</strong> · {{ item.payload.rows|length }} item{{ item.payload.rows|length|pluralize }} · {{ item.state }} <a href="{% url 'connected-intake-draft' item.token %}">Resume</a></article>{% endfor %}</section>{% endif %}
+{% endif %}
+<script src="{% static 'connected_intake.js' %}" defer></script>
+{% endblock %}

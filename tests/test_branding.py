@@ -28,9 +28,10 @@ class BrandingAssetsTests(unittest.TestCase):
         self.assertNotIn('class="landing-hero"', dashboard)
 
     def test_configured_dashboard_exposes_core_workflow_links(self):
-        dashboard = (self.root / "pubtv" / "templates" / "dashboard.html").read_text(encoding="utf-8")
-        self.assertIn("{% url 'occurrence-create' %}", dashboard)
-        self.assertIn('class="timeline-list"', dashboard)
+        dashboard = (self.root / "pubtv" / "templates" / "work.html").read_text(encoding="utf-8")
+        self.assertIn("{% url 'connected-intake' %}", dashboard)
+        self.assertIn("{% url 'schedule' %}", dashboard)
+        self.assertIn('class="daily-work"', dashboard)
 
     def test_dashboard_landing_asset_is_copied_without_substitution(self):
         source = self.root / "creative" / "Finished Creative Assets" / "PNGs" / "ChannelDex Full Logo Color with Tagline.png"

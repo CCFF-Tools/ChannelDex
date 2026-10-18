@@ -88,8 +88,9 @@ class OccurrenceForm(forms.ModelForm):
         super().__init__(*args, **kwargs)
         self.fields["starts_at"].input_formats = ["%Y-%m-%dT%H:%M"]
         if station:
-            self.fields["show"].queryset = Show.objects.filter(station=station)
-            self.fields["episode"].queryset = Episode.objects.filter(show__station=station)
+            self.fields["show"].queryset = Show.objects.filter(station=station).filter(Q(archived_at__isnull=True) | Q(pk=self.instance.show_id))
+            self.fields["episode"].queryset = Episode.objects.filter(show__station=station).filter(
+                Q(archived_at__isnull=True, show__archived_at__isnull=True) | Q(pk=self.instance.episode_id))
             self.fields["asset"].queryset = MediaAsset.objects.filter(
                 Q(station=station) | Q(station__isnull=True, episode__show__station=station)
             )
@@ -99,6 +100,11 @@ class OccurrenceForm(forms.ModelForm):
     def clean(self):
         data = super().clean()
         item_type, show, episode, asset = data.get("item_type"), data.get("show"), data.get("episode"), data.get("asset")
+        if (data.get("status") == "planned" and data.get("starts_at")
+                and data["starts_at"] >= timezone.now()
+                and ((episode and (episode.archived_at or episode.show.archived_at))
+                     or (show and show.archived_at))):
+            self.add_error(None, "Restore this archived record before planning a future play.")
         if item_type == "episode":
             if not episode:
                 self.add_error("episode", "Choose an episode for an episode item.")
@@ -184,7 +190,9 @@ class AutomationPublicationForm(forms.Form):
         self.fields["target"].label = "Destination device"
         if not self.is_bound and self.fields["target"].queryset.count() == 1:
             self.initial["target"] = self.fields["target"].queryset.first()
-        self.fields["occurrences"].queryset = (Occurrence.objects.filter(station=station, status="planned").select_related("show", "episode").order_by("starts_at") if station else Occurrence.objects.none())
+        # Cancelled/replaced app plans may still need a reviewed delete on the
+        # device. Exact BIN identity is required by the publication service.
+        self.fields["occurrences"].queryset = (Occurrence.objects.filter(station=station).select_related("show", "episode").order_by("starts_at") if station else Occurrence.objects.none())
 
     def clean(self):
         data = super().clean()
@@ -317,7 +325,7 @@ class EpisodeForm(forms.ModelForm):
 
     class Meta:
         model = Episode
-        fields = ["show", "title", "producer", "intended_air_order", "intended_premiere_date", "runtime_seconds"]
+        fields = ["show", "title", "episode_number", "producer", "intended_air_order", "intended_premiere_date", "runtime_seconds"]
         labels = {
             "intended_air_order": "Planned episode order",
             "intended_premiere_date": "Planned premiere date",
@@ -512,8 +520,8 @@ class AssignmentForm(forms.ModelForm):
         self.fields["premiere_date"].required = True
         self.fields["show"].widget.attrs["data-cycle-show"] = "true"
         if station:
-            self.fields["show"].queryset = Show.objects.filter(station=station)
-            self.fields["episode"].queryset = Episode.objects.filter(show__station=station)
+            self.fields["show"].queryset = Show.objects.filter(station=station, archived_at__isnull=True)
+            self.fields["episode"].queryset = Episode.objects.filter(show__station=station, archived_at__isnull=True, show__archived_at__isnull=True)
     def clean(self):
         data = super().clean()
         show = data.get("show")

@@ -40,17 +40,18 @@ from opening. Developers can use [the developer guide](docs/DEVELOPMENT.md).
 
 ## Navigation at a glance
 
-The header links are **Today**, **Schedule**, **Shows**, **Media**,
-**History**, **Help**, and **Settings**. The queue strip below the header shows
+The header links are **Work**, **Schedule**, **Library**, **History**, **Settings**,
+and **Help**. The queue strip below the header shows
 active and attention counts.
 
-* [Today](http://127.0.0.1:8000/) — current-day summary and attention items.
+* [Work](http://127.0.0.1:8000/) — unfinished work prioritized by airtime, with
+  separate background processing and resumable intake.
 * [Schedule](http://127.0.0.1:8000/schedule/) — day, week, agenda, recurring times,
   review, and delivery.
-* [Shows](http://127.0.0.1:8000/shows/) — catalog, show workspaces, episodes, and
-  premiere planning.
-* [Media](http://127.0.0.1:8000/media/library/) — library, reusable assets, intake,
-  and contextual preparation for a destination.
+* [Library](http://127.0.0.1:8000/library/) — shows, episodes, reusable media,
+  search, upcoming airtimes, and premiere planning.
+* [Intake](http://127.0.0.1:8000/intake/) — the **Add media** action within Work
+  and Library, connecting file inspection, planning, and preparation.
 * [History](http://127.0.0.1:8000/history/) — plans, uploads, audit events, and
   airing evidence.
 * [Help](http://127.0.0.1:8000/help/) — in-app workflow instructions.
@@ -67,9 +68,9 @@ Django named URLs so navigation remains correct if a path changes.
    even if the Mac uses another timezone.
 2. In [Devices](http://127.0.0.1:8000/settings/devices/), add each playback or
    schedule target. The name should match the device's operational identity.
-3. In [Shows](http://127.0.0.1:8000/shows/), create a show, then add its producer,
-   episodes, and weekly times. Set exactly one active weekly time as the
-   premiere slot.
+3. In [Library](http://127.0.0.1:8000/library/), create a show, then add its producer,
+   and weekly times. Set exactly one active weekly time as the premiere slot,
+   then use **Add media** to inspect the first episode's existing video.
 4. Put pending episodes in producer-directed order. Lower **Planned episode
    order** numbers normally premiere first; producer direction wins.
 
@@ -77,28 +78,33 @@ Django named URLs so navigation remains correct if a path changes.
 
 ### Catalog and episode queue
 
-Use [Shows](http://127.0.0.1:8000/shows/) to filter by show type and sort by
-title, code, type, episode count, or earliest weekly time. A show workspace
-contains metadata, weekly times, episodes, and **Plan premieres**.
+Use [Library](http://127.0.0.1:8000/library/) to search by show, episode title,
+number, or filename. Filter by show and preparation status, or switch to reusable
+media. Episode rows show the premiere and next planned use. Episode details lead
+with every upcoming premiere and replay, in order, with publication status.
+Suggested dates are labeled and do not create a schedule until confirmed.
 
-Create a producer from **Shows → Add producer**. `First name` and `Last name`
+Create or edit a producer from the show or episode workspace. `First name` and `Last name`
 are the display identity. `Phone`, `Email`, and `Notes` are private metadata.
 `External membership number` is optional future association data; no lookup is
 performed.
 
-Create an episode with `Show`, `Title`, `Producer`, `Planned episode order`,
-`Planned premiere date`, and `Episode runtime`. Runtime accepts hours, minutes,
-and seconds: `00:27:30` means 27 minutes 30 seconds. The queue is intention,
-not an automatic schedule.
+Use **Add media** to select an existing video, inspect its facts, resolve its
+show and episode identity, and review proposed dates. Episode details allow
+correction of the title, number, producer, and intended order. Runtime accepts
+hours, minutes, and seconds: `00:27:30` means 27 minutes 30 seconds. The queue is
+intention, not an automatic schedule. No-file episode creation is an
+**Administration** exception.
 
-An episode detail page can add workflow milestones. Choose `Received`,
+Administration can add exceptional manual workflow milestones. Choose `Received`,
 `Downloaded`, `Encoded`, `Transferred`, or `Scheduled`; enter `Completed date
 and time`, `Actor`, `Provenance`, and `Notes`. A `Scheduled` milestone
 means a schedule revision exists, not that the episode aired.
 
 ### Plan premiere cycles
 
-Open **Shows → Plan premieres**. Choose `Show`, a concrete `Premiere date`
+Open an episode's **Review proposed dates**, or select episodes in Library.
+Choose `Show`, a concrete `Premiere date`
 (`2026-10-07`), and the `Episode for this premiere cycle`. The next pending
 episode is suggested. Choose an older episode explicitly when needed, or leave
 the episode blank for **No program**.
@@ -149,24 +155,25 @@ episode that exceeds its fixed slot; it does not shift, trim, add filler, or
 operate broadcast equipment. A complete plan is intentionally distinct from an
 actual-airing record.
 
-### Media library and optional preparation
+### Connected media intake and preparation
 
-Open [Media](http://127.0.0.1:8000/media/library/) to browse the active channel's
-episodes, media versions, and reusable assets. **Add media file** records a
-source or encoded rendition; the episode link is optional. Record its filename,
-local path, version, and runtime as known. This saves metadata without a device,
-copying media, running encoding, or starting a transfer. Missing runtime remains
-distinct from a recorded zero value.
+Open [Library](http://127.0.0.1:8000/library/) to browse the active channel's
+episodes, media versions, and reusable assets. **Add media** selects files at
+their existing locations and inspects them before review. Confirm editable
+identity suggestions, intended dates, and the configured destination. Resolve
+uncertain matches and duplicate files explicitly. A corrected file becomes a
+preserved version in its episode. Missing runtime remains distinct from zero.
+`Episode decision` chooses a new episode or an existing record; `Episode title`
+and `Episode number` remain editable during review.
 
-Use **Prepare for destination** when an episode version is ready for the
-optional device workflow. The [Preparation activity](http://127.0.0.1:8000/media/preparation/)
-workspace asks for `Show` and `Destination device`, and accepts a file chooser
-or an absolute local path. Choose the existing `Episode`, or enter a
-`New episode title`, and state whether the file needs encoding or is already
-encoded. Runtime uses hours, minutes, and seconds. Review the files, destination,
-and proposed work before confirming. Confirmation may queue preparation and
-transfer; attended schedule activation remains separate. Preparing media does
-not schedule a premiere or prove airing.
+One intake can contain several shows and files. Its saved draft retains choices
+and failed file selections for retry. Review the exact plan and preparation
+before confirming; planning can proceed while preparation runs. With no
+configured destination, save the records and plans and finish preparation later.
+The [Preparation activity](http://127.0.0.1:8000/media/preparation/) workspace
+shows jobs and recovery actions. Review pending schedule changes under
+**Schedule → Publish** before activating and verifying them. Preparation,
+transfer, device verification, and actual airing are separate facts.
 
 Destination choices belong to the selected **Working channel**. A device name
 is not a channel selector. When several destinations are available, select the
@@ -208,8 +215,10 @@ Changing an occurrence, assignment, recurrence, selected asset, or destination
 after preview makes the review stale; return to **Change selections** and create
 a fresh review. Review and confirmation do not upload, activate, or prove airing.
 
-Open **Schedule → Schedule delivery** for the attended, qualification-gated
-UltraNEXUS workflow. In the advanced selected-changes publication form, the
+Open **Schedule → Publish** for pending changes and the attended,
+qualification-gated UltraNEXUS workflow. Supported episode and reusable-media
+entries appear together; unsupported entries retain their handling requirement.
+In the selected-changes publication form, the
 fields are `Target` (the destination device), `Occurrences`, `Reconciliation
 mode`, `Workflow mode`, and the hidden `Requested activation at`. A full-week workflow
 requires reconciliation mode `authoritative`; `selected_changes` is the normal
@@ -220,9 +229,9 @@ For each reviewed publication change, `Change` is one of `Add`, `Move`,
 `Replace`, or `Delete`. `Source BIN slot` is an integer from `0` through `2999`.
 `Source record SHA-256` is exactly 64 hexadecimal characters. For `Move`,
 `Replace`, or `Delete`, it identifies the source record; `Add` has no source
-record requirement. Staging/activation asks for a `Candidate SHA-256` and the
-known-good hash shown by the page. Candidate and known-good values are exact
-64-character SHA-256 hashes, not filenames.
+record requirement. Staging and activation bind confirmation to the exact
+candidate and known-good artifact hashes already shown by the page; the operator
+does not retype those hashes.
 
 The independent controller evidence file is JSON with required keys
 `target_id`, `artifact_sha256`, `schedule_path`, `status` (must be

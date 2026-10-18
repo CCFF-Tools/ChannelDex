@@ -2,6 +2,7 @@ from datetime import date, time
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
+import uuid
 
 from django.test import TestCase
 
@@ -50,23 +51,23 @@ class GuidedEncodedDeliveryTests(TestCase):
                 asset=asset, file_path=str(path))
             self.assertEqual(delivery.asset_id, asset.pk)
             self.assertEqual(MediaAsset.objects.filter(episode=episode).count(), 1)
-            response = self.client.get(f"/schedule/guided-delivery/?asset={asset.pk}")
-            self.assertContains(response, f'name="asset" value="{asset.pk}"')
-            self.assertContains(response, self.target.destination_label)
+            response = self.client.get(f"/schedule/publish/?guided={delivery.pk}")
+            self.assertContains(response, "recorded.mxf")
+            self.assertContains(response, self.target.name)
 
     def test_guided_asset_context_is_workspace_scoped(self):
         other = Station.objects.create(name="Other")
         foreign_show = Show.objects.create(station=other, title="Foreign", code="foreign")
         foreign_episode = Episode.objects.create(show=foreign_show, title="Foreign")
         foreign = MediaAsset.objects.create(station=other, episode=foreign_episode, kind="encoded", file_name="foreign.mxf", version="v1")
-        response = self.client.get(f"/schedule/guided-delivery/?asset={foreign.pk}")
+        response = self.client.get("/schedule/publish/")
         self.assertNotContains(response, f'name="asset" value="{foreign.pk}"')
 
     def test_invalid_guided_start_preserves_scoped_form_values(self):
         episode = Episode.objects.create(show=self.show, title="Keep me")
         asset = MediaAsset.objects.create(station=self.station, episode=episode, kind="encoded",
             file_name="missing.mxf", version="v1", local_path="/missing/keep-me.mxf")
-        token = self.client.get("/schedule/guided-delivery/").context["submission_token"]
+        token = str(uuid.uuid4())
         response = self.client.post("/schedule/guided-delivery/", {
             "action": "start", "submission_token": token, "target": self.target.pk,
             "show": self.show.pk, "episode": episode.pk, "asset": asset.pk,
@@ -100,7 +101,7 @@ class GuidedEncodedDeliveryTests(TestCase):
             })
 
     def test_routed_entry_is_discoverable_and_confirmation_is_idempotent(self):
-        self.assertContains(self.client.get("/schedule/delivery/"), "Guided already-encoded delivery")
+        self.assertRedirects(self.client.get("/schedule/delivery/"), "/schedule/publish/", fetch_redirect_response=False)
         with TemporaryDirectory() as directory:
             path = Path(directory) / "episode.mxf"
             path.write_bytes(b"encoded bytes")
@@ -108,7 +109,7 @@ class GuidedEncodedDeliveryTests(TestCase):
                 "action": "start", "target": self.target.pk, "show": self.show.pk,
                 "episode_title": "One", "file_path": str(path),
             })
-            self.assertRedirects(response, "/schedule/guided-delivery/")
+            self.assertRedirects(response, "/schedule/guided-delivery/", fetch_redirect_response=False)
             delivery = GuidedEpisodeDelivery.objects.get()
             first = confirm_guided_intake(delivery, premiere_date=date(2026, 10, 7))
             second = confirm_guided_intake(delivery, premiere_date=date(2026, 10, 7))
@@ -156,7 +157,7 @@ class GuidedDeliveryIntegrationTests(TestCase):
         self.assertEqual(self.guided.candidate_hash, self.candidate_hash)
         self.assertEqual(self.guided.current_hash, self.base_hash)
         pull.assert_called_once()
-        response = self.client.get("/schedule/guided-delivery/")
+        response = self.client.get(f"/schedule/publish/?guided={self.guided.pk}")
         self.assertContains(response, "Exact controller change review")
         self.assertContains(response, "Approve changes and deliver now")
 
@@ -216,7 +217,7 @@ class GuidedDeliveryIntegrationTests(TestCase):
         self.assertEqual(job.status, "succeeded")
         self.assertEqual(self.guided.state, "verification_pending")
         self.assertEqual(self.guided.activation_count, 1)
-        response = self.client.get("/schedule/guided-delivery/")
+        response = self.client.get(f"/schedule/publish/?guided={self.guided.pk}")
         self.assertContains(response, "Independent verification required")
         self.assertContains(response, self.base_hash)
 
@@ -261,7 +262,7 @@ class GuidedDeliveryIntegrationTests(TestCase):
                 "action": "verify_activation", "delivery": self.guided.pk,
                 "evidence_file": "/private/evidence.json", "confirm_observation": "on",
             })
-        self.assertRedirects(response, "/schedule/guided-delivery/")
+        self.assertRedirects(response, f"/schedule/publish/?guided={self.guided.pk}")
         observe.assert_called_once_with(operation.pk, evidence_file="/private/evidence.json")
         self.guided.refresh_from_db()
         self.assertEqual(self.guided.state, "verified")

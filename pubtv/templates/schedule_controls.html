@@ -7,8 +7,7 @@
   </nav>
   <nav class="schedule-workflow-actions" aria-label="Schedule workflow">
     <a class="button-link" href="{% url 'week-review' %}?date={{ selected_date|date:'Y-m-d' }}">Review week</a>
-    <a class="button-link" href="{% url 'schedule-prepare' %}?date={{ selected_date|date:'Y-m-d' }}">Review cycle delivery</a>
-    <a class="button-link" href="{% url 'schedule-delivery' %}?date={{ selected_date|date:'Y-m-d' }}">Schedule delivery</a>
+    <a class="button-link" href="{% url 'schedule-publish' %}?date={{ selected_date|date:'Y-m-d' }}">Review pending changes</a>
   </nav>
   <nav class="schedule-toolbar-actions" aria-label="Current schedule view actions">
     {% if view_mode %}

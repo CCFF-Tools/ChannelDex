@@ -1,5 +1,22 @@
 # Architecture and scaffolding proposal
 
+## Accepted workspace boundary (2026-10-17)
+
+The owner-facing application is organized around Work, Schedule, and Library.
+Library is the canonical read and search surface for shows, episodes, and
+reusable media; Intake is the canonical connected media entry point; and
+Schedule → Publish is the canonical publication review surface. Legacy GET
+paths for `/shows/`, `/episodes/`, `/media/library/`, `/assets/new/`,
+`/media/`, `/prepare/`, `/automation/`, `/schedule/delivery/`, and guided
+delivery redirect to their canonical workspace. Legacy POST contracts remain
+accepted so existing forms and local workflows are not broken.
+
+Library and History are station-scoped. Archived shows and episodes are
+excluded from active search and pending queues, but remain recoverable with
+their provenance. Archive restoration never replans a schedule. Hardware
+qualification and airing remain unverified until separately recorded facts
+support them.
+
 ## Accepted interaction architecture (2026-09-17)
 
 The application remains one loopback Django service, but its owner-facing

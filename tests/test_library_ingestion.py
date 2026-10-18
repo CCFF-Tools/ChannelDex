@@ -3,6 +3,7 @@ import json
 import os
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import Mock, patch
@@ -13,14 +14,30 @@ from django.test import Client, TestCase, override_settings
 from pubtv.operations.automation import _establish_library_inputs, process_preparation_job
 from pubtv.operations.media_identity import asset_claim
 from pubtv.operations.media_queue import (
-    IntakeValidationError, begin_relink_review, confirm_intake_review,
-    confirm_relink_review, process_relink_review, relink_review_result,
-    retry_media_queue_item, validate_rows,
+    IntakeValidationError,
+    begin_relink_review,
+    confirm_intake_review,
+    confirm_relink_review,
+    process_relink_review,
+    relink_review_result,
+    retry_media_queue_item,
+    validate_rows,
 )
 from pubtv.operations.models import (
-    AuditEvent, Device, Episode, MediaAsset, MediaIntakeReview, MediaRelinkReview,
-    PreparationBatch, PreparationBatchItem, PreparationJob, ResearchGate,
-    Show, Station, UltraNexusTargetSettings, WeeklyEpisodeAssignment,
+    AuditEvent,
+    Device,
+    Episode,
+    MediaAsset,
+    MediaIntakeDraft,
+    MediaIntakeReview,
+    PreparationBatch,
+    PreparationBatchItem,
+    PreparationJob,
+    ResearchGate,
+    Show,
+    Station,
+    UltraNexusTargetSettings,
+    WeeklyEpisodeAssignment,
 )
 from pubtv.ultranexus.ftp import TransferResult
 
@@ -118,14 +135,21 @@ class LibraryIngestionTests(TestCase):
         response = self.client.post("/media/preparation/", {
             "action": "review_intake", "show": self.show.pk, "episode": self.episode.pk,
             "asset": asset.pk, "target": self.device.pk,
+            "submission_token": str(uuid.uuid4()),
             "draft_rows": json.dumps([self.row(
                 episode_id=str(self.episode.pk), new_title="", episode_number="",
                 runtime_seconds="", encoding_mode="already_encoded",
             )]),
         })
         self.assertEqual(response.status_code, 200)
-        batch, created = confirm_intake_review(MediaIntakeReview.objects.latest("pk"))
-        self.assertTrue(created)
+        batch = response.context["connected"]["existing_batch_review"]
+        confirmed = self.client.post("/media/preparation/", {
+            "action": "confirm_existing_asset", "batch_id": batch.pk,
+            "submission_token": str(batch.submission_token),
+        })
+        self.assertEqual(confirmed.status_code, 302)
+        batch.refresh_from_db()
+        self.assertEqual(batch.status, "approved")
         self.assertEqual(batch.items.get().asset_id, asset.pk)
         self.assertEqual(MediaAsset.objects.count(), 1)
 
@@ -172,10 +196,16 @@ class LibraryIngestionTests(TestCase):
         response = self.client.post("/media/", {"action": "confirm_intake", "review_token": review.token})
         self.assertEqual(response.status_code, 400)
         row = response.context["connected"]["draft_rows"][0]
-        self.assertEqual(row["source_path"], str(self.source)); self.assertEqual(row["new_title"], "Editable title")
+        self.assertEqual(row["source_path"], str(self.source))
+        self.assertEqual(row["new_title"], "Editable title")
         self.assertEqual(row["encoding_mode"], "needs_encoding")
         self.assertEqual(row["episode_id"], "new")
-        self.assertEqual(row["runtime_seconds"], "90"); self.assertEqual(row["episode_number"], "22")
+        self.assertEqual(row["runtime_seconds"], "90")
+        self.assertEqual(row["episode_number"], "22")
+        review.refresh_from_db()
+        self.assertEqual(review.status, "pending")
+        self.assertEqual(review.payload["rows"][0]["new_title"], "Editable title")
+        self.assertEqual(review.payload["rows"][0]["path"], str(self.source))
         self.assertFalse(PreparationBatch.objects.exists())
 
     def test_accepted_intake_clears_browser_draft_only_after_success(self):
@@ -183,20 +213,21 @@ class LibraryIngestionTests(TestCase):
         response = self.client.post("/media/", {"action": "confirm_intake", "review_token": review.token})
         self.assertEqual(response.status_code, 302)
         self.assertEqual(response.cookies["media_intake_accepted"].value, "1")
-        response = self.client.get("/media/")
-        self.assertTrue(response.context["connected"]["accepted"])
-        self.assertEqual(response.cookies["media_intake_accepted"]["max-age"], 0)
+        self.assertEqual(response.url, "/media/")
+        review.refresh_from_db()
+        self.assertEqual(review.status, "confirmed")
+        self.assertTrue(PreparationBatch.objects.filter(submission_token=review.token).exists())
 
     def test_only_unambiguous_show_and_destination_defaults(self):
-        response = self.client.get("/media/")
-        self.assertEqual(response.context["connected"]["show"], self.show)
-        self.assertEqual(response.context["connected"]["target"], self.device)
+        response = self.client.get(f"/intake/?show={self.show.pk}&target={self.device.pk}")
+        self.assertEqual(response.context["initial"]["show"], self.show)
+        self.assertEqual(response.context["initial"]["target"], self.device)
         Show.objects.create(station=self.station, title="Other", code="other")
         other = Device.objects.create(name="Other")
         UltraNexusTargetSettings.objects.create(target=other, is_current=True)
-        response = self.client.get("/media/")
-        self.assertIsNone(response.context["connected"]["show"])
-        self.assertIsNone(response.context["connected"]["target"])
+        response = self.client.get("/intake/")
+        self.assertIsNone(response.context["initial"]["show"])
+        self.assertIsNone(response.context["initial"]["target"])
 
     def test_worker_establishes_stable_input_identity_and_measured_runtime(self):
         batch, item = self.accept([self.row(runtime_seconds="")])
@@ -252,12 +283,12 @@ class LibraryIngestionTests(TestCase):
 
     def test_library_search_number_and_readiness_are_independent_of_availability(self):
         asset = MediaAsset.objects.create(episode=self.episode, kind="source", file_name="missing.mp4", local_path="/missing/video.mp4")
-        response = self.client.get("/media/library/?q=17&readiness=pending")
+        response = self.client.get("/library/?q=17&readiness=pending")
         self.assertEqual(len(response.context["rows"]), 1)
         row = response.context["rows"][0]; self.assertFalse(row["available"]); self.assertFalse(row["prepared"])
         self.assertEqual(row["assets"][0].pk, asset.pk)
         self.assertContains(response, 'data-plan-episode=')
-        self.assertEqual(len(self.client.get("/media/library/?readiness=ready").context["rows"]), 0)
+        self.assertEqual(len(self.client.get("/library/?readiness=ready").context["rows"]), 0)
 
     def test_available_filter_applies_to_reusable_assets_with_present_or_missing_paths(self):
         present = MediaAsset.objects.create(
@@ -268,7 +299,7 @@ class LibraryIngestionTests(TestCase):
             station=self.station, file_name="missing-psa.mxf", kind="encoded", version="v1",
             local_path=str(self.root / "missing-psa.mxf"),
         )
-        response = self.client.get("/media/library/?readiness=available")
+        response = self.client.get("/library/?view=reusable&readiness=available")
         self.assertContains(response, present.file_name)
         self.assertNotContains(response, missing.file_name)
 
@@ -362,8 +393,8 @@ class LibraryIngestionTests(TestCase):
         with asset_claim(asset.pk):
             with self.assertRaisesMessage(ValueError, "active preparation or review"):
                 begin_relink_review(asset.pk, str(self.source))
-            with self.assertRaisesMessage(ValueError, "active preparation or review"):
-                with asset_claim(asset.pk): pass
+            with self.assertRaisesMessage(ValueError, "active preparation or review"), asset_claim(asset.pk):
+                pass
         # The lock is reusable after release.
         with asset_claim(asset.pk): pass
 
@@ -372,21 +403,51 @@ class LibraryIngestionTests(TestCase):
         lock_path = self.root / "ultranexus" / "asset-claims" / f"{asset.pk}.lock"
         script = "import fcntl,sys; h=open(sys.argv[1], 'a+'); fcntl.flock(h.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)"
         with asset_claim(asset.pk):
-            result = subprocess.run([sys.executable, "-c", script, str(lock_path)], capture_output=True, timeout=5)
+            result = subprocess.run([sys.executable, "-c", script, str(lock_path)], capture_output=True, timeout=5, check=False)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn(b"BlockingIOError", result.stderr)
-        result = subprocess.run([sys.executable, "-c", script, str(lock_path)], capture_output=True, timeout=5)
+        result = subprocess.run([sys.executable, "-c", script, str(lock_path)], capture_output=True, timeout=5, check=False)
         self.assertEqual(result.returncode, 0)
 
     def test_mismatch_intake_has_fresh_identity_and_runtime_not_old_evidence(self):
         asset = self.relink_asset("different")
-        review = begin_relink_review(asset.pk, str(self.source)); process_relink_review(review)
-        response = self.client.get(relink_review_result(review)["new_intake_url"])
-        row = response.context["connected"]["draft_rows"][0]
-        self.assertEqual(row["episode_id"], str(self.episode.pk))
-        self.assertEqual(row["runtime_seconds"], ""); self.assertEqual(row["encoding_mode"], "")
-        row["encoding_mode"] = "needs_encoding"
-        new_review = self.review([row]); batch, _ = confirm_intake_review(new_review)
+        candidate = self.root / "replacement.mp4"
+        candidate.write_bytes(self.source.read_bytes())
+        review = begin_relink_review(asset.pk, str(candidate)); process_relink_review(review)
+        response = self.client.get(relink_review_result(review)["new_intake_url"], follow=True)
+        self.assertEqual(response.redirect_chain[-1][0].split("?", 1)[0], "/intake/")
+        self.assertEqual(response.context["initial"]["show"], self.show)
+        self.assertEqual(response.context["initial"]["episode"], self.episode)
+        self.assertEqual(response.context["initial_path"], str(candidate))
+
+        inspected = self.client.post("/intake/", {
+            "action": "inspect", "paths": str(candidate), "show": self.show.pk,
+            "episode": self.episode.pk, "target": self.device.pk,
+            "originating_station": self.station.pk,
+        })
+        self.assertEqual(inspected.status_code, 302)
+        draft = MediaIntakeDraft.objects.get()
+        row = draft.payload["rows"][0]
+        self.assertEqual(row["metadata"]["episode_id"], self.episode.pk)
+        self.assertNotIn("runtime_seconds", row["file"])
+        resolved = self.client.post(inspected.url, {
+            "action": "resolve", "revision": draft.revision,
+            "originating_station": self.station.pk,
+            "kind_1": "episode", "show_id_1": self.show.pk,
+            "episode_id_1": self.episode.pk, "episode_title_1": self.episode.title,
+            "episode_number_1": "", "target_id_1": self.device.pk,
+            "encoding_mode_1": "needs_encoding", "duplicate_action_1": "",
+            "premiere_date_1": "",
+        })
+        self.assertEqual(resolved.status_code, 302)
+        draft.refresh_from_db()
+        self.assertEqual(draft.payload["step"], "device_review")
+        confirmed = self.client.post(inspected.url, {
+            "action": "confirm", "revision": draft.revision,
+            "originating_station": self.station.pk,
+        })
+        self.assertEqual(confirmed.status_code, 302)
+        batch = PreparationBatch.objects.get()
         replacement = batch.items.get().asset
         self.assertNotEqual(replacement.pk, asset.pk); self.assertEqual(replacement.content_identity, "")
         self.assertIsNone(replacement.runtime_seconds); self.assertFalse(replacement.ultranexus_bindings.exists())

@@ -3,12 +3,12 @@
 {% block content %}
 <div class="page-heading">
   <p class="eyebrow">Schedule / Guided delivery</p>
-  <h1>Deliver an already-encoded episode</h1>
+  <h1>{% if resume_only %}Continue saved episode delivery{% else %}Deliver an already-encoded episode{% endif %}</h1>
   <p class="lede">For the selected UltraNEXUS destination, ChannelDex verifies the exact file, checks destination compatibility, transfers it, and requires review before schedule activation.</p>
   <p><a class="button-link" href="{% url 'schedule-delivery' %}">Schedule delivery</a></p>
 </div>
 
-<section class="list-card">
+{% if not resume_only %}<section class="list-card">
   <h2>Start intake review</h2>
   <form method="post" class="stacked-form">
     {% csrf_token %}{% include "originating_station_field.html" %}
@@ -24,7 +24,7 @@
     <span id="guided-file-status" class="helptext"></span>
     <button class="primary" type="submit">Review encoded intake</button>
   </form>
-</section>
+</section>{% endif %}
 
 <section class="list-card">
   <h2>Guided deliveries</h2>

@@ -1,5 +1,18 @@
 # Decisions and owner review
 
+## Workflow and records redesign (accepted 2026-10-16)
+
+The owner approved the complete [workflow and records redesign](WORKFLOW_REDESIGN.md).
+Work, Schedule, and Library become the normal workspaces. File-first intake uses
+existing local media, inspects before review, suggests editable identification
+and premiere/replay dates, and connects preparation with reviewed publication.
+Episode pages lead with upcoming dates and times. Single-play exceptions survive
+cycle edits; recurring changes preview affected future plays from an effective
+date. Records support producer/episode-number maintenance and recoverable archive.
+This supersedes catalog-only intake as the normal path, not the requirement to
+allow planning before media is ready or to retain provenance and device gates.
+Implementation approval does not itself establish physical-device qualification.
+
 ## UltraNEXUS automation decision (accepted 2026-09-29)
 
 The owner accepted two approvals: media preparation and verified transfer first,

@@ -41,19 +41,21 @@ class ReservedScheduleViewTests(TestCase):
             duration_seconds=1800,
         )
 
-        response = self.client.get(reverse("show-list"))
+        response = self.client.get(reverse("library"))
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "2 episodes")
-        self.assertContains(response, "Weekly reserved times")
-        self.assertContains(response, "Wednesday")
-        self.assertContains(response, "7:30 p.m.")
+        self.assertContains(response, f'/shows/{self.show.pk}/')
+        detail = self.client.get(f'/shows/{self.show.pk}/')
+        self.assertContains(detail, 'Weekly times')
+        self.assertContains(detail, 'Wednesday')
+        self.assertContains(detail, '7:30 p.m.')
 
     def test_show_catalog_can_sort_by_episode_count(self):
         other = Show.objects.create(station=self.station, title="A Smaller Show", code="smaller")
         Episode.objects.create(show=self.show, title="Episode 1")
         Episode.objects.create(show=self.show, title="Episode 2")
-        response = self.client.get(reverse("show-list"), {"sort": "episodes"})
+        response = self.client.get(reverse("library"), {"sort": "episodes"})
         body = response.content.decode()
         self.assertLess(body.index("A Smaller Show"), body.index("Neighborhood Report"))
 

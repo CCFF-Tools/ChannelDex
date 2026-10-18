@@ -44,12 +44,13 @@ def file_metadata(path):
     return stat.st_size, stat.st_mtime_ns
 
 
-def measured_runtime(path, *, probe_runner=None, executable="ffprobe", runner=subprocess.run):
+def measured_runtime(path, *, probe_runner=None, executable="ffprobe", runner=subprocess.run,
+                     timeout_seconds=30):
     """Best-effort source runtime; source need not satisfy output profile."""
     try:
         raw = probe_runner(str(path)) if probe_runner else runner(
             (executable, "-v", "error", "-show_format", "-show_streams", "-of", "json", str(path)),
-            check=False, capture_output=True, text=True, timeout=30)
+            check=False, capture_output=True, text=True, timeout=max(1, int(timeout_seconds)))
         if hasattr(raw, "returncode"):
             if raw.returncode:
                 return None

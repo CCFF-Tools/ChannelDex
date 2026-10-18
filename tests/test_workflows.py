@@ -41,9 +41,8 @@ class SetupAndContentWorkflowTests(TestCase):
         self.assertContains(dashboard, "Open station settings")
 
         station = Station.objects.create(name="PUB-TV")
-        shows = client.get("/shows/")
-        self.assertContains(shows, 'href="/shows/new/"')
-        self.assertContains(shows, "Create the first show")
+        shows = client.get("/library/")
+        self.assertContains(shows, "Library")
 
         create_show = client.get("/shows/new/")
         self.assertContains(create_show, "PUB-TV")
@@ -122,7 +121,7 @@ class SetupAndContentWorkflowTests(TestCase):
         show = Show.objects.create(station=station, title="Street Talk", code="street-talk")
         episode = Episode.objects.create(show=show, title="Episode 1")
         response = Client().get(f"/episodes/{episode.pk}/")
-        self.assertContains(response, f"/assignments/new/?show={show.pk}&amp;episode={episode.pk}")
+        self.assertContains(response, f"/shows/{show.pk}/premieres/?episode_ids={episode.pk}")
         self.assertNotContains(response, f"/occurrences/new/?show={show.pk}&amp;episode={episode.pk}")
 
     def test_show_catalog_and_scheduled_occurrences_link_to_editing_and_episode(self):
@@ -135,11 +134,11 @@ class SetupAndContentWorkflowTests(TestCase):
             planned_duration_seconds=1800,
         )
 
-        catalog = Client().get("/shows/")
+        catalog = Client().get("/library/")
         detail = Client().get(f"/shows/{show.pk}/")
 
-        self.assertContains(catalog, f"/shows/{show.pk}/edit/")
-        self.assertContains(catalog, "Manage episodes")
+        self.assertContains(catalog, f"/shows/{show.pk}/")
+        self.assertContains(catalog, "View episodes")
         self.assertContains(detail, "Episode 42")
         self.assertContains(detail, f"/episodes/{episode.pk}/edit/")
 
@@ -240,7 +239,7 @@ class SchedulingWorkflowTests(TestCase):
         self.assertIn("Monday overlap", body)
         self.assertNotIn("Tuesday only", body)
         dashboard = Client().get("/?date=2026-01-05").content.decode()
-        self.assertIn("Overlap", dashboard)
+        self.assertIn("overlaps", dashboard)
         self.assertNotEqual(first.pk, 0)
 
     def test_week_clips_occurrence_crossing_into_monday(self):

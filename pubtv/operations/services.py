@@ -1,7 +1,7 @@
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 from django.db import transaction, connection
-from django.db.models import F
+from django.db.models import F, Q
 from django.core.exceptions import ValidationError
 from django.utils import timezone
 from django.core.signing import TimestampSigner, BadSignature
@@ -13,8 +13,10 @@ def pending_episode_sort_key(episode):
     missing_receipt = datetime.max.replace(tzinfo=ZoneInfo("UTC"))
     return (episode.intended_air_order is None, episode.intended_air_order or 0, episode.received_at or missing_receipt, episode.pk)
 
-def audit(action, entity, obj=None, summary="", actor="owner"):
-    return AuditEvent.objects.create(actor=actor, action=action, entity=entity, entity_id=getattr(obj, "pk", None), revision=getattr(obj, "revision", None), summary=summary)
+def audit(action, entity, obj=None, summary="", actor="owner", station=None):
+    """Append a station-scoped record while retaining legacy call sites."""
+    from .audit_scope import station_id_for
+    return AuditEvent.objects.create(station_id=station.pk if station else station_id_for(obj), actor=actor, action=action, entity=entity, entity_id=getattr(obj, "pk", None), revision=getattr(obj, "revision", None), summary=summary)
 
 def confirm_preparation_fact(preparation: Preparation, fact, value, actor="owner", provenance="manual", expected_revision=None):
     """Record one of the six checklist facts with independent provenance."""
@@ -127,7 +129,9 @@ def next_premiere_date(show, after=None):
 
 
 def suggested_pending_episode(show):
-    return show.episodes.filter(status="pending").exclude(
+    if show.archived_at:
+        return None
+    return show.episodes.filter(status="pending", archived_at__isnull=True).exclude(
         weeklyepisodeassignment__show=show,
         weeklyepisodeassignment__selection_type="premiere",
     ).order_by(
@@ -142,12 +146,19 @@ def suggested_pending_episode(show):
 
 def occurrences_for_cycle(assignment):
     """Build one premiere-to-premiere cycle, independent of Monday calendar boundaries."""
+    if (
+        assignment.show.archived_at
+        or assignment.selection_type == "none"
+        or not assignment.episode
+        or assignment.episode.archived_at
+    ):
+        return []
     premiere_date = assignment.premiere_date
     if not premiere_date:
         premiere_slot = assignment.show.slots.filter(is_premiere=True).order_by("pk").first()
         premiere_date = assignment.week_start + timedelta(days=premiere_slot.weekday if premiere_slot else 0)
     premiere_slot = active_premiere_slot(assignment.show, premiere_date)
-    if not premiere_slot or assignment.selection_type == "none" or not assignment.episode:
+    if not premiere_slot:
         return []
     tz = ZoneInfo(assignment.show.station.timezone)
     cycle_start = datetime.combine(premiere_date, premiere_slot.start_time, tzinfo=tz)
@@ -174,6 +185,7 @@ def occurrences_for_cycle(assignment):
                 recurrence_slot=slot, schedule_role=role, item_type="episode",
                 label=assignment.show.title, starts_at=starts_at,
                 planned_duration_seconds=assignment.show.slot_duration_seconds or slot.duration_seconds,
+                cycle_key=f"assignment:{assignment.pk}:slot:{slot.pk}:date:{day.isoformat()}",
             ))
     return sorted(result, key=lambda item: item.starts_at)
 
@@ -183,11 +195,17 @@ def materialize_assignment(assignment):
     """Create all occurrences for an assignment, validating each before saving."""
     assignment.full_clean()
     for occurrence in occurrences_for_cycle(assignment):
+        # cycle_key is retained by moved/cancelled exceptions.  The fallback
+        # query protects older rows created before the key was introduced.
         if Occurrence.objects.filter(
             weekly_assignment=assignment,
-            starts_at=occurrence.starts_at,
-            status="planned",
-        ).exists():
+            cycle_key=occurrence.cycle_key,
+        ).filter(Q(status='planned') | Q(is_exception=True)).exists() or Occurrence.objects.filter(
+            weekly_assignment=assignment,
+            recurrence_slot=occurrence.recurrence_slot,
+        ).filter(
+            Q(starts_at=occurrence.starts_at) | Q(is_exception=True)
+        ).filter(Q(status='planned') | Q(is_exception=True)).exists():
             continue
         occurrence.full_clean()
         occurrence.save(skip_revision=True)
@@ -201,13 +219,16 @@ def ensure_carry_forward_week(station, week_start):
     if not station or not station.carry_forward_unassigned_episodes or week_start < current_week:
         return []
     created = []
-    for show in station.shows.prefetch_related("slots", "weekly_assignments").order_by("pk"):
+    for show in station.shows.filter(archived_at__isnull=True).prefetch_related("slots", "weekly_assignments").order_by("pk"):
         if show.weekly_assignments.filter(week_start=week_start).exists():
             continue
         prior = show.weekly_assignments.filter(week_start__lt=week_start).order_by("-week_start", "-pk").first()
         # An explicit no-program cycle is a stop signal; never jump over it to
         # revive an older episode.
-        if not prior or prior.selection_type == "none" or not prior.episode_id:
+        if (
+            not prior or prior.selection_type == "none" or not prior.episode_id
+            or prior.episode.archived_at is not None
+        ):
             continue
         premiere_dates = []
         for offset in range(7):

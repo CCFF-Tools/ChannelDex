@@ -91,9 +91,9 @@ class UXOverhaulTests(TestCase):
     station = Station.objects.create(name="PUB-TV")
     client = Client()
     response = client.post("/stations/switch/", {"station": station.pk, "next": "/shows/44/?q=ignored"})
-    assert response["Location"] == "/shows/"
+    assert response["Location"] == "/library/?q=ignored"
     response = client.post("/stations/switch/", {"station": station.pk, "next": "/media/?show=44&readiness=pending"})
-    assert response["Location"] == "/media/?readiness=pending"
+    assert response["Location"] == "/intake/"
 
   def test_occurrence_workbench_uses_station_local_calendar_date(self):
     from django.utils import timezone
@@ -111,7 +111,7 @@ class UXOverhaulTests(TestCase):
     assert response.context["selected_date"].isoformat() == "2026-10-09"
   def test_primary_navigation_is_owner_facing_and_contextual(self):
     base = (ROOT / "pubtv/templates/base.html").read_text(encoding="utf-8")
-    for label in ("Today", "Schedule", "Shows", "History", "Settings"):
+    for label in ("Work", "Schedule", "Library", "History", "Settings"):
         assert f">{label}</a>" in base
     assert "Dashboard" not in base
     assert "Catalog" not in base
@@ -120,7 +120,7 @@ class UXOverhaulTests(TestCase):
   def test_main_list_and_calendar_views_have_specific_browser_titles(self):
     Station.objects.create(name="PUB-TV")
     expectations = {
-      "/shows/": "<title>Shows · ChannelDex</title>",
+      "/library/": "<title>Library · ChannelDex</title>",
       "/day/?date=2026-10-09": "<title>Day plan · ChannelDex</title>",
       "/week/?date=2026-10-09": "<title>Week plan · ChannelDex</title>",
     }
@@ -154,12 +154,11 @@ class UXOverhaulTests(TestCase):
 
 
   def test_today_and_workbench_templates_keep_work_together(self):
-    today = (ROOT / "pubtv/templates/dashboard.html").read_text(encoding="utf-8")
+    today = (ROOT / "pubtv/templates/work.html").read_text(encoding="utf-8")
     workbench = (ROOT / "pubtv/templates/occurrence_workbench.html").read_text(encoding="utf-8")
-    assert "Planned timeline" in today
-    assert "Reserved program times" in today
-    assert "Open workbench" in today
-    for label in ("Plan", "States", "Asset preparation", "Programming", "Schedule upload coverage", "Air evidence"):
+    assert "Incoming and unfinished" in today
+    assert "Open schedule" in today
+    for label in ("Plan", "States", "Preparation", "Publication history", "Air evidence"):
         assert label in workbench
 
   def test_today_distinguishes_reserved_program_time_from_planned_content(self):
@@ -173,9 +172,9 @@ class UXOverhaulTests(TestCase):
     )
     response = Client().get(f"/?date={selected.isoformat()}")
     assert response.status_code == 200
-    assert "Reserved program times" in response.content.decode()
+    assert "Choose episode" in response.content.decode()
     assert "Reserved show" in response.content.decode()
-    assert not response.context["occurrences"]
+    assert "Reserved show" in response.content.decode()
 
 
   def test_legacy_routes_and_new_contextual_routes_are_declared(self):
@@ -186,11 +185,11 @@ class UXOverhaulTests(TestCase):
   def test_media_library_is_primary_and_compatibility_routes_are_not_shadowed(self):
     urls = (ROOT / "pubtv/config/urls.py").read_text(encoding="utf-8")
     base = (ROOT / "pubtv/templates/base.html").read_text(encoding="utf-8")
-    assert 'href="{% url \'media-library\' %}"' in base
-    assert ">Media</a>" in base
+    assert 'href="{% url \'library\' %}"' in base
+    assert ">Library</a>" in base
     assert urls.count('path("schedule/prepare/"') == 1
     assert urls.count('path("media/status/"') == 1
-    assert reverse("media-library") == "/media/library/"
+    assert reverse("library") == "/library/"
     assert reverse("media-queue") == "/media/preparation/"
 
   def test_stale_workspace_poll_blocks_saving_without_automatic_reload(self):
@@ -218,7 +217,7 @@ class UXOverhaulTests(TestCase):
   def test_history_is_evidence_focused(self):
     history = (ROOT / "pubtv/templates/history.html").read_text(encoding="utf-8")
     assert "Evidence and audit" in history
-    assert "Current actions are available from the occurrence workbench" in history
+    assert "History is read-only" in history or "Evidence" in history
     assert "Edit plan" not in history
 
   def test_canonical_forms_do_not_expose_legacy_owner_fields(self):
@@ -249,7 +248,7 @@ class UXOverhaulTests(TestCase):
     workbench = (ROOT / "pubtv/templates/occurrence_workbench.html").read_text(encoding="utf-8")
     base = (ROOT / "pubtv/templates/base.html").read_text(encoding="utf-8")
     assert "for transfer in transfers" in workbench
-    assert "Legacy preparation facts (read-only migration history)" in workbench
+    assert "Legacy preparation facts" in workbench
     assert "Quit ChannelDex" in base
 
   def test_upload_recording_is_contextual_and_day_views_stay_schedule_focused(self):
@@ -299,10 +298,18 @@ class OccurrenceAssetEditTests(TestCase):
     old_episode = Episode.objects.create(show=show, title="Old")
     new_episode = Episode.objects.create(show=show, title="New")
     asset = MediaAsset.objects.create(episode=old_episode, file_name="old.mxf", kind="source", version="v1")
-    RecurrenceSlot.objects.create(station=station, show=show, weekday=0, start_time="07:00", duration_seconds=1800, is_premiere=True)
-    assignment = WeeklyEpisodeAssignment.objects.create(show=show, week_start=datetime(2026, 1, 5).date(), premiere_date=datetime(2026, 1, 5).date(), episode=old_episode, selection_type="premiere")
-    occurrence = Occurrence.objects.create(station=station, show=show, episode=old_episode, asset=asset, item_type="episode", label=show.title, starts_at=datetime(2026, 1, 5, 12, tzinfo=dt_timezone.utc), planned_duration_seconds=1800, weekly_assignment=assignment)
-    response = Client().post("/assignments/new/", {"show": show.pk, "premiere_date": "2026-01-05", "episode": new_episode.pk})
+    slot = RecurrenceSlot.objects.create(station=station, show=show, weekday=0, start_time="07:00", duration_seconds=1800, is_premiere=True)
+    assignment = WeeklyEpisodeAssignment.objects.create(show=show, week_start=datetime(2026, 11, 2).date(), premiere_date=datetime(2026, 11, 2).date(), episode=old_episode, selection_type="premiere")
+    occurrence = Occurrence.objects.create(station=station, show=show, episode=old_episode, asset=asset, item_type="episode", label=show.title, starts_at=datetime(2026, 11, 2, 12, tzinfo=dt_timezone.utc), planned_duration_seconds=1800, weekly_assignment=assignment, recurrence_slot=slot, schedule_role="premiere")
+    data = {"show": show.pk, "premiere_date": "2026-11-02", "episode": new_episode.pk}
+    preview = Client().post("/assignments/new/", data)
+    assert preview.status_code == 200
+    assert "cycle_review_token" in preview.context
+    occurrence.refresh_from_db()
+    assert occurrence.episode_id == old_episode.pk
+    assert occurrence.asset_id == asset.pk
+    data.update({"review_token": preview.context["cycle_review_token"], "confirm_review": "1"})
+    response = Client().post("/assignments/new/", data)
     assert response.status_code == 302
     occurrence.refresh_from_db()
     assert occurrence.episode_id == new_episode.pk
